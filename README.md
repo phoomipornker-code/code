@@ -1,8 +1,8 @@
 # Battery Charger
 
 ตัวอย่างโค้ดเครื่องชาร์จแบตเตอรี่แบบ constant-current/constant-voltage
-(CC/CV) มีทั้ง Arduino sketch สำหรับควบคุมวงจรชาร์จ DC ต่ำ และ Python simulator
-สำหรับจำลองการชาร์จจาก command line
+(CC/CV) มีทั้ง ESP32 Arduino sketch สำหรับควบคุมวงจรชาร์จ PV/AC และ Python
+simulator สำหรับจำลองการชาร์จจาก command line
 
 > คำเตือน: อย่าต่อ Arduino เข้ากับไฟบ้านหรือแบตเตอรี่โดยตรง โค้ดนี้ต้องใช้ร่วมกับ
 > power stage, MOSFET/driver, fuse, sensor และระบบป้องกันที่เหมาะกับชนิดแบตเตอรี่
@@ -10,42 +10,64 @@
 
 ## Arduino usage
 
-เปิดไฟล์นี้ด้วย Arduino IDE:
+เปิดไฟล์นี้ด้วย Arduino IDE หรือ PlatformIO:
 
 ```text
 arduino/charger_controller/charger_controller.ino
 ```
 
-ค่าเริ่มต้นเหมาะกับแบตเตอรี่ Li-ion 1 cell:
+sketch นี้ออกแบบสำหรับ ESP32 และใช้:
 
-- bulk current: `1000 mA`
-- target voltage: `4.20 V`
-- max voltage cutoff: `4.25 V`
-- temperature range: `0 C` ถึง `45 C`
+- `Adafruit_ADS1X15` สำหรับ ADS1115 จำนวน 2 ตัว
+- `LiquidCrystal_I2C` สำหรับ LCD 20x4
+- Arduino-ESP32 core ที่รองรับ `ledcAttach(pin, freq, resolution)`
+- I2C pins: SDA `GPIO21`, SCL `GPIO22`
 
-ปรับค่าด้านบนของไฟล์ `.ino` ให้ตรงกับวงจรและแบตเตอรี่ของคุณก่อน upload
-โดยเฉพาะ:
+ค่าเริ่มต้นใน sketch:
 
-- `TARGET_VOLTAGE`, `MAX_VOLTAGE`, `BULK_CURRENT_MA`, `TAPER_CURRENT_MA`
-- `VOLTAGE_DIVIDER_R1`, `VOLTAGE_DIVIDER_R2`
-- `CURRENT_SENSOR_ZERO_V`, `CURRENT_SENSOR_MV_PER_AMP`
-- ค่า thermistor เช่น `THERMISTOR_BETA`
+- battery CV target: `58.0 V`
+- battery CC target: `5.0 A`
+- PV start threshold: `41.0 V`
+- PV critical undervoltage cutoff: `38.0 V`
+- AC input threshold: `140.0 V`
+- PWM frequency: `50 kHz`, resolution: `10-bit`
+
+ปรับค่าด้านบนของไฟล์ `.ino` ให้ตรงกับวงจรจริงก่อน upload โดยเฉพาะ:
+
+- `TARGET_CV_VOLTAGE`, `TARGET_CC_CURRENT`
+- `MIN_PV_VOLTAGE`, `UNDER_PV_VOLTAGE_CRIT`, `MIN_AC_VOLTAGE`
+- `MAX_DUTY_FORWARD`, `MAX_DUTY_BOOST`
+- ค่า PID `Kp`, `Ki`, `Kd`, `Kp_cc`, `Ki_cc`, `Kd_cc`, `Kp_cv`, `Ki_cv`, `Kd_cv`
+- ค่า calibration `OFFSET_*` และ `CAL_SCALE_*`
 
 ### Arduino pin map
 
-| Arduino pin | ใช้สำหรับ |
+| ESP32 pin | ใช้สำหรับ |
 | --- | --- |
-| D9 | PWM ไปยัง MOSFET/charger driver |
-| D8 | enable ขา driver หรือ relay |
-| D13 | fault LED |
-| A0 | อ่านแรงดันแบตเตอรี่ผ่าน voltage divider |
-| A1 | อ่านกระแสจาก current sensor |
-| A2 | อ่านอุณหภูมิจาก 10k NTC thermistor |
+| GPIO32 | relay PV |
+| GPIO33 | relay AC |
+| GPIO25 | ปุ่ม start, `INPUT_PULLUP` |
+| GPIO26 | ปุ่ม stop, `INPUT_PULLUP` |
+| GPIO14 | PWM forward/AC stage |
+| GPIO27 | PWM boost/PV stage |
+| GPIO21 | I2C SDA |
+| GPIO22 | I2C SCL |
 
-เปิด Serial Monitor ที่ `9600 baud` เพื่อดูสถานะ:
+### ADS1115 channel map
+
+| Device | Address | Channel | ใช้สำหรับ |
+| --- | --- | --- | --- |
+| `ads_volt` | `0x48` | A0 | PV voltage |
+| `ads_volt` | `0x48` | A2 | AC voltage |
+| `ads_volt` | `0x48` | A1 | Battery voltage |
+| `ads_curr` | `0x49` | A0 | PV current |
+| `ads_curr` | `0x49` | A1 | AC current |
+| `ads_curr` | `0x49` | A2 | Battery current |
+
+เปิด Serial Monitor ที่ `115200 baud` เพื่อดูสถานะ:
 
 ```text
-state=bulk voltage=3.912V current=984.2mA temperature=29.5C pwm=87
+[DEBUG INTERFACE] System: ON  | State: BOOST | Active Duty: 8%
 ```
 
 ## Python simulator
