@@ -38,9 +38,9 @@ const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
 const float CV_DEADBAND_V = 0.10;
 const float CV_SOFT_OVERVOLTAGE_V = 58.6;         // เข้าโซนนี้ให้กด Duty ลงแรงขึ้น
-const float BAT_OVERVOLTAGE_CUTOFF_V = 60.0;      // เกินค่านี้ต่อเนื่องจึงตัดระบบ
-const unsigned long BAT_OVERVOLTAGE_CONFIRM_MS = 1200;
-const float BAT_OVERVOLTAGE_INSTANT_V = 61.0;     // เกินค่านี้ให้ตัดระบบทันที
+const float BAT_OVERVOLTAGE_CUTOFF_V = 59.0;      // เกินค่านี้ให้สั่ง Duty = 0%
+const float BAT_OVERVOLTAGE_RECOVER_V = 58.6;     // ต้องลดต่ำกว่านี้จึงออกจากโหมดป้องกัน
+const unsigned long BAT_OVERVOLTAGE_CONFIRM_MS = 3000; // ถ้ายังเกินต่อเนื่องค่อยตัดระบบ
 const float FULL_DETECT_VOLTAGE = 58.3;
 const float FULL_END_CURRENT = 0.45;              // 15% ของกระแส CC (3A)
 const unsigned long FULL_CONFIRM_MS = 300000;     // เงื่อนไข FULL ต้องต่อเนื่อง 5 นาที
@@ -201,6 +201,7 @@ void TaskSampleData(void * pvParameters) {
     unsigned long last_sensor_error_log = 0;
     unsigned long full_condition_start_ms = 0;
     unsigned long overvoltage_start_ms = 0;
+    bool overvoltage_duty_zero_active = false;
 
     for(;;) {
         unsigned long now = millis();
@@ -273,29 +274,49 @@ void TaskSampleData(void * pvParameters) {
             Serial.println("[CRITICAL] ADC sample timeout. Auto-shutdown for safety.");
         }
 
-        // hard over-voltage protection: กันตัดหลอกจากสไปก์สั้น และยังคงมี emergency cutoff
-        if (system_ON) {
-            if (v_bat >= BAT_OVERVOLTAGE_INSTANT_V) {
-                forceSafeShutdown();
-                Serial.printf("[CRITICAL] Instant over-voltage %.2fV. Emergency shutdown.\n", v_bat);
+        // hard over-voltage protection แบบ 2 ชั้น:
+        // 1) เกินแรงดันให้ลด Duty = 0% ก่อน
+        // 2) ถ้ายังเกินต่อเนื่องนาน จึงค่อยตัดระบบ
+        if (system_ON && !charge_full_hold) {
+            if (v_bat_filt >= BAT_OVERVOLTAGE_CUTOFF_V) {
+                if (!overvoltage_duty_zero_active) {
+                    overvoltage_duty_zero_active = true;
+                    overvoltage_start_ms = now;
+                    raw_duty = 0;
+                    pid_integral = 0.0;
+                    pid_integral_cc = 0.0;
+                    pid_integral_cv = 0.0;
+                    pid_last_error = 0.0;
+                    pid_last_error_cc = 0.0;
+                    pid_last_error_cv = 0.0;
+                    Serial.printf("[WARN] Over-voltage %.2fV -> Force Duty 0%% and monitor.\n", v_bat_filt);
+                }
+            } else if (overvoltage_duty_zero_active && v_bat_filt <= BAT_OVERVOLTAGE_RECOVER_V) {
+                overvoltage_duty_zero_active = false;
                 overvoltage_start_ms = 0;
+                Serial.printf("[INFO] Voltage recovered %.2fV -> Exit over-voltage guard.\n", v_bat_filt);
+            }
+
+            if (overvoltage_duty_zero_active) {
+                raw_duty = 0;
+                ledcWrite(PWM_FORWARD_PIN, 0);
+                ledcWrite(PWM_BOOST_PIN, 0);
+
+                if ((now - overvoltage_start_ms >= BAT_OVERVOLTAGE_CONFIRM_MS) &&
+                    (v_bat_filt >= BAT_OVERVOLTAGE_CUTOFF_V)) {
+                    forceSafeShutdown();
+                    overvoltage_duty_zero_active = false;
+                    overvoltage_start_ms = 0;
+                    Serial.printf("[CRITICAL] Over-voltage persisted at %.2fV. Shutdown.\n", v_bat_filt);
+                }
+
+                last_millis = now;
+                active_duty_percent = 0;
                 vTaskDelay(20 / portTICK_PERIOD_MS);
                 continue;
             }
-
-            if (v_bat_filt >= BAT_OVERVOLTAGE_CUTOFF_V) {
-                if (overvoltage_start_ms == 0) overvoltage_start_ms = now;
-                if (now - overvoltage_start_ms >= BAT_OVERVOLTAGE_CONFIRM_MS) {
-                    forceSafeShutdown();
-                    Serial.printf("[CRITICAL] Sustained over-voltage %.2fV (filtered). Emergency shutdown.\n", v_bat_filt);
-                    overvoltage_start_ms = 0;
-                    vTaskDelay(20 / portTICK_PERIOD_MS);
-                    continue;
-                }
-            } else {
-                overvoltage_start_ms = 0;
-            }
         } else {
+            overvoltage_duty_zero_active = false;
             overvoltage_start_ms = 0;
         }
 
@@ -517,6 +538,7 @@ void TaskSampleData(void * pvParameters) {
             ledcWrite(PWM_FORWARD_PIN, 0);
             ledcWrite(PWM_BOOST_PIN, 0);
             full_condition_start_ms = 0;
+            overvoltage_duty_zero_active = false;
             overvoltage_start_ms = 0;
         }
 
