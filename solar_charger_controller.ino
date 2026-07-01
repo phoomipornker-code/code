@@ -42,8 +42,11 @@ const float BAT_OVERVOLTAGE_CUTOFF_V = 59.0;      // เกินค่านี
 const float BAT_OVERVOLTAGE_RECOVER_V = 58.6;     // ต้องลดต่ำกว่านี้จึงออกจากโหมดป้องกัน
 const unsigned long BAT_OVERVOLTAGE_CONFIRM_MS = 3000; // ถ้ายังเกินต่อเนื่องค่อยตัดระบบ
 const float CV_FINE_ZONE_V = 57.8;                 // ใกล้เต็มเริ่มเข้าโหมดปรับละเอียด
-const float CV_FINE_STEP_UP = 0.35;                // เพิ่ม duty ทีละน้อยมากในช่วง 0-2%
-const float CV_FINE_STEP_DOWN = -0.60;
+const float CV_FINE_STEP_UP = 0.18;                // เพิ่ม duty ทีละน้อยมากในช่วง 0-2%
+const float CV_FINE_STEP_DOWN = -0.30;
+const float CV_ULTRA_FINE_ZONE_V = 58.2;           // ช่วงท้ายก่อนเต็ม ใช้ step ละเอียดพิเศษ
+const float CV_ULTRA_FINE_STEP_UP = 0.08;
+const float CV_ULTRA_FINE_STEP_DOWN = -0.12;
 const float FULL_DETECT_VOLTAGE = 58.3;
 const float FULL_END_CURRENT = 0.45;              // 15% ของกระแส CC (3A)
 const unsigned long FULL_CONFIRM_MS = 300000;     // เงื่อนไข FULL ต้องต่อเนื่อง 5 นาที
@@ -453,6 +456,10 @@ void TaskSampleData(void * pvParameters) {
                 if (v_bat_filt >= CV_FINE_ZONE_V && raw_duty <= 25) {
                     if (final_battery_pid > CV_FINE_STEP_UP) final_battery_pid = CV_FINE_STEP_UP;
                     if (final_battery_pid < CV_FINE_STEP_DOWN) final_battery_pid = CV_FINE_STEP_DOWN;
+                }
+                if (v_bat_filt >= CV_ULTRA_FINE_ZONE_V && raw_duty <= 15) {
+                    if (final_battery_pid > CV_ULTRA_FINE_STEP_UP) final_battery_pid = CV_ULTRA_FINE_STEP_UP;
+                    if (final_battery_pid < CV_ULTRA_FINE_STEP_DOWN) final_battery_pid = CV_ULTRA_FINE_STEP_DOWN;
                 }
 
                 duty_step_accumulator += final_battery_pid;
