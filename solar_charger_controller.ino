@@ -42,11 +42,13 @@ const float BAT_OVERVOLTAGE_CUTOFF_V = 59.0;      // เกินค่านี
 const float BAT_OVERVOLTAGE_RECOVER_V = 58.6;     // ต้องลดต่ำกว่านี้จึงออกจากโหมดป้องกัน
 const unsigned long BAT_OVERVOLTAGE_CONFIRM_MS = 3000; // ถ้ายังเกินต่อเนื่องค่อยตัดระบบ
 const float CV_FINE_ZONE_V = 57.8;                 // ใกล้เต็มเริ่มเข้าโหมดปรับละเอียด
-const float CV_FINE_STEP_UP = 0.18;                // เพิ่ม duty ทีละน้อยมากในช่วง 0-2%
-const float CV_FINE_STEP_DOWN = -0.30;
+const float CV_FINE_STEP_UP = 0.06;                // เพิ่ม duty ทีละน้อยมากในช่วง 0-2%
+const float CV_FINE_STEP_DOWN = -0.10;
 const float CV_ULTRA_FINE_ZONE_V = 58.2;           // ช่วงท้ายก่อนเต็ม ใช้ step ละเอียดพิเศษ
-const float CV_ULTRA_FINE_STEP_UP = 0.08;
-const float CV_ULTRA_FINE_STEP_DOWN = -0.12;
+const float CV_ULTRA_FINE_STEP_UP = 0.03;
+const float CV_ULTRA_FINE_STEP_DOWN = -0.06;
+const unsigned long CV_FINE_UP_STEP_INTERVAL_MS = 400;      // หน่วงการเพิ่ม duty ขาขึ้น
+const unsigned long CV_ULTRA_FINE_UP_STEP_INTERVAL_MS = 900;
 const float FULL_DETECT_VOLTAGE = 58.3;
 const float FULL_END_CURRENT = 0.45;              // 15% ของกระแส CC (3A)
 const unsigned long FULL_CONFIRM_MS = 300000;     // เงื่อนไข FULL ต้องต่อเนื่อง 5 นาที
@@ -209,6 +211,7 @@ void TaskSampleData(void * pvParameters) {
     unsigned long overvoltage_start_ms = 0;
     bool overvoltage_duty_zero_active = false;
     float duty_step_accumulator = 0.0;
+    unsigned long last_forward_up_step_ms = 0;
 
     for(;;) {
         unsigned long now = millis();
@@ -406,6 +409,7 @@ void TaskSampleData(void * pvParameters) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
             if (currentState != STATE_FORWARD) {
                 duty_step_accumulator = 0.0;
+                last_forward_up_step_ms = 0;
             }
 
             if (currentState == STATE_FORWARD) {
@@ -469,6 +473,21 @@ void TaskSampleData(void * pvParameters) {
                 } else if (duty_step_accumulator <= -1.0) {
                     duty_step = (int)ceil(duty_step_accumulator);
                 }
+
+                // โซนปลาย CV: ขาขึ้นต้องช้ากว่าขาลงเพื่อลดการกระชากแรงดัน
+                if (duty_step > 0 && v_bat_filt >= CV_FINE_ZONE_V && raw_duty <= 25) {
+                    unsigned long min_up_interval = CV_FINE_UP_STEP_INTERVAL_MS;
+                    if (v_bat_filt >= CV_ULTRA_FINE_ZONE_V && raw_duty <= 15) {
+                        min_up_interval = CV_ULTRA_FINE_UP_STEP_INTERVAL_MS;
+                    }
+                    if (now - last_forward_up_step_ms < min_up_interval) {
+                        duty_step = 0;
+                        if (duty_step_accumulator > 0.95) duty_step_accumulator = 0.95;
+                    } else {
+                        last_forward_up_step_ms = now;
+                    }
+                }
+
                 raw_duty += duty_step;
                 duty_step_accumulator -= duty_step;
             }
