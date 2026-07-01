@@ -468,12 +468,14 @@ void TaskLCDLoop(void * pvParameters) {
 
         bool start_pressed = (current_start == LOW);
         bool stop_pressed  = (current_stop == LOW);
+        bool start_edge = (start_pressed && last_start_state == HIGH);
+        bool stop_edge  = (stop_pressed && last_stop_state == HIGH);
 
-        // โหมด momentary: กดติด ปล่อยดับ
-        if (stop_pressed) {
+        // โหมด latching: กด START ติดค้าง, กด STOP ถึงดับ
+        if (stop_edge) {
             system_ON = false;
             show_no_power_alert = false;
-        } else if (start_pressed) {
+        } else if (start_edge) {
             if (sensor_init_ok && (v_solar >= MIN_PV_VOLTAGE || v_ac_in >= MIN_AC_VOLTAGE)) {
                 system_ON = true;
                 show_no_power_alert = false;
@@ -482,9 +484,6 @@ void TaskLCDLoop(void * pvParameters) {
                 show_no_power_alert = true;
                 alert_millis = now;
             }
-        } else {
-            system_ON = false;
-            show_no_power_alert = false;
         }
         last_start_state = current_start; last_stop_state = current_stop;
 
