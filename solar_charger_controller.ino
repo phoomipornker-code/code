@@ -41,6 +41,9 @@ const float CV_SOFT_OVERVOLTAGE_V = 58.6;         // เข้าโซนนี
 const float BAT_OVERVOLTAGE_CUTOFF_V = 59.0;      // เกินค่านี้ให้สั่ง Duty = 0%
 const float BAT_OVERVOLTAGE_RECOVER_V = 58.6;     // ต้องลดต่ำกว่านี้จึงออกจากโหมดป้องกัน
 const unsigned long BAT_OVERVOLTAGE_CONFIRM_MS = 3000; // ถ้ายังเกินต่อเนื่องค่อยตัดระบบ
+const float CV_FINE_ZONE_V = 57.8;                 // ใกล้เต็มเริ่มเข้าโหมดปรับละเอียด
+const float CV_FINE_STEP_UP = 0.35;                // เพิ่ม duty ทีละน้อยมากในช่วง 0-2%
+const float CV_FINE_STEP_DOWN = -0.60;
 const float FULL_DETECT_VOLTAGE = 58.3;
 const float FULL_END_CURRENT = 0.45;              // 15% ของกระแส CC (3A)
 const unsigned long FULL_CONFIRM_MS = 300000;     // เงื่อนไข FULL ต้องต่อเนื่อง 5 นาที
@@ -202,6 +205,7 @@ void TaskSampleData(void * pvParameters) {
     unsigned long full_condition_start_ms = 0;
     unsigned long overvoltage_start_ms = 0;
     bool overvoltage_duty_zero_active = false;
+    float duty_step_accumulator = 0.0;
 
     for(;;) {
         unsigned long now = millis();
@@ -301,6 +305,7 @@ void TaskSampleData(void * pvParameters) {
                 raw_duty = 0;
                 ledcWrite(PWM_FORWARD_PIN, 0);
                 ledcWrite(PWM_BOOST_PIN, 0);
+                duty_step_accumulator = 0.0;
 
                 if ((now - overvoltage_start_ms >= BAT_OVERVOLTAGE_CONFIRM_MS) &&
                     (v_bat_filt >= BAT_OVERVOLTAGE_CUTOFF_V)) {
@@ -396,6 +401,9 @@ void TaskSampleData(void * pvParameters) {
 
         if (system_ON && currentState != STATE_OFF) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
+            if (currentState != STATE_FORWARD) {
+                duty_step_accumulator = 0.0;
+            }
 
             if (currentState == STATE_FORWARD) {
                 // =================================================================
@@ -440,8 +448,22 @@ void TaskSampleData(void * pvParameters) {
                 // จำกัดความเร็วการเร่ง/ลด ในหนึ่งรอบลูป (Slew-Rate Limit ฝั่งแบตเตอรี่)
                 if (final_battery_pid > 1.5) final_battery_pid = 1.5;
                 if (final_battery_pid < -4.0) final_battery_pid = -4.0;
+                
+                // โหมดละเอียดช่วงใกล้เต็มและ duty ต่ำ: สะสมเศษเพื่อลด step jump ที่ 0-2%
+                if (v_bat_filt >= CV_FINE_ZONE_V && raw_duty <= 25) {
+                    if (final_battery_pid > CV_FINE_STEP_UP) final_battery_pid = CV_FINE_STEP_UP;
+                    if (final_battery_pid < CV_FINE_STEP_DOWN) final_battery_pid = CV_FINE_STEP_DOWN;
+                }
 
-                raw_duty += (int)round(final_battery_pid);
+                duty_step_accumulator += final_battery_pid;
+                int duty_step = 0;
+                if (duty_step_accumulator >= 1.0) {
+                    duty_step = (int)floor(duty_step_accumulator);
+                } else if (duty_step_accumulator <= -1.0) {
+                    duty_step = (int)ceil(duty_step_accumulator);
+                }
+                raw_duty += duty_step;
+                duty_step_accumulator -= duty_step;
             }
             else if (currentState == STATE_BOOST) {
                 // =================================================================
@@ -540,6 +562,7 @@ void TaskSampleData(void * pvParameters) {
             full_condition_start_ms = 0;
             overvoltage_duty_zero_active = false;
             overvoltage_start_ms = 0;
+            duty_step_accumulator = 0.0;
         }
 
         last_millis = now;
