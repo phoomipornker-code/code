@@ -466,7 +466,14 @@ void TaskLCDLoop(void * pvParameters) {
         if (now - start_change_ms >= DEBOUNCE_MS) current_start = start_raw;
         if (now - stop_change_ms >= DEBOUNCE_MS) current_stop  = stop_raw;
 
-        if (current_start == LOW && last_start_state == HIGH) {
+        bool start_pressed = (current_start == LOW);
+        bool stop_pressed  = (current_stop == LOW);
+
+        // โหมด momentary: กดติด ปล่อยดับ
+        if (stop_pressed) {
+            system_ON = false;
+            show_no_power_alert = false;
+        } else if (start_pressed) {
             if (sensor_init_ok && (v_solar >= MIN_PV_VOLTAGE || v_ac_in >= MIN_AC_VOLTAGE)) {
                 system_ON = true;
                 show_no_power_alert = false;
@@ -475,8 +482,10 @@ void TaskLCDLoop(void * pvParameters) {
                 show_no_power_alert = true;
                 alert_millis = now;
             }
+        } else {
+            system_ON = false;
+            show_no_power_alert = false;
         }
-        if (current_stop == LOW && last_stop_state == HIGH) { system_ON = false; show_no_power_alert = false; }
         last_start_state = current_start; last_stop_state = current_stop;
 
         if (system_ON != last_system_state) {
@@ -537,6 +546,6 @@ void TaskLCDLoop(void * pvParameters) {
             }
         }
 
-        vTaskDelay(300 / portTICK_PERIOD_MS);
+        vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 }
