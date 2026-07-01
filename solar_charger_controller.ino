@@ -14,7 +14,14 @@ const int BUTTON_STOP_PIN  = 26;
 const int PWM_FORWARD_PIN  = 14;
 const int PWM_BOOST_PIN    = 27;
 
-const int PWM_FREQ         = 50000;
+const uint8_t PWM_PRESET_50K = 0;
+const uint8_t PWM_PRESET_60K = 1;
+const uint8_t PWM_PRESET_67K = 2;
+const uint8_t PWM_FREQ_PRESET = PWM_PRESET_50K;  // เปลี่ยนค่าเป็น PWM_PRESET_60K หรือ PWM_PRESET_67K เพื่อทดสอบ
+const int PWM_FREQ = (PWM_FREQ_PRESET == PWM_PRESET_67K) ? 67000 :
+                     (PWM_FREQ_PRESET == PWM_PRESET_60K) ? 60000 : 50000;
+const char* PWM_PRESET_LABEL = (PWM_FREQ_PRESET == PWM_PRESET_67K) ? "67kHz" :
+                               (PWM_FREQ_PRESET == PWM_PRESET_60K) ? "60kHz" : "50kHz";
 const int PWM_RES          = 10;
 
 Adafruit_ADS1115 ads_volt;
@@ -161,6 +168,7 @@ void setup() {
     Serial.begin(115200);
     Wire.begin(21, 22);
     Wire.setTimeOut(25);
+    Serial.printf("[CONFIG] PWM preset: %s (%d Hz), resolution: %d-bit\n", PWM_PRESET_LABEL, PWM_FREQ, PWM_RES);
 
     bool volt_ok = ads_volt.begin(0x48);
     bool curr_ok = ads_curr.begin(0x49);
