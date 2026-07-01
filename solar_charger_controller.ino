@@ -36,6 +36,11 @@ const int MAX_DUTY_BOOST   = 760;
 // ถ้าอ่าน ADC ไม่สำเร็จเกินช่วงนี้ ให้เข้าสู่โหมดปลอดภัย
 const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
+const float CV_DEADBAND_V = 0.10;
+const float FULL_DETECT_VOLTAGE = 58.3;
+const float FULL_END_CURRENT = 0.45;              // 15% ของกระแส CC (3A)
+const unsigned long FULL_CONFIRM_MS = 300000;     // เงื่อนไข FULL ต้องต่อเนื่อง 5 นาที
+const float RESTART_CHARGE_VOLTAGE = 55.2;        // แรงดันตกต่ำกว่านี้จึงกลับมาชาร์จใหม่
 
 // =========================================================================
 // ตัวแปรและค่าคงที่สำหรับ PID Control (โหมด BOOST คุมแรงดันแผงโซล่าเซลล์)
@@ -57,9 +62,9 @@ const float Kp_cc = 0.15;  // แบตเตอรี่ลิเธียม�
 const float Ki_cc = 0.01;
 const float Kd_cc = 0.005;
 
-const float Kp_cv = 0.8;   // ลูปคุมแรงดันสามารถตอบสนองได้เสถียรกว่า
-const float Ki_cv = 0.04;
-const float Kd_cv = 0.01;
+const float Kp_cv = 0.5;   // ลด Gain เพื่อให้ช่วงใกล้ CV แกว่งน้อยลง
+const float Ki_cv = 0.015;
+const float Kd_cv = 0.005;
 
 float pid_error_cc = 0.0, pid_last_error_cc = 0.0, pid_integral_cc = 0.0;
 float pid_error_cv = 0.0, pid_last_error_cv = 0.0, pid_integral_cv = 0.0;
@@ -91,7 +96,9 @@ const float NOISE_I_THRESHOLD = 0.08;
 // =========================================================================
 volatile float v_solar = 0, v_ac_in = 0, v_bat = 0;
 volatile float i_solar = 0, i_ac_in = 0, i_bat = 0;
+volatile float v_bat_filt = 0, i_bat_filt = 0;
 volatile bool system_ON = false;
+volatile bool charge_full_hold = false;
 volatile int active_duty_percent = 0;
 int raw_duty = 0;
 float total_Wh = 0;
@@ -109,18 +116,29 @@ SemaphoreHandle_t i2c_Mutex;
 
 float raw_mv_v0 = 0, raw_mv_v1 = 0, raw_mv_v2 = 0;
 float raw_mv_i0 = 0, raw_mv_i1 = 0, raw_mv_i2 = 0;
+float vbat_filter_buf[8] = {0};
+float ibat_filter_buf[8] = {0};
+float vbat_filter_sum = 0;
+float ibat_filter_sum = 0;
+int filter_index = 0;
+int filter_count = 0;
 
 void TaskSampleData(void * pvParameters);
 void TaskLCDLoop(void * pvParameters);
 
-static inline void forceSafeShutdown() {
-    system_ON = false;
+static inline void disablePowerStage() {
     currentState = STATE_OFF;
     raw_duty = 0;
     digitalWrite(RELAY_PV_PIN, LOW);
     digitalWrite(RELAY_AC_PIN, LOW);
     ledcWrite(PWM_FORWARD_PIN, 0);
     ledcWrite(PWM_BOOST_PIN, 0);
+}
+
+static inline void forceSafeShutdown() {
+    system_ON = false;
+    charge_full_hold = false;
+    disablePowerStage();
 }
 
 // =========================================================================
@@ -177,6 +195,7 @@ void TaskSampleData(void * pvParameters) {
     bool pv_is_collapsing = false;
     unsigned long last_debug_time = 0;
     unsigned long last_sensor_error_log = 0;
+    unsigned long full_condition_start_ms = 0;
 
     for(;;) {
         unsigned long now = millis();
@@ -225,6 +244,19 @@ void TaskSampleData(void * pvParameters) {
             if (fabs(i_ac_in) < NOISE_I_THRESHOLD) i_ac_in = 0.0;
             if (fabs(i_bat)   < NOISE_I_THRESHOLD) i_bat   = 0.0;
 
+            // ใช้ moving average ช่วยลดการสั่นของ CV รอบแรงดันใกล้เต็ม
+            vbat_filter_sum -= vbat_filter_buf[filter_index];
+            ibat_filter_sum -= ibat_filter_buf[filter_index];
+            vbat_filter_buf[filter_index] = v_bat;
+            ibat_filter_buf[filter_index] = i_bat;
+            vbat_filter_sum += vbat_filter_buf[filter_index];
+            ibat_filter_sum += ibat_filter_buf[filter_index];
+            filter_index = (filter_index + 1) % 8;
+            if (filter_count < 8) filter_count++;
+
+            v_bat_filt = vbat_filter_sum / (float)filter_count;
+            i_bat_filt = ibat_filter_sum / (float)filter_count;
+
             last_adc_sample_ms = now;
             sample_ok = true;
             xSemaphoreGive(i2c_Mutex);
@@ -237,6 +269,20 @@ void TaskSampleData(void * pvParameters) {
         }
 
         if (system_ON) {
+            if (charge_full_hold) {
+                disablePowerStage();
+                if ((v_bat_filt <= RESTART_CHARGE_VOLTAGE) &&
+                    (v_solar >= MIN_PV_VOLTAGE || v_ac_in >= MIN_AC_VOLTAGE)) {
+                    charge_full_hold = false;
+                    Serial.println("[INFO] Battery dropped to restart threshold. Charging resumed.");
+                }
+            }
+
+            if (charge_full_hold) {
+                vTaskDelay(20 / portTICK_PERIOD_MS);
+                continue;
+            }
+
             if (currentState == STATE_OFF) {
                 if (v_solar >= MIN_PV_VOLTAGE) {
                     ledcWrite(PWM_FORWARD_PIN, 0); ledcWrite(PWM_BOOST_PIN, 0);
@@ -305,7 +351,7 @@ void TaskSampleData(void * pvParameters) {
                 // =================================================================
 
                 // 1. ลูปควบคุมกระแสคงที่ (Constant Current Loop - CC) เป้าหมาย 3.0A
-                pid_error_cc = TARGET_CC_CURRENT - i_bat;
+                pid_error_cc = TARGET_CC_CURRENT - i_bat_filt;
                 pid_integral_cc += pid_error_cc;
                 pid_integral_cc = constrain(pid_integral_cc, -100, 100);
                 float delta_error_cc = pid_error_cc - pid_last_error_cc;
@@ -313,7 +359,11 @@ void TaskSampleData(void * pvParameters) {
                 pid_last_error_cc = pid_error_cc;
 
                 // 2. ลูปควบคุมแรงดันคงที่ (Constant Voltage Loop - CV) เป้าหมาย 58.4V
-                pid_error_cv = TARGET_CV_VOLTAGE - v_bat;
+                pid_error_cv = TARGET_CV_VOLTAGE - v_bat_filt;
+                if (fabs(pid_error_cv) <= CV_DEADBAND_V) {
+                    pid_error_cv = 0.0;
+                    pid_integral_cv *= 0.90;
+                }
                 pid_integral_cv += pid_error_cv;
                 pid_integral_cv = constrain(pid_integral_cv, -100, 100);
                 float delta_error_cv = pid_error_cv - pid_last_error_cv;
@@ -334,7 +384,7 @@ void TaskSampleData(void * pvParameters) {
                 // ☀️ โหมด PV: ระบบควบคุมแผงและระบบป้องกันฝั่งเอาต์พุตขั้นเด็ดขาด
                 // =================================================================
 
-                if (v_bat >= TARGET_CV_VOLTAGE || i_bat >= TARGET_CC_CURRENT) {
+                if (v_bat_filt >= TARGET_CV_VOLTAGE || i_bat_filt >= TARGET_CC_CURRENT) {
                     raw_duty -= 5;
                     pid_integral = 0;
                 }
@@ -405,9 +455,21 @@ void TaskSampleData(void * pvParameters) {
             }
 
             total_Wh += ((v_bat * i_bat) * (now - last_millis)) / 3600000.0;
+
+            if ((v_bat_filt >= FULL_DETECT_VOLTAGE) && (fabs(i_bat_filt) <= FULL_END_CURRENT)) {
+                if (full_condition_start_ms == 0) full_condition_start_ms = now;
+                if (now - full_condition_start_ms >= FULL_CONFIRM_MS) {
+                    charge_full_hold = true;
+                    disablePowerStage();
+                    Serial.println("[INFO] Battery FULL detected. Hold charging until restart threshold.");
+                }
+            } else {
+                full_condition_start_ms = 0;
+            }
         } else {
             ledcWrite(PWM_FORWARD_PIN, 0);
             ledcWrite(PWM_BOOST_PIN, 0);
+            full_condition_start_ms = 0;
         }
 
         last_millis = now;
@@ -415,15 +477,19 @@ void TaskSampleData(void * pvParameters) {
 
         if (now - last_debug_time >= 500) {
             last_debug_time = now;
+            const char* state_label = charge_full_hold
+                ? "FULL_HOLD"
+                : (currentState == STATE_BOOST ? "BOOST" : (currentState == STATE_FORWARD ? "FORWARD" : "OFF"));
             Serial.println("=========================================================================================");
             Serial.printf("[DEBUG INTERFACE] System: %s | State: %s | Active Duty: %d%%\n",
                           (system_ON ? "ON " : "OFF"),
-                          (currentState == STATE_BOOST ? "BOOST" : (currentState == STATE_FORWARD ? "FORWARD" : "OFF")),
+                          state_label,
                           active_duty_percent);
             Serial.printf("  [PV SOLAR] Calc Volt: %5.1f V | RAW Pin A0: %7.1f mV | Target: %.2f V\n", v_solar, raw_mv_v0, v_solar_target);
             Serial.printf("  [PV CURR ] Calc Amps: %5.2f A | RAW Pin A0: %7.1f mV\n", i_solar, raw_mv_i0);
             Serial.printf("  [BATTERY ] Calc Volt: %5.1f V | RAW Pin A1: %7.1f mV\n", v_bat, raw_mv_v2);
             Serial.printf("  [BAT CURR] Calc Amps: %5.2f A | RAW Pin A2: %7.1f mV\n", i_bat, raw_mv_i2);
+            Serial.printf("  [BAT FILT] Volt/Amps: %5.2f V / %5.2f A\n", v_bat_filt, i_bat_filt);
             Serial.printf("  [AC VOLT ] Calc Volt: %5.1f V | RAW Pin A2: %7.1f mV\n", v_ac_in, raw_mv_v1);
             Serial.println("=========================================================================================");
         }
@@ -474,10 +540,12 @@ void TaskLCDLoop(void * pvParameters) {
         // โหมด latching: กด START ติดค้าง, กด STOP ถึงดับ
         if (stop_edge) {
             system_ON = false;
+            charge_full_hold = false;
             show_no_power_alert = false;
         } else if (start_edge) {
             if (sensor_init_ok && (v_solar >= MIN_PV_VOLTAGE || v_ac_in >= MIN_AC_VOLTAGE)) {
                 system_ON = true;
+                charge_full_hold = false;
                 show_no_power_alert = false;
             } else {
                 system_ON = false;
@@ -513,7 +581,12 @@ void TaskLCDLoop(void * pvParameters) {
         }
 
         if (xSemaphoreTake(i2c_Mutex, 50)) {
-            if (system_ON) {
+            if (system_ON && charge_full_hold) {
+                lcd.setCursor(0, 0); lcd.print("BATTERY FULL HOLD    ");
+                lcd.setCursor(0, 1); lcd.printf("BAT:%5.1fV I:%4.2fA  ", v_bat_filt, i_bat_filt);
+                lcd.setCursor(0, 2); lcd.printf("Resume <= %5.1fV     ", RESTART_CHARGE_VOLTAGE);
+                lcd.setCursor(0, 3); lcd.print("Press STOP to cancel ");
+            } else if (system_ON) {
                 lcd.setCursor(0, 0); lcd.printf("ACTIVE   DUTY:%3d%%   ", active_duty_percent);
                 lcd.setCursor(0, 1); lcd.printf("%-8s   PWR:%5.1fWh ", (currentState == STATE_BOOST ? "BOOST PV" : "FORW AC"), total_Wh);
                 lcd.setCursor(0, 2); lcd.printf("IN :%5.1fV %5.1fA   ", (currentState == STATE_BOOST ? v_solar : v_ac_in), (currentState == STATE_BOOST ? i_solar : i_ac_in));
