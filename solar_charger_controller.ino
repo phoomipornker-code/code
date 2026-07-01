@@ -23,7 +23,7 @@ Adafruit_ADS1115 ads_curr;
 // =========================================================================
 // ตั้งค่าเป้าหมาย และ เกณฑ์ความปลอดภัยขั้นต่ำ (Safety Thresholds)
 // =========================================================================
-const float TARGET_CV_VOLTAGE = 58.0;
+const float TARGET_CV_VOLTAGE = 58.4;
 const float TARGET_CC_CURRENT = 3.0;
 
 const float MIN_PV_VOLTAGE = 41.0;         // เริ่มทำงานเมื่อแผงถึง 41V
@@ -34,7 +34,7 @@ const int MAX_DUTY_FORWARD = 490;
 const int MAX_DUTY_BOOST   = 760;
 
 // ถ้าอ่าน ADC ไม่สำเร็จเกินช่วงนี้ ให้เข้าสู่โหมดปลอดภัย
-const unsigned long ADC_STALE_TIMEOUT_MS = 300;
+const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
 
 // =========================================================================
@@ -312,7 +312,7 @@ void TaskSampleData(void * pvParameters) {
                 float pid_out_cc = (Kp_cc * pid_error_cc) + (Ki_cc * pid_integral_cc) + (Kd_cc * delta_error_cc);
                 pid_last_error_cc = pid_error_cc;
 
-                // 2. ลูปควบคุมแรงดันคงที่ (Constant Voltage Loop - CV) เป้าหมาย 58.0V
+                // 2. ลูปควบคุมแรงดันคงที่ (Constant Voltage Loop - CV) เป้าหมาย 58.4V
                 pid_error_cv = TARGET_CV_VOLTAGE - v_bat;
                 pid_integral_cv += pid_error_cv;
                 pid_integral_cv = constrain(pid_integral_cv, -100, 100);
@@ -444,7 +444,7 @@ void TaskLCDLoop(void * pvParameters) {
 
     bool start_raw_last = HIGH, stop_raw_last = HIGH;
     unsigned long start_change_ms = 0, stop_change_ms = 0;
-    const unsigned long DEBOUNCE_MS = 50;
+    const unsigned long DEBOUNCE_MS = 80;
 
     for(;;) {
         unsigned long now = millis();
@@ -495,6 +495,9 @@ void TaskLCDLoop(void * pvParameters) {
             } else {
                 lcd_mutex_fail_count++;
             }
+            if (!system_ON) {
+                total_Wh = 0;
+            }
             last_system_state = system_ON;
         }
 
@@ -521,7 +524,6 @@ void TaskLCDLoop(void * pvParameters) {
                 lcd.setCursor(0, 2); lcd.print(" Check PV / AC Line ");
                 lcd.setCursor(0, 3); lcd.print("  CANNOT ACTIVATE   ");
             } else {
-                total_Wh = 0;
                 lcd.setCursor(0, 0); lcd.print("STANDBY             ");
                 lcd.setCursor(0, 1); lcd.printf("PV :%5.1fV AC:%5.1fV", v_solar, v_ac_in);
                 lcd.setCursor(0, 2); lcd.printf("BATT:%5.1fV         ", v_bat);
