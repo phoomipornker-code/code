@@ -37,6 +37,9 @@ const int MAX_DUTY_BOOST   = 760;
 const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
 const float CV_DEADBAND_V = 0.10;
+const float CV_SOFT_OVERVOLTAGE_V = 58.6;         // เข้าโซนนี้ให้กด Duty ลงแรงขึ้น
+const float BAT_OVERVOLTAGE_CUTOFF_V = 59.2;      // เกินค่านี้ให้ตัดระบบทันที
+const int BAT_OVERVOLTAGE_COUNT_LIMIT = 3;        // กัน false trip จากสไปก์เดี่ยว
 const float FULL_DETECT_VOLTAGE = 58.3;
 const float FULL_END_CURRENT = 0.45;              // 15% ของกระแส CC (3A)
 const unsigned long FULL_CONFIRM_MS = 300000;     // เงื่อนไข FULL ต้องต่อเนื่อง 5 นาที
@@ -196,6 +199,7 @@ void TaskSampleData(void * pvParameters) {
     unsigned long last_debug_time = 0;
     unsigned long last_sensor_error_log = 0;
     unsigned long full_condition_start_ms = 0;
+    int overvoltage_count = 0;
 
     for(;;) {
         unsigned long now = millis();
@@ -266,6 +270,20 @@ void TaskSampleData(void * pvParameters) {
         if (!sample_ok && system_ON && (now - last_adc_sample_ms > ADC_STALE_TIMEOUT_MS)) {
             forceSafeShutdown();
             Serial.println("[CRITICAL] ADC sample timeout. Auto-shutdown for safety.");
+        }
+
+        // hard over-voltage protection: ป้องกันแรงดันพุ่งผิดปกติในโหมด CV
+        if (system_ON && (v_bat >= BAT_OVERVOLTAGE_CUTOFF_V || v_bat_filt >= BAT_OVERVOLTAGE_CUTOFF_V)) {
+            overvoltage_count++;
+            if (overvoltage_count >= BAT_OVERVOLTAGE_COUNT_LIMIT) {
+                forceSafeShutdown();
+                Serial.printf("[CRITICAL] Battery over-voltage detected (%.2fV / %.2fV). Emergency shutdown.\n", v_bat, v_bat_filt);
+                overvoltage_count = 0;
+                vTaskDelay(20 / portTICK_PERIOD_MS);
+                continue;
+            }
+        } else {
+            overvoltage_count = 0;
         }
 
         if (system_ON) {
@@ -373,6 +391,18 @@ void TaskSampleData(void * pvParameters) {
                 // เลือกค่าเอาต์พุตจากวงจร PID ที่ปลอดภัยและมีค่าต่ำที่สุด ป้องกัน Overshoot
                 float final_battery_pid = min(pid_out_cc, pid_out_cv);
 
+                // เข้าใกล้แรงดัน CV แล้ว จำกัดการเร่ง Duty ให้เบาลง
+                if (v_bat_filt > (TARGET_CV_VOLTAGE - 0.6) && final_battery_pid > 0.8) {
+                    final_battery_pid = 0.8;
+                }
+
+                // หากแรงดันเริ่มสูงกว่าเป้า ให้เร่งลด Duty ทันที
+                if (v_bat_filt >= CV_SOFT_OVERVOLTAGE_V) {
+                    final_battery_pid = -6.0;
+                    pid_integral_cc = 0.0;
+                    pid_integral_cv = 0.0;
+                }
+
                 // จำกัดความเร็วการเร่ง/ลด ในหนึ่งรอบลูป (Slew-Rate Limit ฝั่งแบตเตอรี่)
                 if (final_battery_pid > 1.5) final_battery_pid = 1.5;
                 if (final_battery_pid < -4.0) final_battery_pid = -4.0;
@@ -384,7 +414,11 @@ void TaskSampleData(void * pvParameters) {
                 // ☀️ โหมด PV: ระบบควบคุมแผงและระบบป้องกันฝั่งเอาต์พุตขั้นเด็ดขาด
                 // =================================================================
 
-                if (v_bat_filt >= TARGET_CV_VOLTAGE || i_bat_filt >= TARGET_CC_CURRENT) {
+                if (v_bat_filt >= CV_SOFT_OVERVOLTAGE_V) {
+                    raw_duty -= 10;
+                    pid_integral = 0;
+                }
+                else if (v_bat_filt >= TARGET_CV_VOLTAGE || i_bat_filt >= TARGET_CC_CURRENT) {
                     raw_duty -= 5;
                     pid_integral = 0;
                 }
@@ -470,6 +504,7 @@ void TaskSampleData(void * pvParameters) {
             ledcWrite(PWM_FORWARD_PIN, 0);
             ledcWrite(PWM_BOOST_PIN, 0);
             full_condition_start_ms = 0;
+            overvoltage_count = 0;
         }
 
         last_millis = now;
