@@ -24,7 +24,7 @@ Adafruit_ADS1115 ads_curr;
 // ตั้งค่าเป้าหมาย และ เกณฑ์ความปลอดภัยขั้นต่ำ (Safety Thresholds)
 // =========================================================================
 const float TARGET_CV_VOLTAGE = 58.0;
-const float TARGET_CC_CURRENT = 5.0;
+const float TARGET_CC_CURRENT = 3.0;
 
 const float MIN_PV_VOLTAGE = 41.0;         // เริ่มทำงานเมื่อแผงถึง 41V
 const float UNDER_PV_VOLTAGE_CRIT = 39.0;  // ต่ำกว่า 39V เกิน 2 วินาที สั่งตัด
@@ -304,7 +304,7 @@ void TaskSampleData(void * pvParameters) {
                 // 🔋 โหมด AC: ระบบควบคุม DUAL-LOOP PID (CC/CV CHARGING CONTROL)
                 // =================================================================
 
-                // 1. ลูปควบคุมกระแสคงที่ (Constant Current Loop - CC) เป้าหมาย 5.0A
+                // 1. ลูปควบคุมกระแสคงที่ (Constant Current Loop - CC) เป้าหมาย 3.0A
                 pid_error_cc = TARGET_CC_CURRENT - i_bat;
                 pid_integral_cc += pid_error_cc;
                 pid_integral_cc = constrain(pid_integral_cc, -100, 100);
