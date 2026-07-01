@@ -14,14 +14,7 @@ const int BUTTON_STOP_PIN  = 26;
 const int PWM_FORWARD_PIN  = 14;
 const int PWM_BOOST_PIN    = 27;
 
-const uint8_t PWM_PRESET_50K = 0;
-const uint8_t PWM_PRESET_60K = 1;
-const uint8_t PWM_PRESET_67K = 2;
-const uint8_t PWM_FREQ_PRESET = PWM_PRESET_50K;  // เปลี่ยนค่าเป็น PWM_PRESET_60K หรือ PWM_PRESET_67K เพื่อทดสอบ
-const int PWM_FREQ = (PWM_FREQ_PRESET == PWM_PRESET_67K) ? 67000 :
-                     (PWM_FREQ_PRESET == PWM_PRESET_60K) ? 60000 : 50000;
-const char* PWM_PRESET_LABEL = (PWM_FREQ_PRESET == PWM_PRESET_67K) ? "67kHz" :
-                               (PWM_FREQ_PRESET == PWM_PRESET_60K) ? "60kHz" : "50kHz";
+const int PWM_FREQ         = 50000;
 const int PWM_RES          = 10;
 
 Adafruit_ADS1115 ads_volt;
@@ -43,20 +36,31 @@ const int MAX_DUTY_BOOST   = 760;
 // ถ้าอ่าน ADC ไม่สำเร็จเกินช่วงนี้ ให้เข้าสู่โหมดปลอดภัย
 const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
-const float CV_DEADBAND_V = 0.10;
+const float CV_DEADBAND_V = 0.12;
 const float CV_SOFT_OVERVOLTAGE_V = 58.6;         // เข้าโซนนี้ให้กด Duty ลงแรงขึ้น
 const float BAT_OVERVOLTAGE_CUTOFF_V = 59.0;      // เกินค่านี้ให้สั่ง Duty = 0%
 const float BAT_OVERVOLTAGE_RECOVER_V = 58.6;     // ต้องลดต่ำกว่านี้จึงออกจากโหมดป้องกัน
 const unsigned long BAT_OVERVOLTAGE_CONFIRM_MS = 3000; // ถ้ายังเกินต่อเนื่องค่อยตัดระบบ
 const float CV_FINE_ZONE_V = 57.8;                 // ใกล้เต็มเริ่มเข้าโหมดปรับละเอียด
-const float CV_FINE_STEP_UP = 0.03;                // เพิ่ม duty ทีละน้อยมากในช่วง 0-2%
-const float CV_FINE_STEP_DOWN = -0.08;
+const float CV_FINE_STEP_UP = 0.02;                // เพิ่ม duty ให้ละเอียดขึ้น ลดอาการพุ่งในโซน 0-2%
+const float CV_FINE_STEP_DOWN = -0.10;
 const float CV_ULTRA_FINE_ZONE_V = 58.2;           // ช่วงท้ายก่อนเต็ม ใช้ step ละเอียดพิเศษ
-const float CV_ULTRA_FINE_STEP_UP = 0.01;
-const float CV_ULTRA_FINE_STEP_DOWN = -0.05;
-const float CV_RISE_LOCK_V = 58.25;                // สูงกว่าโซนนี้ห้ามเพิ่ม duty
-const unsigned long CV_FINE_UP_STEP_INTERVAL_MS = 900;      // หน่วงการเพิ่ม duty ขาขึ้น
-const unsigned long CV_ULTRA_FINE_UP_STEP_INTERVAL_MS = 1800;
+const float CV_ULTRA_FINE_STEP_UP = 0.005;
+const float CV_ULTRA_FINE_STEP_DOWN = -0.06;
+const float CV_RISE_LOCK_V = 58.20;                // สูงกว่าโซนนี้ห้ามเพิ่ม duty
+const unsigned long CV_FINE_UP_STEP_INTERVAL_MS = 1200;      // หน่วงการเพิ่ม duty ขาขึ้นให้ช้าลง
+const unsigned long CV_ULTRA_FINE_UP_STEP_INTERVAL_MS = 2600;
+const float CV_NEAR_TARGET_V = 57.4;               // เริ่มลด gain ของ CV PID เมื่อเข้าโซนใกล้เป้า
+const float CV_TIGHT_TARGET_V = 58.0;              // โซนท้ายก่อนเต็ม ลด gain เพิ่มเติม
+const float CV_INTEGRAL_LIMIT_NORMAL = 100.0;
+const float CV_INTEGRAL_LIMIT_NEAR = 55.0;
+const float CV_INTEGRAL_LIMIT_TIGHT = 30.0;
+const float CV_KP_SCALE_NEAR = 0.65;
+const float CV_KI_SCALE_NEAR = 0.60;
+const float CV_KD_SCALE_NEAR = 0.70;
+const float CV_KP_SCALE_TIGHT = 0.40;
+const float CV_KI_SCALE_TIGHT = 0.35;
+const float CV_KD_SCALE_TIGHT = 0.55;
 const float FULL_DETECT_VOLTAGE = 58.3;
 const float FULL_END_CURRENT = 0.45;              // 15% ของกระแส CC (3A)
 const unsigned long FULL_CONFIRM_MS = 300000;     // เงื่อนไข FULL ต้องต่อเนื่อง 5 นาที
@@ -82,9 +86,9 @@ const float Kp_cc = 0.15;  // แบตเตอรี่ลิเธียม�
 const float Ki_cc = 0.01;
 const float Kd_cc = 0.005;
 
-const float Kp_cv = 0.5;   // ลด Gain เพื่อให้ช่วงใกล้ CV แกว่งน้อยลง
-const float Ki_cv = 0.015;
-const float Kd_cv = 0.005;
+const float Kp_cv = 0.42;   // base gain: ใช้ adaptive scale ลดลงเองเมื่อเข้าใกล้เป้าหมาย
+const float Ki_cv = 0.010;
+const float Kd_cv = 0.004;
 
 float pid_error_cc = 0.0, pid_last_error_cc = 0.0, pid_integral_cc = 0.0;
 float pid_error_cv = 0.0, pid_last_error_cv = 0.0, pid_integral_cv = 0.0;
@@ -168,7 +172,6 @@ void setup() {
     Serial.begin(115200);
     Wire.begin(21, 22);
     Wire.setTimeOut(25);
-    Serial.printf("[CONFIG] PWM preset: %s (%d Hz), resolution: %d-bit\n", PWM_PRESET_LABEL, PWM_FREQ, PWM_RES);
 
     bool volt_ok = ads_volt.begin(0x48);
     bool curr_ok = ads_curr.begin(0x49);
@@ -221,6 +224,7 @@ void TaskSampleData(void * pvParameters) {
     bool overvoltage_duty_zero_active = false;
     float duty_step_accumulator = 0.0;
     unsigned long last_forward_up_step_ms = 0;
+    float cv_derivative_filt = 0.0;
 
     for(;;) {
         unsigned long now = millis();
@@ -308,6 +312,7 @@ void TaskSampleData(void * pvParameters) {
                     pid_last_error = 0.0;
                     pid_last_error_cc = 0.0;
                     pid_last_error_cv = 0.0;
+                    cv_derivative_filt = 0.0;
                     Serial.printf("[WARN] Over-voltage %.2fV -> Force Duty 0%% and monitor.\n", v_bat_filt);
                 }
             } else if (overvoltage_duty_zero_active && v_bat_filt <= BAT_OVERVOLTAGE_RECOVER_V) {
@@ -369,6 +374,7 @@ void TaskSampleData(void * pvParameters) {
                     pid_integral = 0; pid_last_error = 0;
                     pid_integral_cc = 0; pid_last_error_cc = 0;
                     pid_integral_cv = 0; pid_last_error_cv = 0;
+                    cv_derivative_filt = 0.0;
                     raw_duty = 20;
                     pv_is_collapsing = false;
                 }
@@ -380,6 +386,7 @@ void TaskSampleData(void * pvParameters) {
                     currentState = STATE_FORWARD;
                     pid_integral_cc = 0; pid_last_error_cc = 0;
                     pid_integral_cv = 0; pid_last_error_cv = 0;
+                    cv_derivative_filt = 0.0;
                     raw_duty = 10;
                 }
                 else {
@@ -438,20 +445,52 @@ void TaskSampleData(void * pvParameters) {
                 pid_error_cv = TARGET_CV_VOLTAGE - v_bat_filt;
                 if (fabs(pid_error_cv) <= CV_DEADBAND_V) {
                     pid_error_cv = 0.0;
-                    pid_integral_cv *= 0.90;
+                    pid_integral_cv *= 0.88;
                 }
-                pid_integral_cv += pid_error_cv;
-                pid_integral_cv = constrain(pid_integral_cv, -100, 100);
+
+                float cv_kp_scale = 1.0;
+                float cv_ki_scale = 1.0;
+                float cv_kd_scale = 1.0;
+                float cv_integral_limit = CV_INTEGRAL_LIMIT_NORMAL;
+                if (v_bat_filt >= CV_NEAR_TARGET_V) {
+                    cv_kp_scale = CV_KP_SCALE_NEAR;
+                    cv_ki_scale = CV_KI_SCALE_NEAR;
+                    cv_kd_scale = CV_KD_SCALE_NEAR;
+                    cv_integral_limit = CV_INTEGRAL_LIMIT_NEAR;
+                }
+                if (v_bat_filt >= CV_TIGHT_TARGET_V) {
+                    cv_kp_scale = CV_KP_SCALE_TIGHT;
+                    cv_ki_scale = CV_KI_SCALE_TIGHT;
+                    cv_kd_scale = CV_KD_SCALE_TIGHT;
+                    cv_integral_limit = CV_INTEGRAL_LIMIT_TIGHT;
+                }
+
+                bool allow_cv_integral =
+                    (pid_error_cv > 0.0 && raw_duty < (allowed_max_duty - 3)) ||
+                    (pid_error_cv < 0.0 && raw_duty > 3);
+                if (allow_cv_integral) {
+                    pid_integral_cv += pid_error_cv;
+                } else {
+                    pid_integral_cv *= 0.96;
+                }
+                pid_integral_cv = constrain(pid_integral_cv, -cv_integral_limit, cv_integral_limit);
                 float delta_error_cv = pid_error_cv - pid_last_error_cv;
-                float pid_out_cv = (Kp_cv * pid_error_cv) + (Ki_cv * pid_integral_cv) + (Kd_cv * delta_error_cv);
+                cv_derivative_filt = (0.80 * cv_derivative_filt) + (0.20 * delta_error_cv);
+                float pid_out_cv =
+                    ((Kp_cv * cv_kp_scale) * pid_error_cv) +
+                    ((Ki_cv * cv_ki_scale) * pid_integral_cv) +
+                    ((Kd_cv * cv_kd_scale) * cv_derivative_filt);
                 pid_last_error_cv = pid_error_cv;
+                if (v_bat_filt >= (TARGET_CV_VOLTAGE - 0.8) && pid_out_cv > 0.18) pid_out_cv = 0.18;
+                if (v_bat_filt >= (TARGET_CV_VOLTAGE - 0.35) && pid_out_cv > 0.10) pid_out_cv = 0.10;
+                if (v_bat_filt >= (TARGET_CV_VOLTAGE - 0.15) && pid_out_cv > 0.05) pid_out_cv = 0.05;
 
                 // เลือกค่าเอาต์พุตจากวงจร PID ที่ปลอดภัยและมีค่าต่ำที่สุด ป้องกัน Overshoot
                 float final_battery_pid = min(pid_out_cc, pid_out_cv);
 
                 // เข้าใกล้แรงดัน CV แล้ว จำกัดการเร่ง Duty ให้เบาลง
-                if (v_bat_filt > (TARGET_CV_VOLTAGE - 0.6) && final_battery_pid > 0.25) {
-                    final_battery_pid = 0.25;
+                if (v_bat_filt > (TARGET_CV_VOLTAGE - 0.8) && final_battery_pid > 0.18) {
+                    final_battery_pid = 0.18;
                 }
 
                 // หากแรงดันเริ่มสูงกว่าเป้า ให้เร่งลด Duty ทันที
