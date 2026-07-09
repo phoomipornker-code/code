@@ -119,6 +119,9 @@ SemaphoreHandle_t i2c_Mutex;
 
 float raw_mv_v0 = 0, raw_mv_v1 = 0, raw_mv_v2 = 0;
 float raw_mv_i0 = 0, raw_mv_i1 = 0, raw_mv_i2 = 0;
+float current_offset_i0 = OFFSET_I_SOLAR;
+float current_offset_i1 = OFFSET_I_AC;
+float current_offset_i2 = OFFSET_I_BAT;
 float vbat_filter_buf[8] = {0};
 float ibat_filter_buf[8] = {0};
 float vbat_filter_sum = 0;
@@ -128,6 +131,7 @@ int filter_count = 0;
 
 void TaskSampleData(void * pvParameters);
 void TaskLCDLoop(void * pvParameters);
+void calibrateCurrentOffsetsAtBoot();
 
 static inline void disablePowerStage() {
     currentState = STATE_OFF;
@@ -143,6 +147,31 @@ static inline void forceSafeShutdown() {
     system_ON = false;
     charge_full_hold = false;
     disablePowerStage();
+}
+
+void calibrateCurrentOffsetsAtBoot() {
+    const int CAL_SAMPLES = 80;
+    float sum_i0 = 0.0;
+    float sum_i1 = 0.0;
+    float sum_i2 = 0.0;
+
+    // Calibrate zero-current baseline while power stage is disabled.
+    disablePowerStage();
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+
+    for (int i = 0; i < CAL_SAMPLES; i++) {
+        sum_i0 += ads_curr.readADC_SingleEnded(0) * 0.1875;
+        sum_i1 += ads_curr.readADC_SingleEnded(1) * 0.1875;
+        sum_i2 += ads_curr.readADC_SingleEnded(2) * 0.1875;
+        vTaskDelay(2 / portTICK_PERIOD_MS);
+    }
+
+    current_offset_i0 = sum_i0 / CAL_SAMPLES;
+    current_offset_i1 = sum_i1 / CAL_SAMPLES;
+    current_offset_i2 = sum_i2 / CAL_SAMPLES;
+
+    Serial.printf("[CAL] Current zero offsets (mV): I0=%.2f I1=%.2f I2=%.2f\n",
+                  current_offset_i0, current_offset_i1, current_offset_i2);
 }
 
 // =========================================================================
@@ -176,6 +205,7 @@ void setup() {
         Serial.println("[FATAL] ADS1115 init failed. System is locked in safe standby.");
         forceSafeShutdown();
     } else {
+        calibrateCurrentOffsetsAtBoot();
         last_adc_sample_ms = millis();
     }
 
@@ -228,9 +258,9 @@ void TaskSampleData(void * pvParameters) {
             float mv_pure_v1 = raw_mv_v1 - OFFSET_V_AC;    if (mv_pure_v1 < 0.0) mv_pure_v1 = 0.0;
             float mv_pure_v2 = raw_mv_v2 - OFFSET_V_BAT;   if (mv_pure_v2 < 0.0) mv_pure_v2 = 0.0;
 
-            float mv_pure_i0 = raw_mv_i0 - OFFSET_I_SOLAR;
-            float mv_pure_i1 = raw_mv_i1 - OFFSET_I_AC;
-            float mv_pure_i2 = raw_mv_i2 - OFFSET_I_BAT;
+            float mv_pure_i0 = raw_mv_i0 - current_offset_i0;
+            float mv_pure_i1 = raw_mv_i1 - current_offset_i1;
+            float mv_pure_i2 = raw_mv_i2 - current_offset_i2;
 
             v_solar = (mv_pure_v0 / 1000.0) * CAL_SCALE_V_SOLAR;
             v_ac_in = (mv_pure_v1 / 1000.0) * CAL_SCALE_V_AC;
