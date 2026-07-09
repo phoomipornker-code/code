@@ -67,10 +67,15 @@ const float BOOST_MPPT_TARGET_MIN_LOW_SUN = 38.5;
 const float BOOST_LOW_SUN_ENTRY_V = 40.8;
 const float BOOST_LOW_SUN_EXIT_V = 41.6;
 const float BOOST_BAT_CURRENT_LIMIT_MARGIN_A = 0.20;
+const float BOOST_BAT_CURRENT_HARD_EXTRA_A = 0.35;
+const int BOOST_DUTY_TRIM_SOFT = 1;
+const int BOOST_DUTY_TRIM_HARD = 2;
 const float BOOST_PID_POS_LIMIT = 1.0;
-const float BOOST_PID_NEG_LIMIT = -2.0;
+const float BOOST_PID_NEG_LIMIT_NORMAL = -1.2;
+const float BOOST_PID_NEG_LIMIT_LOW_SUN = -0.8;
 const float BOOST_SOFTSTART_STEP = 1.0;
 const float BOOST_MIN_VALID_PV_V = 5.0;
+const float BOOST_VSOLAR_COLLAPSE_STEP = -3.0;
 const float BOOST_PV_SHUTDOWN_LOW_SUN_V = 37.5;
 const unsigned long BOOST_PV_SHUTDOWN_NORMAL_MS = 2000;
 const unsigned long BOOST_PV_SHUTDOWN_LOW_SUN_MS = 7000;
@@ -562,8 +567,15 @@ void TaskSampleData(void * pvParameters) {
                     raw_duty -= 10;
                     pid_integral = 0;
                 }
-                else if (v_bat_filt >= TARGET_CV_VOLTAGE || i_bat_filt >= (TARGET_CC_CURRENT + BOOST_BAT_CURRENT_LIMIT_MARGIN_A)) {
-                    raw_duty -= 3;
+                else if (v_bat_filt >= TARGET_CV_VOLTAGE) {
+                    raw_duty -= BOOST_DUTY_TRIM_HARD;
+                    pid_integral = 0;
+                }
+                else if (i_bat_filt >= (TARGET_CC_CURRENT + BOOST_BAT_CURRENT_LIMIT_MARGIN_A)) {
+                    float over_current_a = i_bat_filt - TARGET_CC_CURRENT;
+                    raw_duty -= (over_current_a >= (BOOST_BAT_CURRENT_LIMIT_MARGIN_A + BOOST_BAT_CURRENT_HARD_EXTRA_A))
+                        ? BOOST_DUTY_TRIM_HARD
+                        : BOOST_DUTY_TRIM_SOFT;
                     pid_integral = 0;
                 }
                 else if (v_solar <= BOOST_MIN_VALID_PV_V) {
@@ -613,12 +625,13 @@ void TaskSampleData(void * pvParameters) {
                     } else {
                         if (pid_output > BOOST_PID_POS_LIMIT) pid_output = BOOST_PID_POS_LIMIT;
                     }
-                    if (pid_output < BOOST_PID_NEG_LIMIT) pid_output = BOOST_PID_NEG_LIMIT;
+                    float boost_pid_neg_limit = low_sun_mode ? BOOST_PID_NEG_LIMIT_LOW_SUN : BOOST_PID_NEG_LIMIT_NORMAL;
+                    if (pid_output < boost_pid_neg_limit) pid_output = boost_pid_neg_limit;
 
                     if (v_solar <= 40.5) {
                         if (pid_output > 0) pid_output = 0;
-                        if (v_solar <= 40.0) pid_output = -5.0;
-                        else if (pid_output < BOOST_PID_NEG_LIMIT) pid_output = BOOST_PID_NEG_LIMIT;
+                        if (v_solar <= 40.0) pid_output = BOOST_VSOLAR_COLLAPSE_STEP;
+                        else if (pid_output < boost_pid_neg_limit) pid_output = boost_pid_neg_limit;
                     }
 
                     raw_duty += (int)round(pid_output);
