@@ -23,9 +23,6 @@ Adafruit_ADS1115 ads_curr;
 // =========================================================================
 // ตั้งค่าเป้าหมาย และ เกณฑ์ความปลอดภัยขั้นต่ำ (Safety Thresholds)
 // =========================================================================
-const float TARGET_CV_VOLTAGE = 58.4;
-const float TARGET_CC_CURRENT = 3.0;
-
 const float MIN_PV_VOLTAGE_START = 40.0;   // เกณฑ์เริ่มทำงานฝั่ง PV (ผ่อนเล็กน้อยให้เริ่มติดง่ายขึ้น)
 const float MIN_AC_VOLTAGE_START = 120.0;  // เกณฑ์เริ่มทำงานฝั่ง AC (ช่วยกรณีคาลิเบรตต่ำกว่าจริง)
 const float MIN_AC_VOLTAGE_KEEP = 110.0;   // เกณฑ์คงการทำงานฝั่ง AC
@@ -40,66 +37,15 @@ const TickType_t I2C_MUTEX_TIMEOUT_SAMPLE_TICKS = pdMS_TO_TICKS(50);
 const TickType_t I2C_MUTEX_TIMEOUT_LCD_TICKS = pdMS_TO_TICKS(120);
 const unsigned long LCD_RECOVER_RETRY_MS = 1500;
 const unsigned long LCD_MUTEX_WARN_MS = 2000;
-const float CV_DEADBAND_V = 0.12;
-const float CV_SOFT_OVERVOLTAGE_V = 58.6;         // เข้าโซนนี้ให้กด Duty ลงแรงขึ้น
 const float BAT_OVERVOLTAGE_CUTOFF_V = 59.0;      // เกินค่านี้ให้สั่ง Duty = 0%
 const float BAT_OVERVOLTAGE_RECOVER_V = 58.6;     // ต้องลดต่ำกว่านี้จึงออกจากโหมดป้องกัน
 const unsigned long BAT_OVERVOLTAGE_CONFIRM_MS = 3000; // ถ้ายังเกินต่อเนื่องค่อยตัดระบบ
-const float CV_FINE_ZONE_V = 57.8;                 // ใกล้เต็มเริ่มเข้าโหมดปรับละเอียด
-const float CV_FINE_STEP_UP = 0.02;                // เพิ่ม duty ให้ละเอียดขึ้น ลดอาการพุ่งในโซน 0-2%
-const float CV_FINE_STEP_DOWN = -0.10;
-const float CV_ULTRA_FINE_ZONE_V = 58.2;           // ช่วงท้ายก่อนเต็ม ใช้ step ละเอียดพิเศษ
-const float CV_ULTRA_FINE_STEP_UP = 0.005;
-const float CV_ULTRA_FINE_STEP_DOWN = -0.06;
-const float CV_RISE_LOCK_V = 58.20;                // สูงกว่าโซนนี้ห้ามเพิ่ม duty
-const unsigned long CV_FINE_UP_STEP_INTERVAL_MS = 1200;      // หน่วงการเพิ่ม duty ขาขึ้น (อย่าตั้งสูงมากจนชาร์จไม่เข้า)
-const unsigned long CV_ULTRA_FINE_UP_STEP_INTERVAL_MS = 2600;
-const float MIN_REASONABLE_KP_CV = 0.10;
-const float MAX_REASONABLE_KI_CC = 0.05;
-const unsigned long MAX_REASONABLE_CV_FINE_UP_INTERVAL_MS = 3000;
-const unsigned long BOOST_MPPT_INTERVAL_MS = 150;
-const float BOOST_MPPT_V_STEP_NORMAL = 0.08;
-const float BOOST_MPPT_V_STEP_LOW_SUN = 0.05;
-const float BOOST_MPPT_MIN_DELTA_P_W = 0.25;
 const float BOOST_MPPT_TARGET_MIN_NORMAL = 40.8;
 const float BOOST_MPPT_TARGET_MIN_LOW_SUN = 39.8;
 const float BOOST_MPPT_TARGET_CEILING_V = 41.0;    // ชนเพดาน MPPT target ที่ 41V ตามต้องการ
 const float BOOST_PV_HOLD_MIN_V = 41.0;            // ต้องไม่สูงกว่า ceiling ไม่งั้นจะดึง duty ลงตลอด
-const float BOOST_PV_HOLD_BAND_V = 0.25;
 const float BOOST_LOW_SUN_ENTRY_V = 40.6;
 const float BOOST_LOW_SUN_EXIT_V = 41.3;
-const float BOOST_BAT_CURRENT_LIMIT_MARGIN_A = 0.20;
-const float BOOST_HOLD_CV_MARGIN_V = 0.0;          // ถึงจุดจำกัดให้ "หยุดเพิ่ม duty" แทนการตัดลงทันที
-const float BOOST_PID_POS_LIMIT = 1.0;
-const float BOOST_PID_NEG_LIMIT_NORMAL = -1.0;
-const float BOOST_PID_NEG_LIMIT_LOW_SUN = -0.6;
-const float BOOST_SOFTSTART_STEP = 1.0;
-const float BOOST_MIN_VALID_PV_V = 5.0;
-const float BOOST_VSOLAR_COLLAPSE_STEP = -2.0;
-const float BOOST_VSOLAR_GUARD_OFFSET_NORMAL_V = 0.2;
-const float BOOST_VSOLAR_GUARD_OFFSET_LOW_SUN_V = -0.05;
-const float BOOST_VSOLAR_CRITICAL_OFFSET_NORMAL_V = -0.2;
-const float BOOST_VSOLAR_CRITICAL_OFFSET_LOW_SUN_V = -0.35;
-const float BOOST_LANDING_BAND_V = 0.6;            // เข้าโซนลงจอดเมื่อแรงดันแผงใกล้เป้า
-const float BOOST_LANDING_BAND_A = 0.25;           // หรือกระแสแบตใกล้ CC ให้ชะลอขาลง
-const float BOOST_TARGET_DEADBAND_V = 0.12;        // ใกล้จุด MPPT ให้ลดการตอบสนองขาขึ้น
-const float BOOST_POS_LIMIT_NEAR_TARGET = 0.4;
-const unsigned long BOOST_LANDING_UP_INTERVAL_MS = 140;
-const unsigned long BOOST_LANDING_UP_INTERVAL_LOW_SUN_MS = 220;
-const unsigned long BOOST_LANDING_DOWN_INTERVAL_MS = 120;
-const unsigned long BOOST_LANDING_DOWN_INTERVAL_LOW_SUN_MS = 180;
-const float BOOST_FAST_FALL_DV_THRESHOLD_V = -0.22; // ถ้า PV ตกเร็ว ให้เร่งลด duty ทันแสงตก
-const float BOOST_FAST_FALL_ERR_THRESHOLD_V = -0.45;
-const int BOOST_FAST_FALL_DOWN_STEP = -2;
-const unsigned long BOOST_FAST_FALL_DOWN_INTERVAL_MS = 60;
-const float BOOST_RECOVERY_PV_HEADROOM_V = 1.8;    // PV สูงกว่าเป้ามาก แต่ชาร์จไม่เข้า -> กัน duty stall
-const float BOOST_RECOVERY_BAT_MARGIN_V = 1.2;
-const float BOOST_RECOVERY_CHARGE_CURRENT_A = 0.20;
-const int BOOST_RECOVERY_MIN_DUTY = 14;
-const unsigned long BOOST_RECOVERY_CONFIRM_MS = 350;
-const int BOOST_LOW_SUN_MIN_DUTY = 8;
-const float BOOST_LOW_SUN_HOLD_MIN_V = 38.8;
-const float BOOST_LOW_SUN_HOLD_MAX_V = 40.0;
 const float BOOST_PV_SHUTDOWN_V = 38.0;            // ตัดเมื่อ PV ต่ำกว่า 38V
 const unsigned long BOOST_PV_SHUTDOWN_CONFIRM_MS = 2000;
 const float FULL_DETECT_VOLTAGE = 58.3;
@@ -107,32 +53,8 @@ const float FULL_END_CURRENT = 0.45;              // 15% ของกระแ�
 const unsigned long FULL_CONFIRM_MS = 300000;     // เงื่อนไข FULL ต้องต่อเนื่อง 5 นาที
 const float RESTART_CHARGE_VOLTAGE = 55.2;        // แรงดันตกต่ำกว่านี้จึงกลับมาชาร์จใหม่
 
-// =========================================================================
-// ตัวแปรและค่าคงที่สำหรับ PID Control (โหมด BOOST คุมแรงดันแผงโซล่าเซลล์)
-// =========================================================================
-const float Kp = 1.0;
-const float Ki = 0.05;
-const float Kd = 0.02;
-
-float pid_error = 0.0;
-float pid_last_error = 0.0;
-float pid_integral = 0.0;
-float pid_derivative = 0.0;
+// ใช้เก็บจุดอ้างอิงแรงดันฝั่ง PV สำหรับแสดงผล
 float v_solar_target = 42.0;
-
-// =========================================================================
-// ตัวแปรและค่าคงที่สำหรับ PID Control (โหมด CC/CV ในการชาร์จแบตเตอรี่ลิเธียม)
-// =========================================================================
-const float Kp_cc = 0.15;  // แบตเตอรี่ลิเธียมความต้านทานต่ำมาก Gain ต้องน้อยเพื่อกันกระแสกระชาก
-const float Ki_cc = 0.01;
-const float Kd_cc = 0.005;
-
-const float Kp_cv = 0.42;   // ถ้าต่ำเกินไปจะเร่ง duty ไม่พอจนดูเหมือนไม่ชาร์จ
-const float Ki_cv = 0.010;
-const float Kd_cv = 0.004;
-
-float pid_error_cc = 0.0, pid_last_error_cc = 0.0, pid_integral_cc = 0.0;
-float pid_error_cv = 0.0, pid_last_error_cv = 0.0, pid_integral_cv = 0.0;
 
 // =========================================================================
 // 🔍 ส่วนปรับแต่งการเพี้ยนและขจัดสัญญาณรบกวน (Calibration Zone)
@@ -214,15 +136,6 @@ void setup() {
     Wire.begin(21, 22);
     Wire.setTimeOut(25);
     Wire.setClock(400000);  // ลดเวลาจับ bus ของทั้ง ADS/LCD ลดอาการจอค้างจากการแย่ง I2C
-    if (Kp_cv < MIN_REASONABLE_KP_CV) {
-        Serial.printf("[WARN] Kp_cv=%.3f too low. Fallback to 0.42 will be used.\n", Kp_cv);
-    }
-    if (Ki_cc > MAX_REASONABLE_KI_CC) {
-        Serial.printf("[WARN] Ki_cc=%.3f too high. Fallback to 0.01 will be used.\n", Ki_cc);
-    }
-    if (CV_FINE_UP_STEP_INTERVAL_MS > MAX_REASONABLE_CV_FINE_UP_INTERVAL_MS) {
-        Serial.printf("[WARN] CV_FINE_UP_STEP_INTERVAL_MS=%lu too long. Fallback to 1200ms will be used.\n", CV_FINE_UP_STEP_INTERVAL_MS);
-    }
     if (BOOST_PV_HOLD_MIN_V > BOOST_MPPT_TARGET_CEILING_V) {
         Serial.printf("[WARN] BOOST_PV_HOLD_MIN_V=%.2f is above ceiling %.2f. Effective hold will be clamped to ceiling.\n",
                       BOOST_PV_HOLD_MIN_V, BOOST_MPPT_TARGET_CEILING_V);
@@ -265,13 +178,9 @@ void setup() {
 void loop() { vTaskDelay(1000); }
 
 // =========================================================================
-// TASK 1: การคำนวณข้อมูลสัญญานทางไฟฟ้าและลูป PID ควบคุมแปลงผันกำลังไฟฟ้า
+// TASK 1: การคำนวณข้อมูลสัญญานทางไฟฟ้าและส่วนควบคุม (ถูกปิดตามคำขอ)
 // =========================================================================
 void TaskSampleData(void * pvParameters) {
-    float p_solar_old = 0.0;
-    float v_solar_old = 0.0;
-    int mppt_direction = 1;
-    unsigned long last_mppt_time = 0;
     bool low_sun_mode = false;
 
     unsigned long pv_collapse_start_time = 0;
@@ -281,19 +190,6 @@ void TaskSampleData(void * pvParameters) {
     unsigned long full_condition_start_ms = 0;
     unsigned long overvoltage_start_ms = 0;
     bool overvoltage_duty_zero_active = false;
-    float duty_step_accumulator = 0.0;
-    float boost_duty_step_accumulator = 0.0;
-    bool boost_fast_fall = false;
-    unsigned long last_forward_up_step_ms = 0;
-    unsigned long last_boost_down_step_ms = 0;
-    unsigned long last_boost_up_step_ms = 0;
-    unsigned long boost_recovery_start_ms = 0;
-    const float boost_pv_hold_min_effective =
-        (BOOST_PV_HOLD_MIN_V > BOOST_MPPT_TARGET_CEILING_V) ? BOOST_MPPT_TARGET_CEILING_V : BOOST_PV_HOLD_MIN_V;
-    const float kp_cv_effective = (Kp_cv < MIN_REASONABLE_KP_CV) ? 0.42f : Kp_cv;
-    const float ki_cc_effective = (Ki_cc > MAX_REASONABLE_KI_CC) ? 0.01f : Ki_cc;
-    const unsigned long cv_fine_up_interval_effective =
-        (CV_FINE_UP_STEP_INTERVAL_MS > MAX_REASONABLE_CV_FINE_UP_INTERVAL_MS) ? 1200UL : CV_FINE_UP_STEP_INTERVAL_MS;
 
     for(;;) {
         unsigned long now = millis();
@@ -375,12 +271,6 @@ void TaskSampleData(void * pvParameters) {
                     overvoltage_duty_zero_active = true;
                     overvoltage_start_ms = now;
                     raw_duty = 0;
-                    pid_integral = 0.0;
-                    pid_integral_cc = 0.0;
-                    pid_integral_cv = 0.0;
-                    pid_last_error = 0.0;
-                    pid_last_error_cc = 0.0;
-                    pid_last_error_cv = 0.0;
                     Serial.printf("[WARN] Over-voltage %.2fV -> Force Duty 0%% and monitor.\n", v_bat_filt);
                 }
             } else if (overvoltage_duty_zero_active && v_bat_filt <= BAT_OVERVOLTAGE_RECOVER_V) {
@@ -393,7 +283,6 @@ void TaskSampleData(void * pvParameters) {
                 raw_duty = 0;
                 ledcWrite(PWM_FORWARD_PIN, 0);
                 ledcWrite(PWM_BOOST_PIN, 0);
-                duty_step_accumulator = 0.0;
 
                 if ((now - overvoltage_start_ms >= BAT_OVERVOLTAGE_CONFIRM_MS) &&
                     (v_bat_filt >= BAT_OVERVOLTAGE_CUTOFF_V)) {
@@ -437,15 +326,10 @@ void TaskSampleData(void * pvParameters) {
                     currentState = STATE_BOOST;
                     low_sun_mode = (v_solar <= BOOST_LOW_SUN_ENTRY_V);
 
-                    v_solar_old = v_solar;
-                    p_solar_old = v_solar * i_solar;
                     float target_floor = low_sun_mode ? BOOST_MPPT_TARGET_MIN_LOW_SUN : BOOST_MPPT_TARGET_MIN_NORMAL;
                     v_solar_target = v_solar - 0.8;
                     if (v_solar_target < target_floor) v_solar_target = target_floor;
                     if (v_solar_target > BOOST_MPPT_TARGET_CEILING_V) v_solar_target = BOOST_MPPT_TARGET_CEILING_V;
-                    pid_integral = 0; pid_last_error = 0;
-                    pid_integral_cc = 0; pid_last_error_cc = 0;
-                    pid_integral_cv = 0; pid_last_error_cv = 0;
                     raw_duty = 20;
                     pv_is_collapsing = false;
                 }
@@ -455,8 +339,6 @@ void TaskSampleData(void * pvParameters) {
                     vTaskDelay(500 / portTICK_PERIOD_MS);
                     digitalWrite(RELAY_AC_PIN, HIGH);
                     currentState = STATE_FORWARD;
-                    pid_integral_cc = 0; pid_last_error_cc = 0;
-                    pid_integral_cv = 0; pid_last_error_cv = 0;
                     raw_duty = 10;
                 }
                 else {
@@ -504,282 +386,9 @@ void TaskSampleData(void * pvParameters) {
 
         if (system_ON && currentState != STATE_OFF) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
-            if (currentState != STATE_FORWARD) {
-                duty_step_accumulator = 0.0;
-                last_forward_up_step_ms = 0;
-            }
-            if (currentState != STATE_BOOST) {
-                boost_duty_step_accumulator = 0.0;
-                last_boost_down_step_ms = 0;
-                last_boost_up_step_ms = 0;
-                boost_recovery_start_ms = 0;
-            }
-
-            if (currentState == STATE_FORWARD) {
-                // =================================================================
-                // 🔋 โหมด AC: ระบบควบคุม DUAL-LOOP PID (CC/CV CHARGING CONTROL)
-                // =================================================================
-
-                // 1. ลูปควบคุมกระแสคงที่ (Constant Current Loop - CC) เป้าหมาย 3.0A
-                pid_error_cc = TARGET_CC_CURRENT - i_bat_filt;
-                pid_integral_cc += pid_error_cc;
-                pid_integral_cc = constrain(pid_integral_cc, -100, 100);
-                float delta_error_cc = pid_error_cc - pid_last_error_cc;
-                float pid_out_cc = (Kp_cc * pid_error_cc) + (ki_cc_effective * pid_integral_cc) + (Kd_cc * delta_error_cc);
-                pid_last_error_cc = pid_error_cc;
-
-                // 2. ลูปควบคุมแรงดันคงที่ (Constant Voltage Loop - CV) เป้าหมาย 58.4V
-                pid_error_cv = TARGET_CV_VOLTAGE - v_bat_filt;
-                if (fabs(pid_error_cv) <= CV_DEADBAND_V) {
-                    pid_error_cv = 0.0;
-                    pid_integral_cv *= 0.90;
-                }
-                pid_integral_cv += pid_error_cv;
-                pid_integral_cv = constrain(pid_integral_cv, -100, 100);
-                float delta_error_cv = pid_error_cv - pid_last_error_cv;
-                float pid_out_cv = (kp_cv_effective * pid_error_cv) + (Ki_cv * pid_integral_cv) + (Kd_cv * delta_error_cv);
-                pid_last_error_cv = pid_error_cv;
-
-                // เลือกค่าเอาต์พุตจากวงจร PID ที่ปลอดภัยและมีค่าต่ำที่สุด ป้องกัน Overshoot
-                float final_battery_pid = min(pid_out_cc, pid_out_cv);
-
-                // เข้าใกล้แรงดัน CV แล้ว จำกัดการเร่ง Duty ให้เบาลง
-                if (v_bat_filt > (TARGET_CV_VOLTAGE - 0.6) && final_battery_pid > 0.25) {
-                    final_battery_pid = 0.25;
-                }
-
-                // หากแรงดันเริ่มสูงกว่าเป้า ให้เร่งลด Duty ทันที
-                if (v_bat_filt >= CV_SOFT_OVERVOLTAGE_V) {
-                    final_battery_pid = -6.0;
-                    pid_integral_cc = 0.0;
-                    pid_integral_cv = 0.0;
-                }
-
-                // จำกัดความเร็วการเร่ง/ลด ในหนึ่งรอบลูป (Slew-Rate Limit ฝั่งแบตเตอรี่)
-                if (final_battery_pid > 1.5) final_battery_pid = 1.5;
-                if (final_battery_pid < -4.0) final_battery_pid = -4.0;
-                
-                // โหมดละเอียดช่วงใกล้เต็มและ duty ต่ำ: สะสมเศษเพื่อลด step jump ที่ 0-2%
-                if (v_bat_filt >= CV_FINE_ZONE_V && raw_duty <= 25) {
-                    if (final_battery_pid > CV_FINE_STEP_UP) final_battery_pid = CV_FINE_STEP_UP;
-                    if (final_battery_pid < CV_FINE_STEP_DOWN) final_battery_pid = CV_FINE_STEP_DOWN;
-                }
-                if (v_bat_filt >= CV_ULTRA_FINE_ZONE_V && raw_duty <= 15) {
-                    if (final_battery_pid > CV_ULTRA_FINE_STEP_UP) final_battery_pid = CV_ULTRA_FINE_STEP_UP;
-                    if (final_battery_pid < CV_ULTRA_FINE_STEP_DOWN) final_battery_pid = CV_ULTRA_FINE_STEP_DOWN;
-                }
-                if (v_bat_filt >= CV_RISE_LOCK_V && final_battery_pid > 0.0) {
-                    final_battery_pid = 0.0;
-                }
-
-                duty_step_accumulator += final_battery_pid;
-                int duty_step = 0;
-                if (duty_step_accumulator >= 1.0) {
-                    duty_step = (int)floor(duty_step_accumulator);
-                } else if (duty_step_accumulator <= -1.0) {
-                    duty_step = (int)ceil(duty_step_accumulator);
-                }
-
-                // โซนปลาย CV: ขาขึ้นต้องช้ากว่าขาลงเพื่อลดการกระชากแรงดัน
-                if (duty_step > 0 && v_bat_filt >= CV_FINE_ZONE_V && raw_duty <= 25) {
-                    unsigned long min_up_interval = cv_fine_up_interval_effective;
-                    if (v_bat_filt >= CV_ULTRA_FINE_ZONE_V && raw_duty <= 15) {
-                        min_up_interval = CV_ULTRA_FINE_UP_STEP_INTERVAL_MS;
-                    }
-                    if (now - last_forward_up_step_ms < min_up_interval) {
-                        duty_step = 0;
-                        if (duty_step_accumulator > 0.95) duty_step_accumulator = 0.95;
-                    } else {
-                        last_forward_up_step_ms = now;
-                    }
-                }
-
-                raw_duty += duty_step;
-                duty_step_accumulator -= duty_step;
-            }
-            else if (currentState == STATE_BOOST) {
-                // =================================================================
-                // ☀️ โหมด PV: ระบบควบคุมแผงและระบบป้องกันฝั่งเอาต์พุตขั้นเด็ดขาด
-                // =================================================================
-
-                if (v_bat_filt >= CV_SOFT_OVERVOLTAGE_V) {
-                    raw_duty -= 10;
-                    pid_integral = 0;
-                    boost_duty_step_accumulator = 0.0;
-                }
-                else if (v_solar <= BOOST_MIN_VALID_PV_V) {
-                    raw_duty = 0; pid_integral = 0;
-                    boost_duty_step_accumulator = 0.0;
-                    boost_fast_fall = false;
-                }
-                else {
-                    boost_fast_fall = false;
-                    bool boost_hold_rise =
-                        (v_bat_filt >= (TARGET_CV_VOLTAGE + BOOST_HOLD_CV_MARGIN_V)) ||
-                        (i_bat_filt >= (TARGET_CC_CURRENT + BOOST_BAT_CURRENT_LIMIT_MARGIN_A));
-                    if (now - last_mppt_time >= BOOST_MPPT_INTERVAL_MS) {
-                        last_mppt_time = now;
-                        float p_solar = v_solar * i_solar;
-                        float delta_p = p_solar - p_solar_old;
-                        float delta_v = v_solar - v_solar_old;
-
-                        if (fabs(delta_p) >= BOOST_MPPT_MIN_DELTA_P_W) {
-                            if (delta_p > 0) {
-                                if (delta_v > 0) mppt_direction = 1;
-                                else             mppt_direction = -1;
-                            } else {
-                                if (delta_v > 0) mppt_direction = -1;
-                                else             mppt_direction = 1;
-                            }
-                        }
-                        if (delta_v <= BOOST_FAST_FALL_DV_THRESHOLD_V) {
-                            boost_fast_fall = true;
-                        }
-
-                        float step_v = low_sun_mode ? BOOST_MPPT_V_STEP_LOW_SUN : BOOST_MPPT_V_STEP_NORMAL;
-                        float target_floor = low_sun_mode ? BOOST_MPPT_TARGET_MIN_LOW_SUN : BOOST_MPPT_TARGET_MIN_NORMAL;
-                        v_solar_target += (mppt_direction * step_v);
-                        if (v_solar_target < target_floor) v_solar_target = target_floor;
-                        if (v_solar_target > BOOST_MPPT_TARGET_CEILING_V) v_solar_target = BOOST_MPPT_TARGET_CEILING_V;
-
-                        p_solar_old = p_solar; v_solar_old = v_solar;
-                    }
-
-                    float target_floor = low_sun_mode ? BOOST_MPPT_TARGET_MIN_LOW_SUN : BOOST_MPPT_TARGET_MIN_NORMAL;
-                    pid_error = v_solar - v_solar_target;
-                    if (pid_error <= BOOST_FAST_FALL_ERR_THRESHOLD_V) {
-                        boost_fast_fall = true;
-                    }
-                    if (v_solar < (target_floor - 0.3)) {
-                        pid_integral = 0;
-                    } else {
-                        pid_integral += pid_error;
-                        pid_integral = constrain(pid_integral, -50, 50);
-                    }
-                    if (boost_hold_rise && pid_integral > 0.0) {
-                        pid_integral *= 0.80;
-                    }
-                    if (pid_error < -BOOST_TARGET_DEADBAND_V && pid_integral > 0.0) {
-                        pid_integral *= 0.85;
-                    }
-                    pid_derivative = pid_error - pid_last_error;
-
-                    float pid_output = (Kp * pid_error) + (Ki * pid_integral) + (Kd * pid_derivative);
-
-                    // ระบบแก้ล็อกช่วงเริ่มต้น (Soft-start ในโหมดแผง)
-                    if (raw_duty < 30 && v_solar > target_floor) {
-                        pid_output = BOOST_SOFTSTART_STEP;
-                    } else {
-                        if (pid_output > BOOST_PID_POS_LIMIT) pid_output = BOOST_PID_POS_LIMIT;
-                    }
-                    if (pid_error < -BOOST_TARGET_DEADBAND_V && pid_output > 0.0) {
-                        pid_output = 0.0;
-                    } else if (fabs(pid_error) <= BOOST_TARGET_DEADBAND_V && pid_output > BOOST_POS_LIMIT_NEAR_TARGET) {
-                        pid_output = BOOST_POS_LIMIT_NEAR_TARGET;
-                    }
-                    if (boost_hold_rise && pid_output > 0.0) {
-                        pid_output = 0.0;
-                    }
-                    // Guard หลักตามสเปก: รักษา PV ไม่ให้ต่ำกว่า 42V โดยหยุดเร่ง duty และผ่อนโหลดเมื่อเริ่มหลุด
-                    if (v_solar <= boost_pv_hold_min_effective) {
-                        if (pid_output > 0.0) pid_output = 0.0;
-                        if (v_solar < (boost_pv_hold_min_effective - BOOST_PV_HOLD_BAND_V) && pid_output > -1.0f) {
-                            pid_output = -1.0f;
-                        }
-                    }
-                    float boost_pid_neg_limit = low_sun_mode ? BOOST_PID_NEG_LIMIT_LOW_SUN : BOOST_PID_NEG_LIMIT_NORMAL;
-                    if (v_solar < (boost_pv_hold_min_effective - BOOST_PV_HOLD_BAND_V) && boost_pid_neg_limit > -1.0f) {
-                        boost_pid_neg_limit = -1.0f;
-                    }
-                    if (pid_output < boost_pid_neg_limit) pid_output = boost_pid_neg_limit;
-
-                    float pv_guard_offset_v = low_sun_mode ? BOOST_VSOLAR_GUARD_OFFSET_LOW_SUN_V : BOOST_VSOLAR_GUARD_OFFSET_NORMAL_V;
-                    float pv_critical_offset_v = low_sun_mode ? BOOST_VSOLAR_CRITICAL_OFFSET_LOW_SUN_V : BOOST_VSOLAR_CRITICAL_OFFSET_NORMAL_V;
-                    float pv_guard_v = target_floor + pv_guard_offset_v;
-                    float pv_critical_v = target_floor + pv_critical_offset_v;
-                    float boost_vsolar_collapse_step = low_sun_mode ? -1.0f : BOOST_VSOLAR_COLLAPSE_STEP;
-                    if (v_solar <= pv_guard_v) {
-                        if (pid_output > 0) pid_output = 0;
-                        if (v_solar <= pv_critical_v) pid_output = boost_vsolar_collapse_step;
-                        else if (pid_output < boost_pid_neg_limit) pid_output = boost_pid_neg_limit;
-                    }
-
-                    boost_duty_step_accumulator += pid_output;
-                    int boost_step = 0;
-                    if (boost_duty_step_accumulator >= 1.0) {
-                        boost_step = (int)floor(boost_duty_step_accumulator);
-                    } else if (boost_duty_step_accumulator <= -1.0) {
-                        boost_step = (int)ceil(boost_duty_step_accumulator);
-                    }
-
-                    bool boost_landing_phase =
-                        (v_solar <= (v_solar_target + BOOST_LANDING_BAND_V)) ||
-                        (i_bat_filt >= (TARGET_CC_CURRENT - BOOST_LANDING_BAND_A));
-                    if (boost_step < 0 && boost_fast_fall) {
-                        if (now - last_boost_down_step_ms < BOOST_FAST_FALL_DOWN_INTERVAL_MS) {
-                            boost_step = 0;
-                            if (boost_duty_step_accumulator < -0.95) boost_duty_step_accumulator = -0.95;
-                        } else {
-                            if (boost_step > BOOST_FAST_FALL_DOWN_STEP) boost_step = BOOST_FAST_FALL_DOWN_STEP;
-                            last_boost_down_step_ms = now;
-                        }
-                    }
-                    else if (boost_step < 0 && boost_landing_phase) {
-                        unsigned long min_down_interval_ms = low_sun_mode
-                            ? BOOST_LANDING_DOWN_INTERVAL_LOW_SUN_MS
-                            : BOOST_LANDING_DOWN_INTERVAL_MS;
-                        if (now - last_boost_down_step_ms < min_down_interval_ms) {
-                            boost_step = 0;
-                            if (boost_duty_step_accumulator < -0.95) boost_duty_step_accumulator = -0.95;
-                        } else {
-                            last_boost_down_step_ms = now;
-                        }
-                    }
-                    if (boost_step > 0 && boost_landing_phase) {
-                        unsigned long min_up_interval_ms = low_sun_mode
-                            ? BOOST_LANDING_UP_INTERVAL_LOW_SUN_MS
-                            : BOOST_LANDING_UP_INTERVAL_MS;
-                        if (now - last_boost_up_step_ms < min_up_interval_ms) {
-                            boost_step = 0;
-                            if (boost_duty_step_accumulator > 0.95) boost_duty_step_accumulator = 0.95;
-                        } else {
-                            last_boost_up_step_ms = now;
-                        }
-                    }
-
-                    raw_duty += boost_step;
-                    boost_duty_step_accumulator -= boost_step;
-                    pid_last_error = pid_error;
-                }
-            }
-
+            // ลบส่วนควบคุมตามคำขอ: คงไว้เฉพาะการป้องกันและการวัดค่า
+            raw_duty = 0;
             raw_duty = constrain(raw_duty, 0, allowed_max_duty);
-            if (currentState == STATE_BOOST &&
-                low_sun_mode &&
-                v_solar >= BOOST_LOW_SUN_HOLD_MIN_V &&
-                v_solar <= BOOST_LOW_SUN_HOLD_MAX_V &&
-                v_bat_filt < (TARGET_CV_VOLTAGE - 0.8) &&
-                i_bat_filt < (TARGET_CC_CURRENT + BOOST_BAT_CURRENT_LIMIT_MARGIN_A)) {
-                if (raw_duty < BOOST_LOW_SUN_MIN_DUTY) raw_duty = BOOST_LOW_SUN_MIN_DUTY;
-            }
-            if (currentState == STATE_BOOST) {
-                bool boost_recovery_condition =
-                    (v_bat_filt < (TARGET_CV_VOLTAGE - BOOST_RECOVERY_BAT_MARGIN_V)) &&
-                    (v_solar > (v_solar_target + BOOST_RECOVERY_PV_HEADROOM_V)) &&
-                    (i_bat_filt < BOOST_RECOVERY_CHARGE_CURRENT_A) &&
-                    (raw_duty < BOOST_RECOVERY_MIN_DUTY);
-                if (boost_recovery_condition) {
-                    if (boost_recovery_start_ms == 0) boost_recovery_start_ms = now;
-                    if (now - boost_recovery_start_ms >= BOOST_RECOVERY_CONFIRM_MS) {
-                        raw_duty = BOOST_RECOVERY_MIN_DUTY;
-                        pid_integral = 0.0;
-                        boost_duty_step_accumulator = 0.0;
-                    }
-                } else {
-                    boost_recovery_start_ms = 0;
-                }
-            }
-
             if (currentState == STATE_FORWARD) {
                 ledcWrite(PWM_FORWARD_PIN, raw_duty);
                 ledcWrite(PWM_BOOST_PIN, 0);
@@ -806,11 +415,6 @@ void TaskSampleData(void * pvParameters) {
             full_condition_start_ms = 0;
             overvoltage_duty_zero_active = false;
             overvoltage_start_ms = 0;
-            duty_step_accumulator = 0.0;
-            boost_duty_step_accumulator = 0.0;
-            last_boost_down_step_ms = 0;
-            last_boost_up_step_ms = 0;
-            boost_recovery_start_ms = 0;
         }
 
         last_millis = now;
