@@ -40,6 +40,8 @@ const float CV_DEADBAND_V = 0.10;
 const float FULL_DETECT_VOLTAGE = 58.3;
 const float FULL_END_CURRENT = 0.45;              // 15% ของกระแส CC (3A)
 const unsigned long FULL_CONFIRM_MS = 300000;     // เงื่อนไข FULL ต้องต่อเนื่อง 5 นาที
+const float HIGH_VOLTAGE_STOP_VOLTAGE = 58.8;     // ตัดชาร์จเชิงป้องกันก่อนถึง OVP
+const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 10000;
 const float RESTART_CHARGE_VOLTAGE = 55.2;        // แรงดันตกต่ำกว่านี้จึงกลับมาชาร์จใหม่
 
 // =========================================================================
@@ -246,6 +248,7 @@ void TaskSampleData(void * pvParameters) {
     unsigned long last_debug_time = 0;
     unsigned long last_sensor_error_log = 0;
     unsigned long full_condition_start_ms = 0;
+    unsigned long high_voltage_stop_start_ms = 0;
 
     for(;;) {
         unsigned long now = millis();
@@ -569,8 +572,7 @@ void TaskSampleData(void * pvParameters) {
 
             total_Wh += ((v_bat * i_bat_charge_filt) * (now - last_millis)) / 3600000.0;
 
-            bool full_window_current = (i_bat_charge_filt >= NOISE_I_THRESHOLD) &&
-                                       (i_bat_charge_filt <= FULL_END_CURRENT);
+            bool full_window_current = (i_bat_charge_filt <= FULL_END_CURRENT);
             if ((v_bat_filt >= FULL_DETECT_VOLTAGE) && full_window_current) {
                 if (full_condition_start_ms == 0) full_condition_start_ms = now;
                 if (now - full_condition_start_ms >= FULL_CONFIRM_MS) {
@@ -581,10 +583,23 @@ void TaskSampleData(void * pvParameters) {
             } else {
                 full_condition_start_ms = 0;
             }
+
+            // ถ้าแรงดันแบตสูงค้างนาน ให้ตัดชาร์จแบบ pre-stop ก่อนชน OVP
+            if (v_bat_filt >= HIGH_VOLTAGE_STOP_VOLTAGE) {
+                if (high_voltage_stop_start_ms == 0) high_voltage_stop_start_ms = now;
+                if (now - high_voltage_stop_start_ms >= HIGH_VOLTAGE_STOP_CONFIRM_MS) {
+                    charge_full_hold = true;
+                    disablePowerStage();
+                    Serial.printf("[INFO] High-voltage charge stop at %.2fV. Enter FULL HOLD.\n", v_bat_filt);
+                }
+            } else {
+                high_voltage_stop_start_ms = 0;
+            }
         } else {
             ledcWrite(PWM_FORWARD_PIN, 0);
             ledcWrite(PWM_BOOST_PIN, 0);
             full_condition_start_ms = 0;
+            high_voltage_stop_start_ms = 0;
         }
 
         last_millis = now;
