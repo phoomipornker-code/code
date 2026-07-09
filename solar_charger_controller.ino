@@ -27,7 +27,6 @@ const float TARGET_CV_VOLTAGE = 58.4;
 const float TARGET_CC_CURRENT = 3.0;
 
 const float MIN_PV_VOLTAGE_START = 40.0;   // เกณฑ์เริ่มทำงานฝั่ง PV (ผ่อนเล็กน้อยให้เริ่มติดง่ายขึ้น)
-const float UNDER_PV_VOLTAGE_CRIT = 38.0;  // ต่ำกว่า 38V เกินช่วงยืนยัน สั่งตัด
 const float MIN_AC_VOLTAGE_START = 120.0;  // เกณฑ์เริ่มทำงานฝั่ง AC (ช่วยกรณีคาลิเบรตต่ำกว่าจริง)
 const float MIN_AC_VOLTAGE_KEEP = 110.0;   // เกณฑ์คงการทำงานฝั่ง AC
 
@@ -474,18 +473,16 @@ void TaskSampleData(void * pvParameters) {
                     Serial.printf("[INFO] BOOST mode=%s (PV=%.1fV)\n", low_sun_mode ? "LOW_SUN" : "NORMAL", v_solar);
                 }
 
-                float pv_shutdown_v = BOOST_PV_SHUTDOWN_V;
-                unsigned long pv_shutdown_confirm_ms = BOOST_PV_SHUTDOWN_CONFIRM_MS;
-                if (v_solar < pv_shutdown_v) {
+                if (v_solar < BOOST_PV_SHUTDOWN_V) {
                     if (!pv_is_collapsing) {
                         pv_is_collapsing = true;
                         pv_collapse_start_time = now;
                     }
 
-                    if (now - pv_collapse_start_time >= pv_shutdown_confirm_ms) {
+                    if (now - pv_collapse_start_time >= BOOST_PV_SHUTDOWN_CONFIRM_MS) {
                         system_ON = false;
                         Serial.printf("[CRITICAL] Solar collapsed below %.1fV for %lums. Auto-Shutdown.\n",
-                                      pv_shutdown_v, pv_shutdown_confirm_ms);
+                                      BOOST_PV_SHUTDOWN_V, BOOST_PV_SHUTDOWN_CONFIRM_MS);
                     }
                 } else {
                     pv_is_collapsing = false;
