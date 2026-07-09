@@ -26,7 +26,7 @@ Adafruit_ADS1115 ads_curr;
 const float TARGET_CV_VOLTAGE = 58.4;
 const float TARGET_CC_CURRENT = 3.0;
 
-const float MIN_PV_VOLTAGE = 41.0;         // เริ่มทำงานเมื่อแผงถึง 41V
+const float MIN_PV_VOLTAGE = 42.0;         // เริ่มทำงานเมื่อแผงถึง 42V
 const float UNDER_PV_VOLTAGE_CRIT = 39.0;  // ต่ำกว่า 39V เกิน 2 วินาที สั่งตัด
 const float MIN_AC_VOLTAGE = 140.0;
 
@@ -95,6 +95,7 @@ const float MIN_SOLAR_HARVEST_CURRENT = 0.12;
 const unsigned long NO_HARVEST_TIMEOUT_MS = 20000;
 const unsigned long BOOST_HARVEST_CHECK_DELAY_MS = 8000;
 const int MIN_BOOST_DUTY_FOR_HARVEST_CHECK = 80;
+const float BOOST_VOLTAGE_FLOOR = 42.0;
 const float HARD_OVP_TRIP_VOLTAGE = 60.5;
 const float HARD_OVP_RELEASE_VOLTAGE = 58.0;
 
@@ -365,6 +366,7 @@ void TaskSampleData(void * pvParameters) {
                     v_solar_old = v_solar;
                     p_solar_old = v_solar * i_solar_mag;
                     v_solar_target = v_solar - 1.0;
+                    if (v_solar_target < BOOST_VOLTAGE_FLOOR) v_solar_target = BOOST_VOLTAGE_FLOOR;
                     pid_integral = 0; pid_last_error = 0;
                     pid_integral_cc = 0; pid_last_error_cc = 0;
                     pid_integral_cv = 0; pid_last_error_cv = 0;
@@ -519,14 +521,14 @@ void TaskSampleData(void * pvParameters) {
                         }
 
                         v_solar_target += (mppt_direction * MPPT_V_STEP);
-                        if (v_solar_target < 41.0) v_solar_target = 41.0;
+                        if (v_solar_target < BOOST_VOLTAGE_FLOOR) v_solar_target = BOOST_VOLTAGE_FLOOR;
                         if (v_solar_target > 48.0) v_solar_target = 48.0;
 
                         p_solar_old = p_solar; v_solar_old = v_solar;
                     }
 
                     pid_error = v_solar - v_solar_target;
-                    if (v_solar < 41.0) {
+                    if (v_solar < BOOST_VOLTAGE_FLOOR) {
                         pid_integral = 0;
                     } else {
                         pid_integral += pid_error;
@@ -537,20 +539,32 @@ void TaskSampleData(void * pvParameters) {
                     float pid_output = (Kp * pid_error) + (Ki * pid_integral) + (Kd * pid_derivative);
 
                     // ระบบแก้ล็อกช่วงเริ่มต้น (Soft-start ในโหมดแผง)
-                    if (duty_accumulator < 30.0 && v_solar > 41.0) {
+                    if (duty_accumulator < 30.0 && v_solar > BOOST_VOLTAGE_FLOOR) {
                         pid_output = 2.0;
                     } else {
                         if (pid_output > 1.5) pid_output = 1.5;
                     }
 
-                    if (v_solar <= 40.5) {
+                    if (v_solar <= (BOOST_VOLTAGE_FLOOR - 0.5)) {
                         if (pid_output > 0) pid_output = 0;
-                        if (v_solar <= 40.0) pid_output = -5.0;
+                        if (v_solar <= (BOOST_VOLTAGE_FLOOR - 1.0)) pid_output = -5.0;
                         else if (pid_output < -2.0) pid_output = -2.0;
                     }
 
                     duty_accumulator += pid_output;
                     pid_last_error = pid_error;
+                }
+            }
+
+            // Guardrail ตอนเริ่มและขณะบูสต์: รักษา I<=3A และช่วยประคอง Vsolar >= 42V
+            if (currentState == STATE_BOOST) {
+                if (v_solar < BOOST_VOLTAGE_FLOOR) {
+                    duty_accumulator -= 3.0;
+                }
+                if (i_bat_charge_filt > TARGET_CC_CURRENT) {
+                    float over_current = i_bat_charge_filt - TARGET_CC_CURRENT;
+                    duty_accumulator -= (5.0 + (over_current * 2.0));
+                    pid_integral = 0;
                 }
             }
 
