@@ -224,6 +224,10 @@ void setup() {
     if (CV_FINE_UP_STEP_INTERVAL_MS > MAX_REASONABLE_CV_FINE_UP_INTERVAL_MS) {
         Serial.printf("[WARN] CV_FINE_UP_STEP_INTERVAL_MS=%lu too long. Fallback to 1200ms will be used.\n", CV_FINE_UP_STEP_INTERVAL_MS);
     }
+    if (BOOST_PV_HOLD_MIN_V > BOOST_MPPT_TARGET_CEILING_V) {
+        Serial.printf("[WARN] BOOST_PV_HOLD_MIN_V=%.2f is above ceiling %.2f. Effective hold will be clamped to ceiling.\n",
+                      BOOST_PV_HOLD_MIN_V, BOOST_MPPT_TARGET_CEILING_V);
+    }
 
     bool volt_ok = ads_volt.begin(0x48);
     bool curr_ok = ads_curr.begin(0x49);
@@ -285,6 +289,8 @@ void TaskSampleData(void * pvParameters) {
     unsigned long last_boost_down_step_ms = 0;
     unsigned long last_boost_up_step_ms = 0;
     unsigned long boost_recovery_start_ms = 0;
+    const float boost_pv_hold_min_effective =
+        (BOOST_PV_HOLD_MIN_V > BOOST_MPPT_TARGET_CEILING_V) ? BOOST_MPPT_TARGET_CEILING_V : BOOST_PV_HOLD_MIN_V;
     const float kp_cv_effective = (Kp_cv < MIN_REASONABLE_KP_CV) ? 0.42f : Kp_cv;
     const float ki_cc_effective = (Ki_cc > MAX_REASONABLE_KI_CC) ? 0.01f : Ki_cc;
     const unsigned long cv_fine_up_interval_effective =
@@ -678,14 +684,14 @@ void TaskSampleData(void * pvParameters) {
                         pid_output = 0.0;
                     }
                     // Guard หลักตามสเปก: รักษา PV ไม่ให้ต่ำกว่า 42V โดยหยุดเร่ง duty และผ่อนโหลดเมื่อเริ่มหลุด
-                    if (v_solar <= BOOST_PV_HOLD_MIN_V) {
+                    if (v_solar <= boost_pv_hold_min_effective) {
                         if (pid_output > 0.0) pid_output = 0.0;
-                        if (v_solar < (BOOST_PV_HOLD_MIN_V - BOOST_PV_HOLD_BAND_V) && pid_output > -1.0f) {
+                        if (v_solar < (boost_pv_hold_min_effective - BOOST_PV_HOLD_BAND_V) && pid_output > -1.0f) {
                             pid_output = -1.0f;
                         }
                     }
                     float boost_pid_neg_limit = low_sun_mode ? BOOST_PID_NEG_LIMIT_LOW_SUN : BOOST_PID_NEG_LIMIT_NORMAL;
-                    if (v_solar < (BOOST_PV_HOLD_MIN_V - BOOST_PV_HOLD_BAND_V) && boost_pid_neg_limit > -1.0f) {
+                    if (v_solar < (boost_pv_hold_min_effective - BOOST_PV_HOLD_BAND_V) && boost_pid_neg_limit > -1.0f) {
                         boost_pid_neg_limit = -1.0f;
                     }
                     if (pid_output < boost_pid_neg_limit) pid_output = boost_pid_neg_limit;
