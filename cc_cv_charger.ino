@@ -96,6 +96,8 @@ const unsigned long NO_HARVEST_TIMEOUT_MS = 20000;
 const unsigned long BOOST_HARVEST_CHECK_DELAY_MS = 8000;
 const int MIN_BOOST_DUTY_FOR_HARVEST_CHECK = 80;
 const float BOOST_VOLTAGE_FLOOR = 42.0;
+const float BOOST_SAFE_V_HEADROOM = 0.4;
+const float BOOST_SAFE_I_HEADROOM = 0.15;
 const float HARD_OVP_TRIP_VOLTAGE = 60.5;
 const float HARD_OVP_RELEASE_VOLTAGE = 58.0;
 
@@ -451,6 +453,7 @@ void TaskSampleData(void * pvParameters) {
 
         if (system_ON && currentState != STATE_OFF) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
+            float duty_before_control = duty_accumulator;
 
             if (currentState == STATE_FORWARD) {
                 // =================================================================
@@ -559,12 +562,26 @@ void TaskSampleData(void * pvParameters) {
             // Guardrail ตอนเริ่มและขณะบูสต์: รักษา I<=3A และช่วยประคอง Vsolar >= 42V
             if (currentState == STATE_BOOST) {
                 if (v_solar < BOOST_VOLTAGE_FLOOR) {
-                    duty_accumulator -= 3.0;
+                    float v_under = BOOST_VOLTAGE_FLOOR - v_solar;
+                    duty_accumulator -= (3.0 + (v_under * 3.5));
                 }
                 if (i_bat_charge_filt > TARGET_CC_CURRENT) {
                     float over_current = i_bat_charge_filt - TARGET_CC_CURRENT;
-                    duty_accumulator -= (5.0 + (over_current * 2.0));
+                    duty_accumulator -= (5.0 + (over_current * 3.0));
                     pid_integral = 0;
+                }
+
+                // จำกัดความเร็วขาขึ้นของ duty เมื่อเข้าใกล้ข้อจำกัด 42V/3A
+                float duty_delta = duty_accumulator - duty_before_control;
+                if (duty_delta > 0.0) {
+                    bool near_v_limit = (v_solar <= (BOOST_VOLTAGE_FLOOR + BOOST_SAFE_V_HEADROOM));
+                    bool near_i_limit = (i_bat_charge_filt >= (TARGET_CC_CURRENT - BOOST_SAFE_I_HEADROOM));
+                    if (near_v_limit || near_i_limit) {
+                        const float LIMITED_UP_STEP = 0.6;
+                        if (duty_delta > LIMITED_UP_STEP) {
+                            duty_accumulator = duty_before_control + LIMITED_UP_STEP;
+                        }
+                    }
                 }
             }
 
