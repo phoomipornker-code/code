@@ -91,9 +91,8 @@ const float CAL_SCALE_I_BAT   = 42.46;
 const float NOISE_V_THRESHOLD = 0.5;
 const float NOISE_I_THRESHOLD = 0.08;
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
-const float BAT_MAX_PLAUSIBLE_VOLTAGE = 70.0;
-const float BAT_MAX_STEP_IDLE_V = 1.2;
-const float BAT_MAX_STEP_ACTIVE_V = 4.0;
+const float HARD_OVP_TRIP_VOLTAGE = 60.5;
+const float HARD_OVP_RELEASE_VOLTAGE = 58.0;
 
 // =========================================================================
 // ตัวแปรระบบ
@@ -103,6 +102,8 @@ volatile float i_solar = 0, i_ac_in = 0, i_bat = 0;
 volatile float v_bat_filt = 0, i_bat_filt = 0;
 volatile float i_solar_mag = 0;
 volatile float i_bat_charge_filt = 0;  // กระแสชาร์จใช้ค่าบวกเสมอเพื่อกันทิศเซนเซอร์กลับด้าน
+volatile bool ovp_latched = false;
+volatile float ovp_trip_voltage = 0.0;
 volatile bool system_ON = false;
 volatile bool charge_full_hold = false;
 volatile int active_duty_percent = 0;
@@ -126,7 +127,6 @@ float raw_mv_i0 = 0, raw_mv_i1 = 0, raw_mv_i2 = 0;
 float current_offset_i0 = OFFSET_I_SOLAR;
 float current_offset_i1 = OFFSET_I_AC;
 float current_offset_i2 = OFFSET_I_BAT;
-float last_valid_vbat = 0.0;
 float vbat_filter_buf[8] = {0};
 float ibat_filter_buf[8] = {0};
 float vbat_filter_sum = 0;
@@ -275,7 +275,7 @@ void TaskSampleData(void * pvParameters) {
 
             v_solar = (mv_pure_v0 / 1000.0) * CAL_SCALE_V_SOLAR;
             v_ac_in = (mv_pure_v1 / 1000.0) * CAL_SCALE_V_AC;
-            float v_bat_sample = (mv_pure_v2 / 1000.0) * CAL_SCALE_V_BAT;
+            v_bat   = (mv_pure_v2 / 1000.0) * CAL_SCALE_V_BAT;
 
             i_solar = (mv_pure_i0 / 1000.0) * CAL_SCALE_I_SOLAR;
             i_ac_in = (mv_pure_i1 / 1000.0) * CAL_SCALE_I_AC;
@@ -288,27 +288,6 @@ void TaskSampleData(void * pvParameters) {
             if (fabs(i_solar) < NOISE_I_THRESHOLD) i_solar = 0.0;
             if (fabs(i_ac_in) < NOISE_I_THRESHOLD) i_ac_in = 0.0;
             if (fabs(i_bat)   < NOISE_I_THRESHOLD) i_bat   = 0.0;
-
-            float i_solar_mag_now = fabs(i_solar);
-            float i_bat_mag_now = fabs(i_bat);
-            float allowed_vbat_step = ((i_bat_mag_now >= MIN_CURRENT_FOR_ACTIVE_CHARGE) ||
-                                       (i_solar_mag_now >= MIN_CURRENT_FOR_ACTIVE_CHARGE))
-                                        ? BAT_MAX_STEP_ACTIVE_V
-                                        : BAT_MAX_STEP_IDLE_V;
-            bool vbat_range_ok = (v_bat_sample <= BAT_MAX_PLAUSIBLE_VOLTAGE);
-            bool vbat_step_ok = (last_valid_vbat <= 0.0) ||
-                                (fabs(v_bat_sample - last_valid_vbat) <= allowed_vbat_step);
-            if (vbat_range_ok && vbat_step_ok) {
-                v_bat = v_bat_sample;
-                last_valid_vbat = v_bat_sample;
-            } else {
-                v_bat = (last_valid_vbat > 0.0) ? last_valid_vbat : 0.0;
-                if (now - last_sensor_error_log >= SENSOR_ERROR_LOG_MS) {
-                    last_sensor_error_log = now;
-                    Serial.printf("[WARN] Reject VBAT glitch sample: %.2fV (last valid %.2fV)\n",
-                                  v_bat_sample, last_valid_vbat);
-                }
-            }
 
             // ใช้ moving average ช่วยลดการสั่นของ CV รอบแรงดันใกล้เต็ม
             vbat_filter_sum -= vbat_filter_buf[filter_index];
@@ -324,6 +303,24 @@ void TaskSampleData(void * pvParameters) {
             i_bat_filt = ibat_filter_sum / (float)filter_count;
             i_solar_mag = fabs(i_solar);
             i_bat_charge_filt = fabs(i_bat_filt);
+
+            // Hard OVP: treat high battery voltage as real event and cut power immediately.
+            if (!ovp_latched &&
+                (v_bat >= HARD_OVP_TRIP_VOLTAGE || v_bat_filt >= HARD_OVP_TRIP_VOLTAGE)) {
+                ovp_latched = true;
+                ovp_trip_voltage = max(v_bat, v_bat_filt);
+                forceSafeShutdown();
+                Serial.printf("[CRITICAL] HARD OVP TRIP at %.2fV (trip=%.2fV). Output disabled.\n",
+                              ovp_trip_voltage, HARD_OVP_TRIP_VOLTAGE);
+            }
+
+            if (ovp_latched &&
+                v_bat <= HARD_OVP_RELEASE_VOLTAGE &&
+                v_bat_filt <= HARD_OVP_RELEASE_VOLTAGE) {
+                ovp_latched = false;
+                Serial.printf("[INFO] OVP latch cleared at %.2fV (release=%.2fV).\n",
+                              max(v_bat, v_bat_filt), HARD_OVP_RELEASE_VOLTAGE);
+            }
 
             last_adc_sample_ms = now;
             sample_ok = true;
@@ -558,7 +555,9 @@ void TaskSampleData(void * pvParameters) {
             last_debug_time = now;
             const char* state_label = charge_full_hold
                 ? "FULL_HOLD"
-                : (currentState == STATE_BOOST ? "BOOST" : (currentState == STATE_FORWARD ? "FORWARD" : "OFF"));
+                : (ovp_latched
+                    ? "OVP_LOCK"
+                    : (currentState == STATE_BOOST ? "BOOST" : (currentState == STATE_FORWARD ? "FORWARD" : "OFF")));
             Serial.println("=========================================================================================");
             Serial.printf("[DEBUG INTERFACE] System: %s | State: %s | Active Duty: %d%%\n",
                           (system_ON ? "ON " : "OFF"),
@@ -583,6 +582,7 @@ void TaskSampleData(void * pvParameters) {
 void TaskLCDLoop(void * pvParameters) {
     bool last_start_state = HIGH, last_stop_state = HIGH;
     bool show_no_power_alert = false;
+    bool show_ovp_alert = false;
     unsigned long alert_millis = 0;
     unsigned long last_lcd_recover = 0;
     int lcd_mutex_fail_count = 0;
@@ -621,14 +621,22 @@ void TaskLCDLoop(void * pvParameters) {
             system_ON = false;
             charge_full_hold = false;
             show_no_power_alert = false;
+            show_ovp_alert = false;
         } else if (start_edge) {
-            if (sensor_init_ok && (v_solar >= MIN_PV_VOLTAGE || v_ac_in >= MIN_AC_VOLTAGE)) {
+            if (ovp_latched) {
+                system_ON = false;
+                show_no_power_alert = false;
+                show_ovp_alert = true;
+                alert_millis = now;
+            } else if (sensor_init_ok && (v_solar >= MIN_PV_VOLTAGE || v_ac_in >= MIN_AC_VOLTAGE)) {
                 system_ON = true;
                 charge_full_hold = false;
                 show_no_power_alert = false;
+                show_ovp_alert = false;
             } else {
                 system_ON = false;
                 show_no_power_alert = true;
+                show_ovp_alert = false;
                 alert_millis = now;
             }
         }
@@ -658,6 +666,16 @@ void TaskLCDLoop(void * pvParameters) {
                 lcd_mutex_fail_count++;
             }
         }
+        if (show_ovp_alert && (now - alert_millis > 3000)) {
+            show_ovp_alert = false;
+            if (xSemaphoreTake(i2c_Mutex, 50)) {
+                lcd.clear();
+                xSemaphoreGive(i2c_Mutex);
+                lcd_mutex_fail_count = 0;
+            } else {
+                lcd_mutex_fail_count++;
+            }
+        }
 
         if (xSemaphoreTake(i2c_Mutex, 50)) {
             if (system_ON && charge_full_hold) {
@@ -670,6 +688,11 @@ void TaskLCDLoop(void * pvParameters) {
                 lcd.setCursor(0, 1); lcd.printf("%-8s   PWR:%5.1fWh ", (currentState == STATE_BOOST ? "BOOST PV" : "FORW AC"), total_Wh);
                 lcd.setCursor(0, 2); lcd.printf("IN :%5.1fV %5.1fA   ", (currentState == STATE_BOOST ? v_solar : v_ac_in), (currentState == STATE_BOOST ? i_solar : i_ac_in));
                 lcd.setCursor(0, 3); lcd.printf("OUT:%5.1fV %5.1fA   ", v_bat, i_bat);
+            } else if (ovp_latched || show_ovp_alert) {
+                lcd.setCursor(0, 0); lcd.print("    OVP TRIPPED      ");
+                lcd.setCursor(0, 1); lcd.printf("VBAT:%5.1fV TRIP:%4.1f", v_bat_filt, ovp_trip_voltage);
+                lcd.setCursor(0, 2); lcd.printf("REL <= %5.1fV        ", HARD_OVP_RELEASE_VOLTAGE);
+                lcd.setCursor(0, 3); lcd.print("WAIT VOLTAGE DROP    ");
             } else if (show_no_power_alert) {
                 lcd.setCursor(0, 0); lcd.print("      ERROR      ");
                 lcd.setCursor(0, 1); lcd.print("  NO INPUT POWER!   ");
