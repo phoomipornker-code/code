@@ -428,12 +428,12 @@ void TaskSampleData(void * pvParameters) {
                     duty_accumulator -= 5.0;
                     pid_integral = 0;
                 }
-                else if (v_solar == 0.0 || i_solar_mag == 0.0) {
+                else if (v_solar == 0.0) {
                     duty_accumulator = 0.0;
                     pid_integral = 0;
                 }
                 else {
-                    if (now - last_mppt_time >= 100) {
+                    if ((now - last_mppt_time >= 100) && (i_solar_mag > 0.0)) {
                         last_mppt_time = now;
                         float p_solar = v_solar * i_solar_mag;
                         float delta_p = p_solar - p_solar_old;
