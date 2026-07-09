@@ -95,6 +95,13 @@ const float NOISE_I_THRESHOLD = 0.08;
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 const float BOOST_VOLTAGE_FLOOR = 42.0;
 const float BOOST_BAT_VOLTAGE_LIMIT = 58.0;
+const float BOOST_CV_ENTRY_VOLTAGE = 57.8;
+const float BOOST_CV_EXIT_VOLTAGE = 57.2;
+const unsigned long BOOST_RAMP_DURATION_MS = 2500;
+const float BOOST_RAMP_STEP = 1.2;
+const float BOOST_CV_KP = 1.1;
+const float BOOST_CV_KI = 0.03;
+const float BOOST_CV_KD = 0.02;
 const float BOOST_SAFE_V_HEADROOM = 0.4;
 const float BOOST_SAFE_I_HEADROOM = 0.15;
 const float BOOST_SAFE_BAT_HEADROOM = 0.3;
@@ -124,6 +131,8 @@ volatile unsigned long last_adc_sample_ms = 0;
 
 enum SystemState { STATE_BOOST, STATE_FORWARD, STATE_OFF };
 volatile SystemState currentState = STATE_OFF;
+enum BoostControlMode { BOOST_RAMP, BOOST_MPPT, BOOST_CV_HOLD };
+volatile BoostControlMode boostMode = BOOST_RAMP;
 bool last_system_state = false;
 
 LiquidCrystal_I2C lcd(0x27, 20, 4);
@@ -153,6 +162,7 @@ static inline int16_t readADCStable(Adafruit_ADS1115 &adc, uint8_t channel) {
 
 static inline void disablePowerStage() {
     currentState = STATE_OFF;
+    boostMode = BOOST_RAMP;
     raw_duty = 0;
     duty_accumulator = 0.0;
     digitalWrite(RELAY_PV_PIN, LOW);
@@ -245,6 +255,7 @@ void TaskSampleData(void * pvParameters) {
 
     unsigned long pv_collapse_start_time = 0;
     bool pv_is_collapsing = false;
+    unsigned long boost_mode_enter_ms = 0;
     unsigned long last_debug_time = 0;
     unsigned long last_sensor_error_log = 0;
     unsigned long full_condition_start_ms = 0;
@@ -363,6 +374,8 @@ void TaskSampleData(void * pvParameters) {
                     vTaskDelay(500 / portTICK_PERIOD_MS);
                     digitalWrite(RELAY_PV_PIN, HIGH);
                     currentState = STATE_BOOST;
+                    boostMode = BOOST_RAMP;
+                    boost_mode_enter_ms = now;
 
                     v_solar_old = v_solar;
                     p_solar_old = v_solar * i_solar_mag;
@@ -381,6 +394,8 @@ void TaskSampleData(void * pvParameters) {
                     vTaskDelay(500 / portTICK_PERIOD_MS);
                     digitalWrite(RELAY_AC_PIN, HIGH);
                     currentState = STATE_FORWARD;
+                    boostMode = BOOST_RAMP;
+                    boost_mode_enter_ms = 0;
                     pid_integral_cc = 0; pid_last_error_cc = 0;
                     pid_integral_cv = 0; pid_last_error_cv = 0;
                     raw_duty = 10;
@@ -407,6 +422,8 @@ void TaskSampleData(void * pvParameters) {
             }
             else if (currentState == STATE_FORWARD) {
                 if (v_ac_in < MIN_AC_VOLTAGE) { system_ON = false; }
+                boostMode = BOOST_RAMP;
+                boost_mode_enter_ms = 0;
             }
         }
 
@@ -414,6 +431,8 @@ void TaskSampleData(void * pvParameters) {
             digitalWrite(RELAY_PV_PIN, LOW);
             digitalWrite(RELAY_AC_PIN, LOW);
             currentState = STATE_OFF;
+            boostMode = BOOST_RAMP;
+            boost_mode_enter_ms = 0;
             raw_duty = 0;
             duty_accumulator = 0.0;
             pv_is_collapsing = false;
@@ -460,70 +479,116 @@ void TaskSampleData(void * pvParameters) {
             }
             else if (currentState == STATE_BOOST) {
                 // =================================================================
-                // ☀️ โหมด PV: ระบบควบคุมแผงและระบบป้องกันฝั่งเอาต์พุตขั้นเด็ดขาด
+                // ☀️ โหมด PV: แยก 3 ช่วง RAMP / MPPT / CV_HOLD
                 // =================================================================
 
-                bool charge_is_active = (i_bat_charge_filt >= MIN_CURRENT_FOR_ACTIVE_CHARGE) ||
-                                        (i_solar_mag >= MIN_CURRENT_FOR_ACTIVE_CHARGE);
-                if ((v_bat_filt >= BOOST_BAT_VOLTAGE_LIMIT && charge_is_active) ||
-                    (i_bat_charge_filt >= TARGET_CC_CURRENT)) {
-                    duty_accumulator -= 5.0;
-                    pid_integral = 0;
-                }
-                else if (v_solar == 0.0) {
+                if (v_solar == 0.0) {
                     duty_accumulator = 0.0;
                     pid_integral = 0;
+                    pid_integral_cv = 0;
                 }
                 else {
-                    if ((now - last_mppt_time >= 100) && (i_solar_mag > 0.0)) {
-                        last_mppt_time = now;
-                        float p_solar = v_solar * i_solar_mag;
-                        float delta_p = p_solar - p_solar_old;
-                        float delta_v = v_solar - v_solar_old;
-
-                        if (delta_p != 0) {
-                            if (delta_p > 0) {
-                                if (delta_v > 0) mppt_direction = 1;
-                                else             mppt_direction = -1;
-                            } else {
-                                if (delta_v > 0) mppt_direction = -1;
-                                else             mppt_direction = 1;
+                    if (boostMode == BOOST_RAMP) {
+                        if (v_bat_filt >= BOOST_CV_ENTRY_VOLTAGE) {
+                            boostMode = BOOST_CV_HOLD;
+                            pid_integral_cv = 0;
+                            pid_last_error_cv = 0;
+                        } else {
+                            duty_accumulator += BOOST_RAMP_STEP;
+                            bool ramp_ready_for_mppt =
+                                (i_solar_mag >= MIN_CURRENT_FOR_ACTIVE_CHARGE) ||
+                                (i_bat_charge_filt >= MIN_CURRENT_FOR_ACTIVE_CHARGE) ||
+                                ((boost_mode_enter_ms > 0) &&
+                                 (now - boost_mode_enter_ms >= BOOST_RAMP_DURATION_MS));
+                            if (ramp_ready_for_mppt) {
+                                boostMode = BOOST_MPPT;
+                                pid_integral = 0;
+                                pid_last_error = 0;
                             }
                         }
-
-                        v_solar_target += (mppt_direction * MPPT_V_STEP);
-                        if (v_solar_target < BOOST_VOLTAGE_FLOOR) v_solar_target = BOOST_VOLTAGE_FLOOR;
-                        if (v_solar_target > 48.0) v_solar_target = 48.0;
-
-                        p_solar_old = p_solar; v_solar_old = v_solar;
                     }
+                    else if (boostMode == BOOST_MPPT) {
+                        if ((now - last_mppt_time >= 100) && (i_solar_mag > 0.0)) {
+                            last_mppt_time = now;
+                            float p_solar = v_solar * i_solar_mag;
+                            float delta_p = p_solar - p_solar_old;
+                            float delta_v = v_solar - v_solar_old;
 
-                    pid_error = v_solar - v_solar_target;
-                    if (v_solar < BOOST_VOLTAGE_FLOOR) {
-                        pid_integral = 0;
-                    } else {
-                        pid_integral += pid_error;
-                        pid_integral = constrain(pid_integral, -50, 50);
+                            if (delta_p != 0) {
+                                if (delta_p > 0) {
+                                    if (delta_v > 0) mppt_direction = 1;
+                                    else             mppt_direction = -1;
+                                } else {
+                                    if (delta_v > 0) mppt_direction = -1;
+                                    else             mppt_direction = 1;
+                                }
+                            }
+
+                            v_solar_target += (mppt_direction * MPPT_V_STEP);
+                            if (v_solar_target < BOOST_VOLTAGE_FLOOR) v_solar_target = BOOST_VOLTAGE_FLOOR;
+                            if (v_solar_target > 48.0) v_solar_target = 48.0;
+
+                            p_solar_old = p_solar; v_solar_old = v_solar;
+                        }
+
+                        pid_error = v_solar - v_solar_target;
+                        if (v_solar < BOOST_VOLTAGE_FLOOR) {
+                            pid_integral = 0;
+                        } else {
+                            pid_integral += pid_error;
+                            pid_integral = constrain(pid_integral, -50, 50);
+                        }
+                        pid_derivative = pid_error - pid_last_error;
+
+                        float pid_output = (Kp * pid_error) + (Ki * pid_integral) + (Kd * pid_derivative);
+
+                        if (duty_accumulator < 30.0 && v_solar > BOOST_VOLTAGE_FLOOR) {
+                            pid_output = 2.0;
+                        } else if (pid_output > 1.5) {
+                            pid_output = 1.5;
+                        }
+
+                        if (v_solar <= (BOOST_VOLTAGE_FLOOR - 0.5)) {
+                            if (pid_output > 0) pid_output = 0;
+                            if (v_solar <= (BOOST_VOLTAGE_FLOOR - 1.0)) pid_output = -5.0;
+                            else if (pid_output < -2.0) pid_output = -2.0;
+                        }
+
+                        duty_accumulator += pid_output;
+                        pid_last_error = pid_error;
+
+                        if (v_bat_filt >= BOOST_CV_ENTRY_VOLTAGE) {
+                            boostMode = BOOST_CV_HOLD;
+                            pid_integral_cv = 0;
+                            pid_last_error_cv = 0;
+                        }
                     }
-                    pid_derivative = pid_error - pid_last_error;
+                    else { // BOOST_CV_HOLD
+                        pid_error_cv = BOOST_BAT_VOLTAGE_LIMIT - v_bat_filt;
+                        if (fabs(pid_error_cv) <= CV_DEADBAND_V) {
+                            pid_error_cv = 0.0;
+                            pid_integral_cv *= 0.90;
+                        }
+                        pid_integral_cv += pid_error_cv;
+                        pid_integral_cv = constrain(pid_integral_cv, -120, 120);
+                        float delta_error_cv = pid_error_cv - pid_last_error_cv;
+                        float cv_hold_output = (BOOST_CV_KP * pid_error_cv) +
+                                               (BOOST_CV_KI * pid_integral_cv) +
+                                               (BOOST_CV_KD * delta_error_cv);
+                        pid_last_error_cv = pid_error_cv;
 
-                    float pid_output = (Kp * pid_error) + (Ki * pid_integral) + (Kd * pid_derivative);
+                        if (cv_hold_output > 1.0) cv_hold_output = 1.0;
+                        if (cv_hold_output < -3.0) cv_hold_output = -3.0;
 
-                    // ระบบแก้ล็อกช่วงเริ่มต้น (Soft-start ในโหมดแผง)
-                    if (duty_accumulator < 30.0 && v_solar > BOOST_VOLTAGE_FLOOR) {
-                        pid_output = 2.0;
-                    } else {
-                        if (pid_output > 1.5) pid_output = 1.5;
+                        duty_accumulator += cv_hold_output;
+
+                        if (v_bat_filt <= BOOST_CV_EXIT_VOLTAGE &&
+                            i_bat_charge_filt < (TARGET_CC_CURRENT - 0.3)) {
+                            boostMode = BOOST_MPPT;
+                            pid_integral = 0;
+                            pid_last_error = 0;
+                        }
                     }
-
-                    if (v_solar <= (BOOST_VOLTAGE_FLOOR - 0.5)) {
-                        if (pid_output > 0) pid_output = 0;
-                        if (v_solar <= (BOOST_VOLTAGE_FLOOR - 1.0)) pid_output = -5.0;
-                        else if (pid_output < -2.0) pid_output = -2.0;
-                    }
-
-                    duty_accumulator += pid_output;
-                    pid_last_error = pid_error;
                 }
             }
 
@@ -607,11 +672,18 @@ void TaskSampleData(void * pvParameters) {
 
         if (now - last_debug_time >= 500) {
             last_debug_time = now;
-            const char* state_label = charge_full_hold
-                ? "FULL_HOLD"
-                : (ovp_latched
-                    ? "OVP_LOCK"
-                    : (currentState == STATE_BOOST ? "BOOST" : (currentState == STATE_FORWARD ? "FORWARD" : "OFF")));
+            const char* state_label = "OFF";
+            if (charge_full_hold) {
+                state_label = "FULL_HOLD";
+            } else if (ovp_latched) {
+                state_label = "OVP_LOCK";
+            } else if (currentState == STATE_BOOST) {
+                if (boostMode == BOOST_RAMP) state_label = "BOOST_RAMP";
+                else if (boostMode == BOOST_MPPT) state_label = "BOOST_MPPT";
+                else state_label = "BOOST_CV";
+            } else if (currentState == STATE_FORWARD) {
+                state_label = "FORWARD";
+            }
             Serial.println("=========================================================================================");
             Serial.printf("[DEBUG INTERFACE] System: %s | State: %s | Active Duty: %d%%\n",
                           (system_ON ? "ON " : "OFF"),
