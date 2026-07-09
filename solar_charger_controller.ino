@@ -87,6 +87,9 @@ const int FORWARD_STEP_DOWN_FAST = -2;
 const unsigned long FORWARD_UP_INTERVAL_MS = 140;
 const unsigned long FORWARD_DOWN_INTERVAL_MS = 90;
 const float BOOST_SIMPLE_TARGET_BAND_V = 0.12;
+const float BOOST_SIMPLE_UP_ENABLE_ERROR_V = 0.24;    // ต้องห่างเป้ามากพอจึงยอมเพิ่ม duty
+const float BOOST_SIMPLE_DOWN_FAST_ERROR_V = 0.22;    // หลุดต่ำกว่าเป้าเกินนี้ให้ลด duty เร็ว
+const float BOOST_BLOCK_UP_DELTA_V = -0.05;           // ถ้า PV กำลังตกเร็ว ให้หยุดเร่ง duty
 const int BOOST_SIMPLE_STEP_UP = 1;
 const int BOOST_SIMPLE_STEP_DOWN = -1;
 const int BOOST_SIMPLE_STEP_DOWN_FAST = -2;
@@ -549,7 +552,9 @@ void TaskSampleData(void * pvParameters) {
 
                     float target_floor = low_sun_mode ? BOOST_MPPT_TARGET_MIN_LOW_SUN : BOOST_MPPT_TARGET_MIN_NORMAL;
                     float solar_error = v_solar - v_solar_target;
-                    if (delta_v <= BOOST_FAST_FALL_DV_THRESHOLD_V || solar_error <= BOOST_FAST_FALL_ERR_THRESHOLD_V) {
+                    if (delta_v <= BOOST_FAST_FALL_DV_THRESHOLD_V ||
+                        solar_error <= BOOST_FAST_FALL_ERR_THRESHOLD_V ||
+                        solar_error <= -BOOST_SIMPLE_DOWN_FAST_ERROR_V) {
                         boost_fast_fall = true;
                     }
                     if (v_solar < (target_floor - 0.3f)) {
@@ -559,16 +564,21 @@ void TaskSampleData(void * pvParameters) {
                     int boost_step = 0;
                     if (v_solar < (boost_pv_hold_min_effective - BOOST_PV_HOLD_BAND_V)) {
                         boost_step = BOOST_SIMPLE_STEP_DOWN_FAST;
+                    } else if (solar_error < -BOOST_SIMPLE_DOWN_FAST_ERROR_V) {
+                        boost_step = BOOST_SIMPLE_STEP_DOWN_FAST;
                     } else if (solar_error < -BOOST_SIMPLE_TARGET_BAND_V) {
                         boost_step = BOOST_SIMPLE_STEP_DOWN;
-                    } else if (!boost_hold_rise && solar_error > BOOST_SIMPLE_TARGET_BAND_V) {
+                    } else if (!boost_hold_rise &&
+                               solar_error > BOOST_SIMPLE_UP_ENABLE_ERROR_V &&
+                               delta_v > BOOST_BLOCK_UP_DELTA_V) {
                         boost_step = BOOST_SIMPLE_STEP_UP;
                     }
 
                     if (boost_step == 0 &&
                         raw_duty < 30 &&
                         !boost_hold_rise &&
-                        v_solar > (v_solar_target + BOOST_SIMPLE_TARGET_BAND_V)) {
+                        v_solar > (v_solar_target + BOOST_SIMPLE_UP_ENABLE_ERROR_V) &&
+                        delta_v > BOOST_BLOCK_UP_DELTA_V) {
                         boost_step = (int)BOOST_SOFTSTART_STEP;
                     }
 
