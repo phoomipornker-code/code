@@ -58,6 +58,14 @@ const unsigned long CV_ULTRA_FINE_UP_STEP_INTERVAL_MS = 2600;
 const float MIN_REASONABLE_KP_CV = 0.10;
 const float MAX_REASONABLE_KI_CC = 0.05;
 const unsigned long MAX_REASONABLE_CV_FINE_UP_INTERVAL_MS = 3000;
+const unsigned long BOOST_MPPT_INTERVAL_MS = 150;
+const float BOOST_MPPT_V_STEP = 0.08;
+const float BOOST_MPPT_MIN_DELTA_P_W = 0.3;
+const float BOOST_CC_SOFT_MARGIN_A = 0.15;
+const float BOOST_CC_HARD_MARGIN_A = 0.35;
+const float BOOST_PID_POS_LIMIT = 1.0;
+const float BOOST_PID_NEG_LIMIT = -2.0;
+const float BOOST_SOFTSTART_STEP = 1.0;
 const float FULL_DETECT_VOLTAGE = 58.3;
 const float FULL_END_CURRENT = 0.45;              // 15% ของกระแส CC (3A)
 const unsigned long FULL_CONFIRM_MS = 300000;     // เงื่อนไข FULL ต้องต่อเนื่อง 5 นาที
@@ -223,7 +231,6 @@ void TaskSampleData(void * pvParameters) {
     float p_solar_old = 0.0;
     float v_solar_old = 0.0;
     int mppt_direction = 1;
-    const float MPPT_V_STEP = 0.15;
     unsigned long last_mppt_time = 0;
 
     unsigned long pv_collapse_start_time = 0;
@@ -532,21 +539,25 @@ void TaskSampleData(void * pvParameters) {
                     raw_duty -= 10;
                     pid_integral = 0;
                 }
-                else if (v_bat_filt >= TARGET_CV_VOLTAGE || i_bat_filt >= TARGET_CC_CURRENT) {
-                    raw_duty -= 5;
+                else if (v_bat_filt >= TARGET_CV_VOLTAGE || i_bat_filt >= (TARGET_CC_CURRENT + BOOST_CC_HARD_MARGIN_A)) {
+                    raw_duty -= 4;
+                    pid_integral = 0;
+                }
+                else if (i_bat_filt >= (TARGET_CC_CURRENT + BOOST_CC_SOFT_MARGIN_A)) {
+                    raw_duty -= 2;
                     pid_integral = 0;
                 }
                 else if (v_solar == 0.0 || i_solar == 0.0) {
                     raw_duty = 0; pid_integral = 0;
                 }
                 else {
-                    if (now - last_mppt_time >= 100) {
+                    if (now - last_mppt_time >= BOOST_MPPT_INTERVAL_MS) {
                         last_mppt_time = now;
                         float p_solar = v_solar * i_solar;
                         float delta_p = p_solar - p_solar_old;
                         float delta_v = v_solar - v_solar_old;
 
-                        if (delta_p != 0) {
+                        if (fabs(delta_p) >= BOOST_MPPT_MIN_DELTA_P_W) {
                             if (delta_p > 0) {
                                 if (delta_v > 0) mppt_direction = 1;
                                 else             mppt_direction = -1;
@@ -556,7 +567,7 @@ void TaskSampleData(void * pvParameters) {
                             }
                         }
 
-                        v_solar_target += (mppt_direction * MPPT_V_STEP);
+                        v_solar_target += (mppt_direction * BOOST_MPPT_V_STEP);
                         if (v_solar_target < 41.0) v_solar_target = 41.0;
                         if (v_solar_target > 48.0) v_solar_target = 48.0;
 
@@ -576,15 +587,16 @@ void TaskSampleData(void * pvParameters) {
 
                     // ระบบแก้ล็อกช่วงเริ่มต้น (Soft-start ในโหมดแผง)
                     if (raw_duty < 30 && v_solar > 41.0) {
-                        pid_output = 2.0;
+                        pid_output = BOOST_SOFTSTART_STEP;
                     } else {
-                        if (pid_output > 1.5) pid_output = 1.5;
+                        if (pid_output > BOOST_PID_POS_LIMIT) pid_output = BOOST_PID_POS_LIMIT;
                     }
+                    if (pid_output < BOOST_PID_NEG_LIMIT) pid_output = BOOST_PID_NEG_LIMIT;
 
                     if (v_solar <= 40.5) {
                         if (pid_output > 0) pid_output = 0;
                         if (v_solar <= 40.0) pid_output = -5.0;
-                        else if (pid_output < -2.0) pid_output = -2.0;
+                        else if (pid_output < BOOST_PID_NEG_LIMIT) pid_output = BOOST_PID_NEG_LIMIT;
                     }
 
                     raw_duty += (int)round(pid_output);
