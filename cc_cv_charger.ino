@@ -97,6 +97,7 @@ const float NOISE_I_THRESHOLD = 0.08;
 volatile float v_solar = 0, v_ac_in = 0, v_bat = 0;
 volatile float i_solar = 0, i_ac_in = 0, i_bat = 0;
 volatile float v_bat_filt = 0, i_bat_filt = 0;
+volatile float i_solar_mag = 0;
 volatile float i_bat_charge_filt = 0;  // กระแสชาร์จใช้ค่าบวกเสมอเพื่อกันทิศเซนเซอร์กลับด้าน
 volatile bool system_ON = false;
 volatile bool charge_full_hold = false;
@@ -259,6 +260,7 @@ void TaskSampleData(void * pvParameters) {
 
             v_bat_filt = vbat_filter_sum / (float)filter_count;
             i_bat_filt = ibat_filter_sum / (float)filter_count;
+            i_solar_mag = fabs(i_solar);
             i_bat_charge_filt = fabs(i_bat_filt);
 
             last_adc_sample_ms = now;
@@ -296,7 +298,7 @@ void TaskSampleData(void * pvParameters) {
                     currentState = STATE_BOOST;
 
                     v_solar_old = v_solar;
-                    p_solar_old = v_solar * i_solar;
+                    p_solar_old = v_solar * i_solar_mag;
                     v_solar_target = v_solar - 1.0;
                     pid_integral = 0; pid_last_error = 0;
                     pid_integral_cc = 0; pid_last_error_cc = 0;
@@ -396,14 +398,14 @@ void TaskSampleData(void * pvParameters) {
                     duty_accumulator -= 5.0;
                     pid_integral = 0;
                 }
-                else if (v_solar == 0.0 || i_solar == 0.0) {
+                else if (v_solar == 0.0 || i_solar_mag == 0.0) {
                     duty_accumulator = 0.0;
                     pid_integral = 0;
                 }
                 else {
                     if (now - last_mppt_time >= 100) {
                         last_mppt_time = now;
-                        float p_solar = v_solar * i_solar;
+                        float p_solar = v_solar * i_solar_mag;
                         float delta_p = p_solar - p_solar_old;
                         float delta_v = v_solar - v_solar_old;
 
@@ -464,7 +466,7 @@ void TaskSampleData(void * pvParameters) {
                 ledcWrite(PWM_FORWARD_PIN, 0);
             }
 
-            total_Wh += ((v_bat * i_bat) * (now - last_millis)) / 3600000.0;
+            total_Wh += ((v_bat * i_bat_charge_filt) * (now - last_millis)) / 3600000.0;
 
             if ((v_bat_filt >= FULL_DETECT_VOLTAGE) && (i_bat_charge_filt <= FULL_END_CURRENT)) {
                 if (full_condition_start_ms == 0) full_condition_start_ms = now;
@@ -496,7 +498,7 @@ void TaskSampleData(void * pvParameters) {
                           state_label,
                           active_duty_percent);
             Serial.printf("  [PV SOLAR] Calc Volt: %5.1f V | RAW Pin A0: %7.1f mV | Target: %.2f V\n", v_solar, raw_mv_v0, v_solar_target);
-            Serial.printf("  [PV CURR ] Calc Amps: %5.2f A | RAW Pin A0: %7.1f mV\n", i_solar, raw_mv_i0);
+            Serial.printf("  [PV CURR ] Calc Amps: %5.2f A (|I|=%5.2fA) | RAW Pin A0: %7.1f mV\n", i_solar, i_solar_mag, raw_mv_i0);
             Serial.printf("  [BATTERY ] Calc Volt: %5.1f V | RAW Pin A1: %7.1f mV\n", v_bat, raw_mv_v2);
             Serial.printf("  [BAT CURR] Calc Amps: %5.2f A | RAW Pin A2: %7.1f mV\n", i_bat, raw_mv_i2);
             Serial.printf("  [BAT FILT] Volt/Amps: %5.2f V / %5.2f A (|I|=%5.2fA)\n", v_bat_filt, i_bat_filt, i_bat_charge_filt);
