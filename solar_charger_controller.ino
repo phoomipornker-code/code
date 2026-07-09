@@ -67,12 +67,7 @@ const float BOOST_MPPT_TARGET_MIN_LOW_SUN = 39.8;
 const float BOOST_LOW_SUN_ENTRY_V = 40.6;
 const float BOOST_LOW_SUN_EXIT_V = 41.3;
 const float BOOST_BAT_CURRENT_LIMIT_MARGIN_A = 0.20;
-const float BOOST_BAT_CURRENT_HARD_EXTRA_A = 0.50;
-const int BOOST_DUTY_TRIM_SOFT = 1;
-const int BOOST_DUTY_TRIM_HARD = 1;
-const unsigned long BOOST_DUTY_TRIM_SOFT_INTERVAL_MS = 140;
-const unsigned long BOOST_DUTY_TRIM_HARD_INTERVAL_MS = 100;
-const unsigned long BOOST_DUTY_TRIM_CV_INTERVAL_MS = 80;
+const float BOOST_HOLD_CV_MARGIN_V = 0.0;          // ถึงจุดจำกัดให้ "หยุดเพิ่ม duty" แทนการตัดลงทันที
 const float BOOST_PID_POS_LIMIT = 1.0;
 const float BOOST_PID_NEG_LIMIT_NORMAL = -1.0;
 const float BOOST_PID_NEG_LIMIT_LOW_SUN = -0.6;
@@ -277,7 +272,6 @@ void TaskSampleData(void * pvParameters) {
     unsigned long last_forward_up_step_ms = 0;
     unsigned long last_boost_down_step_ms = 0;
     unsigned long last_boost_up_step_ms = 0;
-    unsigned long last_boost_trim_ms = 0;
     const float kp_cv_effective = (Kp_cv < MIN_REASONABLE_KP_CV) ? 0.42f : Kp_cv;
     const float ki_cc_effective = (Ki_cc > MAX_REASONABLE_KI_CC) ? 0.01f : Ki_cc;
     const unsigned long cv_fine_up_interval_effective =
@@ -501,7 +495,6 @@ void TaskSampleData(void * pvParameters) {
                 boost_duty_step_accumulator = 0.0;
                 last_boost_down_step_ms = 0;
                 last_boost_up_step_ms = 0;
-                last_boost_trim_ms = 0;
             }
 
             if (currentState == STATE_FORWARD) {
@@ -596,33 +589,14 @@ void TaskSampleData(void * pvParameters) {
                     pid_integral = 0;
                     boost_duty_step_accumulator = 0.0;
                 }
-                else if (v_bat_filt >= TARGET_CV_VOLTAGE) {
-                    if (now - last_boost_trim_ms >= BOOST_DUTY_TRIM_CV_INTERVAL_MS) {
-                        raw_duty -= BOOST_DUTY_TRIM_HARD;
-                        last_boost_trim_ms = now;
-                    }
-                    pid_integral = 0;
-                    boost_duty_step_accumulator = 0.0;
-                }
-                else if (i_bat_filt >= (TARGET_CC_CURRENT + BOOST_BAT_CURRENT_LIMIT_MARGIN_A)) {
-                    float over_current_a = i_bat_filt - TARGET_CC_CURRENT;
-                    bool hard_trim = (over_current_a >= (BOOST_BAT_CURRENT_LIMIT_MARGIN_A + BOOST_BAT_CURRENT_HARD_EXTRA_A));
-                    int trim_step = hard_trim ? BOOST_DUTY_TRIM_HARD : BOOST_DUTY_TRIM_SOFT;
-                    unsigned long trim_interval_ms = hard_trim
-                        ? BOOST_DUTY_TRIM_HARD_INTERVAL_MS
-                        : BOOST_DUTY_TRIM_SOFT_INTERVAL_MS;
-                    if (now - last_boost_trim_ms >= trim_interval_ms) {
-                        raw_duty -= trim_step;
-                        last_boost_trim_ms = now;
-                    }
-                    pid_integral = 0;
-                    boost_duty_step_accumulator = 0.0;
-                }
                 else if (v_solar <= BOOST_MIN_VALID_PV_V) {
                     raw_duty = 0; pid_integral = 0;
                     boost_duty_step_accumulator = 0.0;
                 }
                 else {
+                    bool boost_hold_rise =
+                        (v_bat_filt >= (TARGET_CV_VOLTAGE + BOOST_HOLD_CV_MARGIN_V)) ||
+                        (i_bat_filt >= (TARGET_CC_CURRENT + BOOST_BAT_CURRENT_LIMIT_MARGIN_A));
                     if (now - last_mppt_time >= BOOST_MPPT_INTERVAL_MS) {
                         last_mppt_time = now;
                         float p_solar = v_solar * i_solar;
@@ -656,6 +630,9 @@ void TaskSampleData(void * pvParameters) {
                         pid_integral += pid_error;
                         pid_integral = constrain(pid_integral, -50, 50);
                     }
+                    if (boost_hold_rise && pid_integral > 0.0) {
+                        pid_integral *= 0.80;
+                    }
                     if (pid_error < -BOOST_TARGET_DEADBAND_V && pid_integral > 0.0) {
                         pid_integral *= 0.85;
                     }
@@ -673,6 +650,9 @@ void TaskSampleData(void * pvParameters) {
                         pid_output = 0.0;
                     } else if (fabs(pid_error) <= BOOST_TARGET_DEADBAND_V && pid_output > BOOST_POS_LIMIT_NEAR_TARGET) {
                         pid_output = BOOST_POS_LIMIT_NEAR_TARGET;
+                    }
+                    if (boost_hold_rise && pid_output > 0.0) {
+                        pid_output = 0.0;
                     }
                     float boost_pid_neg_limit = low_sun_mode ? BOOST_PID_NEG_LIMIT_LOW_SUN : BOOST_PID_NEG_LIMIT_NORMAL;
                     if (pid_output < boost_pid_neg_limit) pid_output = boost_pid_neg_limit;
@@ -768,7 +748,6 @@ void TaskSampleData(void * pvParameters) {
             boost_duty_step_accumulator = 0.0;
             last_boost_down_step_ms = 0;
             last_boost_up_step_ms = 0;
-            last_boost_trim_ms = 0;
         }
 
         last_millis = now;
