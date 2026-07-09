@@ -93,6 +93,11 @@ const float BOOST_FAST_FALL_DV_THRESHOLD_V = -0.22; // ถ้า PV ตกเร
 const float BOOST_FAST_FALL_ERR_THRESHOLD_V = -0.45;
 const int BOOST_FAST_FALL_DOWN_STEP = -2;
 const unsigned long BOOST_FAST_FALL_DOWN_INTERVAL_MS = 60;
+const float BOOST_RECOVERY_PV_HEADROOM_V = 1.8;    // PV สูงกว่าเป้ามาก แต่ชาร์จไม่เข้า -> กัน duty stall
+const float BOOST_RECOVERY_BAT_MARGIN_V = 1.2;
+const float BOOST_RECOVERY_CHARGE_CURRENT_A = 0.20;
+const int BOOST_RECOVERY_MIN_DUTY = 14;
+const unsigned long BOOST_RECOVERY_CONFIRM_MS = 350;
 const int BOOST_LOW_SUN_MIN_DUTY = 8;
 const float BOOST_LOW_SUN_HOLD_MIN_V = 38.8;
 const float BOOST_LOW_SUN_HOLD_MAX_V = 40.0;
@@ -279,6 +284,7 @@ void TaskSampleData(void * pvParameters) {
     unsigned long last_forward_up_step_ms = 0;
     unsigned long last_boost_down_step_ms = 0;
     unsigned long last_boost_up_step_ms = 0;
+    unsigned long boost_recovery_start_ms = 0;
     const float kp_cv_effective = (Kp_cv < MIN_REASONABLE_KP_CV) ? 0.42f : Kp_cv;
     const float ki_cc_effective = (Ki_cc > MAX_REASONABLE_KI_CC) ? 0.01f : Ki_cc;
     const unsigned long cv_fine_up_interval_effective =
@@ -503,6 +509,7 @@ void TaskSampleData(void * pvParameters) {
                 boost_duty_step_accumulator = 0.0;
                 last_boost_down_step_ms = 0;
                 last_boost_up_step_ms = 0;
+                boost_recovery_start_ms = 0;
             }
 
             if (currentState == STATE_FORWARD) {
@@ -752,6 +759,23 @@ void TaskSampleData(void * pvParameters) {
                 i_bat_filt < (TARGET_CC_CURRENT + BOOST_BAT_CURRENT_LIMIT_MARGIN_A)) {
                 if (raw_duty < BOOST_LOW_SUN_MIN_DUTY) raw_duty = BOOST_LOW_SUN_MIN_DUTY;
             }
+            if (currentState == STATE_BOOST) {
+                bool boost_recovery_condition =
+                    (v_bat_filt < (TARGET_CV_VOLTAGE - BOOST_RECOVERY_BAT_MARGIN_V)) &&
+                    (v_solar > (v_solar_target + BOOST_RECOVERY_PV_HEADROOM_V)) &&
+                    (i_bat_filt < BOOST_RECOVERY_CHARGE_CURRENT_A) &&
+                    (raw_duty < BOOST_RECOVERY_MIN_DUTY);
+                if (boost_recovery_condition) {
+                    if (boost_recovery_start_ms == 0) boost_recovery_start_ms = now;
+                    if (now - boost_recovery_start_ms >= BOOST_RECOVERY_CONFIRM_MS) {
+                        raw_duty = BOOST_RECOVERY_MIN_DUTY;
+                        pid_integral = 0.0;
+                        boost_duty_step_accumulator = 0.0;
+                    }
+                } else {
+                    boost_recovery_start_ms = 0;
+                }
+            }
 
             if (currentState == STATE_FORWARD) {
                 ledcWrite(PWM_FORWARD_PIN, raw_duty);
@@ -783,6 +807,7 @@ void TaskSampleData(void * pvParameters) {
             boost_duty_step_accumulator = 0.0;
             last_boost_down_step_ms = 0;
             last_boost_up_step_ms = 0;
+            boost_recovery_start_ms = 0;
         }
 
         last_millis = now;
