@@ -79,12 +79,17 @@ const float BOOST_PID_NEG_LIMIT_LOW_SUN = -0.6;
 const float BOOST_SOFTSTART_STEP = 1.0;
 const float BOOST_MIN_VALID_PV_V = 5.0;
 const float BOOST_VSOLAR_COLLAPSE_STEP = -2.0;
-const float BOOST_VSOLAR_GUARD_OFFSET_V = 0.2;
-const float BOOST_VSOLAR_CRITICAL_OFFSET_V = -0.2;
+const float BOOST_VSOLAR_GUARD_OFFSET_NORMAL_V = 0.2;
+const float BOOST_VSOLAR_GUARD_OFFSET_LOW_SUN_V = -0.05;
+const float BOOST_VSOLAR_CRITICAL_OFFSET_NORMAL_V = -0.2;
+const float BOOST_VSOLAR_CRITICAL_OFFSET_LOW_SUN_V = -0.35;
 const float BOOST_LANDING_BAND_V = 0.6;            // เข้าโซนลงจอดเมื่อแรงดันแผงใกล้เป้า
 const float BOOST_LANDING_BAND_A = 0.25;           // หรือกระแสแบตใกล้ CC ให้ชะลอขาลง
 const unsigned long BOOST_LANDING_DOWN_INTERVAL_MS = 120;
 const unsigned long BOOST_LANDING_DOWN_INTERVAL_LOW_SUN_MS = 180;
+const int BOOST_LOW_SUN_MIN_DUTY = 8;
+const float BOOST_LOW_SUN_HOLD_MIN_V = 39.6;
+const float BOOST_LOW_SUN_HOLD_MAX_V = 41.0;
 const float BOOST_PV_SHUTDOWN_LOW_SUN_V = 37.5;
 const unsigned long BOOST_PV_SHUTDOWN_NORMAL_MS = 2000;
 const unsigned long BOOST_PV_SHUTDOWN_LOW_SUN_MS = 7000;
@@ -658,11 +663,14 @@ void TaskSampleData(void * pvParameters) {
                     float boost_pid_neg_limit = low_sun_mode ? BOOST_PID_NEG_LIMIT_LOW_SUN : BOOST_PID_NEG_LIMIT_NORMAL;
                     if (pid_output < boost_pid_neg_limit) pid_output = boost_pid_neg_limit;
 
-                    float pv_guard_v = target_floor + BOOST_VSOLAR_GUARD_OFFSET_V;
-                    float pv_critical_v = target_floor + BOOST_VSOLAR_CRITICAL_OFFSET_V;
+                    float pv_guard_offset_v = low_sun_mode ? BOOST_VSOLAR_GUARD_OFFSET_LOW_SUN_V : BOOST_VSOLAR_GUARD_OFFSET_NORMAL_V;
+                    float pv_critical_offset_v = low_sun_mode ? BOOST_VSOLAR_CRITICAL_OFFSET_LOW_SUN_V : BOOST_VSOLAR_CRITICAL_OFFSET_NORMAL_V;
+                    float pv_guard_v = target_floor + pv_guard_offset_v;
+                    float pv_critical_v = target_floor + pv_critical_offset_v;
+                    float boost_vsolar_collapse_step = low_sun_mode ? -1.0f : BOOST_VSOLAR_COLLAPSE_STEP;
                     if (v_solar <= pv_guard_v) {
                         if (pid_output > 0) pid_output = 0;
-                        if (v_solar <= pv_critical_v) pid_output = BOOST_VSOLAR_COLLAPSE_STEP;
+                        if (v_solar <= pv_critical_v) pid_output = boost_vsolar_collapse_step;
                         else if (pid_output < boost_pid_neg_limit) pid_output = boost_pid_neg_limit;
                     }
 
@@ -696,6 +704,14 @@ void TaskSampleData(void * pvParameters) {
             }
 
             raw_duty = constrain(raw_duty, 0, allowed_max_duty);
+            if (currentState == STATE_BOOST &&
+                low_sun_mode &&
+                v_solar >= BOOST_LOW_SUN_HOLD_MIN_V &&
+                v_solar <= BOOST_LOW_SUN_HOLD_MAX_V &&
+                v_bat_filt < (TARGET_CV_VOLTAGE - 0.8) &&
+                i_bat_filt < (TARGET_CC_CURRENT + BOOST_BAT_CURRENT_LIMIT_MARGIN_A)) {
+                if (raw_duty < BOOST_LOW_SUN_MIN_DUTY) raw_duty = BOOST_LOW_SUN_MIN_DUTY;
+            }
 
             if (currentState == STATE_FORWARD) {
                 ledcWrite(PWM_FORWARD_PIN, raw_duty);
