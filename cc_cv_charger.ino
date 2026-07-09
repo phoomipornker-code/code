@@ -96,8 +96,10 @@ const unsigned long NO_HARVEST_TIMEOUT_MS = 20000;
 const unsigned long BOOST_HARVEST_CHECK_DELAY_MS = 8000;
 const int MIN_BOOST_DUTY_FOR_HARVEST_CHECK = 80;
 const float BOOST_VOLTAGE_FLOOR = 42.0;
+const float BOOST_BAT_VOLTAGE_LIMIT = 58.0;
 const float BOOST_SAFE_V_HEADROOM = 0.4;
 const float BOOST_SAFE_I_HEADROOM = 0.15;
+const float BOOST_SAFE_BAT_HEADROOM = 0.3;
 const float HARD_OVP_TRIP_VOLTAGE = 60.5;
 const float HARD_OVP_RELEASE_VOLTAGE = 58.0;
 
@@ -497,7 +499,7 @@ void TaskSampleData(void * pvParameters) {
 
                 bool charge_is_active = (i_bat_charge_filt >= MIN_CURRENT_FOR_ACTIVE_CHARGE) ||
                                         (i_solar_mag >= MIN_CURRENT_FOR_ACTIVE_CHARGE);
-                if ((v_bat_filt >= TARGET_CV_VOLTAGE && charge_is_active) ||
+                if ((v_bat_filt >= BOOST_BAT_VOLTAGE_LIMIT && charge_is_active) ||
                     (i_bat_charge_filt >= TARGET_CC_CURRENT)) {
                     duty_accumulator -= 5.0;
                     pid_integral = 0;
@@ -559,7 +561,7 @@ void TaskSampleData(void * pvParameters) {
                 }
             }
 
-            // Guardrail ตอนเริ่มและขณะบูสต์: รักษา I<=3A และช่วยประคอง Vsolar >= 42V
+            // Guardrail ตอนเริ่มและขณะบูสต์: รักษา I<=3A, Vpv>=42V และ Vbatt<=58V
             if (currentState == STATE_BOOST) {
                 if (v_solar < BOOST_VOLTAGE_FLOOR) {
                     float v_under = BOOST_VOLTAGE_FLOOR - v_solar;
@@ -570,13 +572,19 @@ void TaskSampleData(void * pvParameters) {
                     duty_accumulator -= (5.0 + (over_current * 3.0));
                     pid_integral = 0;
                 }
+                if (v_bat_filt > BOOST_BAT_VOLTAGE_LIMIT) {
+                    float over_bat_v = v_bat_filt - BOOST_BAT_VOLTAGE_LIMIT;
+                    duty_accumulator -= (5.0 + (over_bat_v * 10.0));
+                    pid_integral = 0;
+                }
 
                 // จำกัดความเร็วขาขึ้นของ duty เมื่อเข้าใกล้ข้อจำกัด 42V/3A
                 float duty_delta = duty_accumulator - duty_before_control;
                 if (duty_delta > 0.0) {
                     bool near_v_limit = (v_solar <= (BOOST_VOLTAGE_FLOOR + BOOST_SAFE_V_HEADROOM));
                     bool near_i_limit = (i_bat_charge_filt >= (TARGET_CC_CURRENT - BOOST_SAFE_I_HEADROOM));
-                    if (near_v_limit || near_i_limit) {
+                    bool near_bat_limit = (v_bat_filt >= (BOOST_BAT_VOLTAGE_LIMIT - BOOST_SAFE_BAT_HEADROOM));
+                    if (near_v_limit || near_i_limit || near_bat_limit) {
                         const float LIMITED_UP_STEP = 0.6;
                         if (duty_delta > LIMITED_UP_STEP) {
                             duty_accumulator = duty_before_control + LIMITED_UP_STEP;
