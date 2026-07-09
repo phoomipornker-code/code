@@ -95,6 +95,10 @@ const float NOISE_I_THRESHOLD = 0.08;
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 const float BOOST_VOLTAGE_FLOOR = 42.0;
 const float BOOST_BAT_VOLTAGE_LIMIT = 58.0;
+const float BOOST_START_I_TARGET = 1.0;
+const float BOOST_START_EFF_EST = 0.90;
+const int BOOST_START_DUTY_MIN_RAW = 60;
+const int BOOST_START_DUTY_MAX_RAW = 320;
 const float BOOST_CV_ENTRY_VOLTAGE = 57.8;
 const float BOOST_CV_EXIT_VOLTAGE = 57.2;
 const unsigned long BOOST_RAMP_DURATION_MS = 2500;
@@ -121,6 +125,7 @@ volatile float ovp_trip_voltage = 0.0;
 volatile bool system_ON = false;
 volatile bool charge_full_hold = false;
 volatile int active_duty_percent = 0;
+volatile int boost_start_duty_raw = 20;
 int raw_duty = 0;
 float duty_accumulator = 0.0;          // เก็บ duty แบบทศนิยม เพื่อลด dead-zone จาก round()
 float total_Wh = 0;
@@ -153,6 +158,27 @@ int filter_count = 0;
 void TaskSampleData(void * pvParameters);
 void TaskLCDLoop(void * pvParameters);
 void calibrateCurrentOffsetsAtBoot();
+int calcInitialBoostDutyRaw(float v_pv_now, float v_bat_now);
+
+int calcInitialBoostDutyRaw(float v_pv_now, float v_bat_now) {
+    float vout = (v_bat_now > (BOOST_VOLTAGE_FLOOR + 0.8)) ? v_bat_now : (BOOST_VOLTAGE_FLOOR + 0.8);
+    float vin_ref = (v_pv_now > BOOST_VOLTAGE_FLOOR) ? v_pv_now : BOOST_VOLTAGE_FLOOR;
+
+    float d_est = 1.0 - (vin_ref / vout);
+    if (d_est < 0.0) d_est = 0.0;
+
+    // ประมาณกำลังเริ่มต้นที่ต้องการจาก I_start แล้วลด duty ลงถ้ากระแสแผงที่ต้องการสูงเกินกรอบ CC
+    float p_out_start = vout * BOOST_START_I_TARGET;
+    float p_in_start = p_out_start / BOOST_START_EFF_EST;
+    float i_pv_req = p_in_start / vin_ref;
+    if (i_pv_req > TARGET_CC_CURRENT) {
+        float scale = TARGET_CC_CURRENT / i_pv_req;
+        d_est *= scale;
+    }
+
+    int raw = (int)roundf(d_est * 1023.0);
+    return constrain(raw, BOOST_START_DUTY_MIN_RAW, BOOST_START_DUTY_MAX_RAW);
+}
 
 static inline int16_t readADCStable(Adafruit_ADS1115 &adc, uint8_t channel) {
     // Discard first conversion after channel switch to reduce mux settling artifacts.
@@ -384,9 +410,12 @@ void TaskSampleData(void * pvParameters) {
                     pid_integral = 0; pid_last_error = 0;
                     pid_integral_cc = 0; pid_last_error_cc = 0;
                     pid_integral_cv = 0; pid_last_error_cv = 0;
-                    raw_duty = 20;
-                    duty_accumulator = 20.0;
+                    float vbat_for_start = (v_bat_filt > NOISE_V_THRESHOLD) ? v_bat_filt : v_bat;
+                    boost_start_duty_raw = calcInitialBoostDutyRaw(v_solar, vbat_for_start);
+                    raw_duty = boost_start_duty_raw;
+                    duty_accumulator = (float)boost_start_duty_raw;
                     pv_is_collapsing = false;
+                    Serial.printf("[INFO] BOOST start duty=%d (Hybrid init).\n", boost_start_duty_raw);
                 }
                 else if (v_ac_in >= MIN_AC_VOLTAGE) {
                     ledcWrite(PWM_FORWARD_PIN, 0); ledcWrite(PWM_BOOST_PIN, 0);
@@ -400,6 +429,7 @@ void TaskSampleData(void * pvParameters) {
                     pid_integral_cv = 0; pid_last_error_cv = 0;
                     raw_duty = 10;
                     duty_accumulator = 10.0;
+                    boost_start_duty_raw = 20;
                 }
                 else {
                     system_ON = false;
@@ -433,6 +463,7 @@ void TaskSampleData(void * pvParameters) {
             currentState = STATE_OFF;
             boostMode = BOOST_RAMP;
             boost_mode_enter_ms = 0;
+            boost_start_duty_raw = 20;
             raw_duty = 0;
             duty_accumulator = 0.0;
             pv_is_collapsing = false;
@@ -494,7 +525,9 @@ void TaskSampleData(void * pvParameters) {
                             pid_integral_cv = 0;
                             pid_last_error_cv = 0;
                         } else {
-                            duty_accumulator += BOOST_RAMP_STEP;
+                            if (duty_accumulator < (float)boost_start_duty_raw) {
+                                duty_accumulator += BOOST_RAMP_STEP;
+                            }
                             bool ramp_ready_for_mppt =
                                 (i_solar_mag >= MIN_CURRENT_FOR_ACTIVE_CHARGE) ||
                                 (i_bat_charge_filt >= MIN_CURRENT_FOR_ACTIVE_CHARGE) ||
