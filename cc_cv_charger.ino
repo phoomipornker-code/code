@@ -93,6 +93,8 @@ const float NOISE_I_THRESHOLD = 0.08;
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 const float MIN_SOLAR_HARVEST_CURRENT = 0.12;
 const unsigned long NO_HARVEST_TIMEOUT_MS = 20000;
+const unsigned long BOOST_HARVEST_CHECK_DELAY_MS = 8000;
+const int MIN_BOOST_DUTY_FOR_HARVEST_CHECK = 80;
 const float HARD_OVP_TRIP_VOLTAGE = 60.5;
 const float HARD_OVP_RELEASE_VOLTAGE = 58.0;
 
@@ -241,6 +243,7 @@ void TaskSampleData(void * pvParameters) {
     unsigned long pv_collapse_start_time = 0;
     bool pv_is_collapsing = false;
     unsigned long no_harvest_start_ms = 0;
+    unsigned long boost_mode_enter_ms = 0;
     unsigned long last_debug_time = 0;
     unsigned long last_sensor_error_log = 0;
     unsigned long full_condition_start_ms = 0;
@@ -368,6 +371,8 @@ void TaskSampleData(void * pvParameters) {
                     raw_duty = 20;
                     duty_accumulator = 20.0;
                     pv_is_collapsing = false;
+                    boost_mode_enter_ms = now;
+                    no_harvest_start_ms = 0;
                 }
                 else if (v_ac_in >= MIN_AC_VOLTAGE) {
                     ledcWrite(PWM_FORWARD_PIN, 0); ledcWrite(PWM_BOOST_PIN, 0);
@@ -379,6 +384,8 @@ void TaskSampleData(void * pvParameters) {
                     pid_integral_cv = 0; pid_last_error_cv = 0;
                     raw_duty = 10;
                     duty_accumulator = 10.0;
+                    boost_mode_enter_ms = 0;
+                    no_harvest_start_ms = 0;
                 }
                 else {
                     system_ON = false;
@@ -401,13 +408,22 @@ void TaskSampleData(void * pvParameters) {
 
                 // ช่วงแสงอ่อน (เช่นตอนเย็น) อาจมีแต่แรงดันเปิดวงจร แต่ไม่มีกำลังจริงให้ดึง
                 // หากไม่มีกระแสเก็บเกี่ยวต่อเนื่อง ให้กลับ standby เพื่อลดการฮันท์ duty
-                bool no_harvest = (i_solar_mag < MIN_SOLAR_HARVEST_CURRENT) &&
-                                  (i_bat_charge_filt < MIN_SOLAR_HARVEST_CURRENT);
-                if (no_harvest) {
-                    if (no_harvest_start_ms == 0) no_harvest_start_ms = now;
-                    if (now - no_harvest_start_ms >= NO_HARVEST_TIMEOUT_MS) {
-                        system_ON = false;
-                        Serial.println("[INFO] No PV harvest current for timeout window. Enter standby.");
+                bool harvest_check_armed =
+                    (boost_mode_enter_ms > 0) &&
+                    (now - boost_mode_enter_ms >= BOOST_HARVEST_CHECK_DELAY_MS) &&
+                    (raw_duty >= MIN_BOOST_DUTY_FOR_HARVEST_CHECK);
+
+                if (harvest_check_armed) {
+                    bool no_harvest = (i_solar_mag < MIN_SOLAR_HARVEST_CURRENT) &&
+                                      (i_bat_charge_filt < MIN_SOLAR_HARVEST_CURRENT);
+                    if (no_harvest) {
+                        if (no_harvest_start_ms == 0) no_harvest_start_ms = now;
+                        if (now - no_harvest_start_ms >= NO_HARVEST_TIMEOUT_MS) {
+                            system_ON = false;
+                            Serial.println("[INFO] No PV harvest current after boost ramp. Enter standby.");
+                        }
+                    } else {
+                        no_harvest_start_ms = 0;
                     }
                 } else {
                     no_harvest_start_ms = 0;
@@ -416,6 +432,7 @@ void TaskSampleData(void * pvParameters) {
             else if (currentState == STATE_FORWARD) {
                 if (v_ac_in < MIN_AC_VOLTAGE) { system_ON = false; }
                 no_harvest_start_ms = 0;
+                boost_mode_enter_ms = 0;
             }
         }
 
@@ -427,6 +444,7 @@ void TaskSampleData(void * pvParameters) {
             duty_accumulator = 0.0;
             pv_is_collapsing = false;
             no_harvest_start_ms = 0;
+            boost_mode_enter_ms = 0;
         }
 
         if (system_ON && currentState != STATE_OFF) {
