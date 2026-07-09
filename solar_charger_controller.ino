@@ -64,7 +64,9 @@ const float BOOST_MPPT_V_STEP_LOW_SUN = 0.05;
 const float BOOST_MPPT_MIN_DELTA_P_W = 0.25;
 const float BOOST_MPPT_TARGET_MIN_NORMAL = 40.8;
 const float BOOST_MPPT_TARGET_MIN_LOW_SUN = 39.8;
-const float BOOST_MPPT_TARGET_CEILING_V = 42.0;    // ชนเพดาน MPPT ที่ 42V ตามต้องการ
+const float BOOST_MPPT_TARGET_CEILING_V = 41.0;    // ชนเพดาน MPPT target ที่ 41V ตามต้องการ
+const float BOOST_PV_HOLD_MIN_V = 42.0;            // รักษาแรงดันแผงไม่ให้ต่ำกว่า 42V
+const float BOOST_PV_HOLD_BAND_V = 0.15;
 const float BOOST_LOW_SUN_ENTRY_V = 40.6;
 const float BOOST_LOW_SUN_EXIT_V = 41.3;
 const float BOOST_BAT_CURRENT_LIMIT_MARGIN_A = 0.20;
@@ -92,8 +94,8 @@ const float BOOST_FAST_FALL_ERR_THRESHOLD_V = -0.45;
 const int BOOST_FAST_FALL_DOWN_STEP = -2;
 const unsigned long BOOST_FAST_FALL_DOWN_INTERVAL_MS = 60;
 const int BOOST_LOW_SUN_MIN_DUTY = 8;
-const float BOOST_LOW_SUN_HOLD_MIN_V = 39.6;
-const float BOOST_LOW_SUN_HOLD_MAX_V = 41.0;
+const float BOOST_LOW_SUN_HOLD_MIN_V = 38.8;
+const float BOOST_LOW_SUN_HOLD_MAX_V = 40.0;
 const float BOOST_PV_SHUTDOWN_V = 38.0;            // ตัดเมื่อ PV ต่ำกว่า 38V
 const unsigned long BOOST_PV_SHUTDOWN_CONFIRM_MS = 2000;
 const float FULL_DETECT_VOLTAGE = 58.3;
@@ -668,7 +670,17 @@ void TaskSampleData(void * pvParameters) {
                     if (boost_hold_rise && pid_output > 0.0) {
                         pid_output = 0.0;
                     }
+                    // Guard หลักตามสเปก: รักษา PV ไม่ให้ต่ำกว่า 42V โดยหยุดเร่ง duty และผ่อนโหลดเมื่อเริ่มหลุด
+                    if (v_solar <= BOOST_PV_HOLD_MIN_V) {
+                        if (pid_output > 0.0) pid_output = 0.0;
+                        if (v_solar < (BOOST_PV_HOLD_MIN_V - BOOST_PV_HOLD_BAND_V) && pid_output > -1.0f) {
+                            pid_output = -1.0f;
+                        }
+                    }
                     float boost_pid_neg_limit = low_sun_mode ? BOOST_PID_NEG_LIMIT_LOW_SUN : BOOST_PID_NEG_LIMIT_NORMAL;
+                    if (v_solar < (BOOST_PV_HOLD_MIN_V - BOOST_PV_HOLD_BAND_V) && boost_pid_neg_limit > -1.0f) {
+                        boost_pid_neg_limit = -1.0f;
+                    }
                     if (pid_output < boost_pid_neg_limit) pid_output = boost_pid_neg_limit;
 
                     float pv_guard_offset_v = low_sun_mode ? BOOST_VSOLAR_GUARD_OFFSET_LOW_SUN_V : BOOST_VSOLAR_GUARD_OFFSET_NORMAL_V;
