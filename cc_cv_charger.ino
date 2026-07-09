@@ -91,6 +91,9 @@ const float CAL_SCALE_I_BAT   = 42.46;
 const float NOISE_V_THRESHOLD = 0.5;
 const float NOISE_I_THRESHOLD = 0.08;
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
+const float BAT_MAX_PLAUSIBLE_VOLTAGE = 70.0;
+const float BAT_MAX_STEP_IDLE_V = 1.2;
+const float BAT_MAX_STEP_ACTIVE_V = 4.0;
 
 // =========================================================================
 // ตัวแปรระบบ
@@ -123,6 +126,7 @@ float raw_mv_i0 = 0, raw_mv_i1 = 0, raw_mv_i2 = 0;
 float current_offset_i0 = OFFSET_I_SOLAR;
 float current_offset_i1 = OFFSET_I_AC;
 float current_offset_i2 = OFFSET_I_BAT;
+float last_valid_vbat = 0.0;
 float vbat_filter_buf[8] = {0};
 float ibat_filter_buf[8] = {0};
 float vbat_filter_sum = 0;
@@ -133,6 +137,12 @@ int filter_count = 0;
 void TaskSampleData(void * pvParameters);
 void TaskLCDLoop(void * pvParameters);
 void calibrateCurrentOffsetsAtBoot();
+
+static inline int16_t readADCStable(Adafruit_ADS1115 &adc, uint8_t channel) {
+    // Discard first conversion after channel switch to reduce mux settling artifacts.
+    (void)adc.readADC_SingleEnded(channel);
+    return adc.readADC_SingleEnded(channel);
+}
 
 static inline void disablePowerStage() {
     currentState = STATE_OFF;
@@ -161,9 +171,9 @@ void calibrateCurrentOffsetsAtBoot() {
     vTaskDelay(100 / portTICK_PERIOD_MS);
 
     for (int i = 0; i < CAL_SAMPLES; i++) {
-        sum_i0 += ads_curr.readADC_SingleEnded(0) * 0.1875;
-        sum_i1 += ads_curr.readADC_SingleEnded(1) * 0.1875;
-        sum_i2 += ads_curr.readADC_SingleEnded(2) * 0.1875;
+        sum_i0 += readADCStable(ads_curr, 0) * 0.1875;
+        sum_i1 += readADCStable(ads_curr, 1) * 0.1875;
+        sum_i2 += readADCStable(ads_curr, 2) * 0.1875;
         vTaskDelay(2 / portTICK_PERIOD_MS);
     }
 
@@ -247,13 +257,13 @@ void TaskSampleData(void * pvParameters) {
 
         bool sample_ok = false;
         if (xSemaphoreTake(i2c_Mutex, 50)) {
-            raw_mv_v0 = ads_volt.readADC_SingleEnded(0) * 0.1875;
-            raw_mv_v1 = ads_volt.readADC_SingleEnded(2) * 0.1875;
-            raw_mv_v2 = ads_volt.readADC_SingleEnded(1) * 0.1875;
+            raw_mv_v0 = readADCStable(ads_volt, 0) * 0.1875;
+            raw_mv_v1 = readADCStable(ads_volt, 2) * 0.1875;
+            raw_mv_v2 = readADCStable(ads_volt, 1) * 0.1875;
 
-            raw_mv_i0 = ads_curr.readADC_SingleEnded(0) * 0.1875;
-            raw_mv_i1 = ads_curr.readADC_SingleEnded(1) * 0.1875;
-            raw_mv_i2 = ads_curr.readADC_SingleEnded(2) * 0.1875;
+            raw_mv_i0 = readADCStable(ads_curr, 0) * 0.1875;
+            raw_mv_i1 = readADCStable(ads_curr, 1) * 0.1875;
+            raw_mv_i2 = readADCStable(ads_curr, 2) * 0.1875;
 
             float mv_pure_v0 = raw_mv_v0 - OFFSET_V_SOLAR; if (mv_pure_v0 < 0.0) mv_pure_v0 = 0.0;
             float mv_pure_v1 = raw_mv_v1 - OFFSET_V_AC;    if (mv_pure_v1 < 0.0) mv_pure_v1 = 0.0;
@@ -265,7 +275,7 @@ void TaskSampleData(void * pvParameters) {
 
             v_solar = (mv_pure_v0 / 1000.0) * CAL_SCALE_V_SOLAR;
             v_ac_in = (mv_pure_v1 / 1000.0) * CAL_SCALE_V_AC;
-            v_bat   = (mv_pure_v2 / 1000.0) * CAL_SCALE_V_BAT;
+            float v_bat_sample = (mv_pure_v2 / 1000.0) * CAL_SCALE_V_BAT;
 
             i_solar = (mv_pure_i0 / 1000.0) * CAL_SCALE_I_SOLAR;
             i_ac_in = (mv_pure_i1 / 1000.0) * CAL_SCALE_I_AC;
@@ -278,6 +288,27 @@ void TaskSampleData(void * pvParameters) {
             if (fabs(i_solar) < NOISE_I_THRESHOLD) i_solar = 0.0;
             if (fabs(i_ac_in) < NOISE_I_THRESHOLD) i_ac_in = 0.0;
             if (fabs(i_bat)   < NOISE_I_THRESHOLD) i_bat   = 0.0;
+
+            float i_solar_mag_now = fabs(i_solar);
+            float i_bat_mag_now = fabs(i_bat);
+            float allowed_vbat_step = ((i_bat_mag_now >= MIN_CURRENT_FOR_ACTIVE_CHARGE) ||
+                                       (i_solar_mag_now >= MIN_CURRENT_FOR_ACTIVE_CHARGE))
+                                        ? BAT_MAX_STEP_ACTIVE_V
+                                        : BAT_MAX_STEP_IDLE_V;
+            bool vbat_range_ok = (v_bat_sample <= BAT_MAX_PLAUSIBLE_VOLTAGE);
+            bool vbat_step_ok = (last_valid_vbat <= 0.0) ||
+                                (fabs(v_bat_sample - last_valid_vbat) <= allowed_vbat_step);
+            if (vbat_range_ok && vbat_step_ok) {
+                v_bat = v_bat_sample;
+                last_valid_vbat = v_bat_sample;
+            } else {
+                v_bat = (last_valid_vbat > 0.0) ? last_valid_vbat : 0.0;
+                if (now - last_sensor_error_log >= SENSOR_ERROR_LOG_MS) {
+                    last_sensor_error_log = now;
+                    Serial.printf("[WARN] Reject VBAT glitch sample: %.2fV (last valid %.2fV)\n",
+                                  v_bat_sample, last_valid_vbat);
+                }
+            }
 
             // ใช้ moving average ช่วยลดการสั่นของ CV รอบแรงดันใกล้เต็ม
             vbat_filter_sum -= vbat_filter_buf[filter_index];
