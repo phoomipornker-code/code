@@ -85,6 +85,10 @@ const float BOOST_VSOLAR_CRITICAL_OFFSET_NORMAL_V = -0.2;
 const float BOOST_VSOLAR_CRITICAL_OFFSET_LOW_SUN_V = -0.35;
 const float BOOST_LANDING_BAND_V = 0.6;            // เข้าโซนลงจอดเมื่อแรงดันแผงใกล้เป้า
 const float BOOST_LANDING_BAND_A = 0.25;           // หรือกระแสแบตใกล้ CC ให้ชะลอขาลง
+const float BOOST_TARGET_DEADBAND_V = 0.12;        // ใกล้จุด MPPT ให้ลดการตอบสนองขาขึ้น
+const float BOOST_POS_LIMIT_NEAR_TARGET = 0.4;
+const unsigned long BOOST_LANDING_UP_INTERVAL_MS = 140;
+const unsigned long BOOST_LANDING_UP_INTERVAL_LOW_SUN_MS = 220;
 const unsigned long BOOST_LANDING_DOWN_INTERVAL_MS = 120;
 const unsigned long BOOST_LANDING_DOWN_INTERVAL_LOW_SUN_MS = 180;
 const int BOOST_LOW_SUN_MIN_DUTY = 8;
@@ -272,6 +276,7 @@ void TaskSampleData(void * pvParameters) {
     float boost_duty_step_accumulator = 0.0;
     unsigned long last_forward_up_step_ms = 0;
     unsigned long last_boost_down_step_ms = 0;
+    unsigned long last_boost_up_step_ms = 0;
     unsigned long last_boost_trim_ms = 0;
     const float kp_cv_effective = (Kp_cv < MIN_REASONABLE_KP_CV) ? 0.42f : Kp_cv;
     const float ki_cc_effective = (Ki_cc > MAX_REASONABLE_KI_CC) ? 0.01f : Ki_cc;
@@ -495,6 +500,7 @@ void TaskSampleData(void * pvParameters) {
             if (currentState != STATE_BOOST) {
                 boost_duty_step_accumulator = 0.0;
                 last_boost_down_step_ms = 0;
+                last_boost_up_step_ms = 0;
                 last_boost_trim_ms = 0;
             }
 
@@ -650,6 +656,9 @@ void TaskSampleData(void * pvParameters) {
                         pid_integral += pid_error;
                         pid_integral = constrain(pid_integral, -50, 50);
                     }
+                    if (pid_error < -BOOST_TARGET_DEADBAND_V && pid_integral > 0.0) {
+                        pid_integral *= 0.85;
+                    }
                     pid_derivative = pid_error - pid_last_error;
 
                     float pid_output = (Kp * pid_error) + (Ki * pid_integral) + (Kd * pid_derivative);
@@ -659,6 +668,11 @@ void TaskSampleData(void * pvParameters) {
                         pid_output = BOOST_SOFTSTART_STEP;
                     } else {
                         if (pid_output > BOOST_PID_POS_LIMIT) pid_output = BOOST_PID_POS_LIMIT;
+                    }
+                    if (pid_error < -BOOST_TARGET_DEADBAND_V && pid_output > 0.0) {
+                        pid_output = 0.0;
+                    } else if (fabs(pid_error) <= BOOST_TARGET_DEADBAND_V && pid_output > BOOST_POS_LIMIT_NEAR_TARGET) {
+                        pid_output = BOOST_POS_LIMIT_NEAR_TARGET;
                     }
                     float boost_pid_neg_limit = low_sun_mode ? BOOST_PID_NEG_LIMIT_LOW_SUN : BOOST_PID_NEG_LIMIT_NORMAL;
                     if (pid_output < boost_pid_neg_limit) pid_output = boost_pid_neg_limit;
@@ -694,6 +708,17 @@ void TaskSampleData(void * pvParameters) {
                             if (boost_duty_step_accumulator < -0.95) boost_duty_step_accumulator = -0.95;
                         } else {
                             last_boost_down_step_ms = now;
+                        }
+                    }
+                    if (boost_step > 0 && boost_landing_phase) {
+                        unsigned long min_up_interval_ms = low_sun_mode
+                            ? BOOST_LANDING_UP_INTERVAL_LOW_SUN_MS
+                            : BOOST_LANDING_UP_INTERVAL_MS;
+                        if (now - last_boost_up_step_ms < min_up_interval_ms) {
+                            boost_step = 0;
+                            if (boost_duty_step_accumulator > 0.95) boost_duty_step_accumulator = 0.95;
+                        } else {
+                            last_boost_up_step_ms = now;
                         }
                     }
 
@@ -742,6 +767,7 @@ void TaskSampleData(void * pvParameters) {
             duty_step_accumulator = 0.0;
             boost_duty_step_accumulator = 0.0;
             last_boost_down_step_ms = 0;
+            last_boost_up_step_ms = 0;
             last_boost_trim_ms = 0;
         }
 
