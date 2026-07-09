@@ -37,6 +37,10 @@ const int MAX_DUTY_BOOST   = 760;
 // ถ้าอ่าน ADC ไม่สำเร็จเกินช่วงนี้ ให้เข้าสู่โหมดปลอดภัย
 const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
+const TickType_t I2C_MUTEX_TIMEOUT_SAMPLE_TICKS = pdMS_TO_TICKS(50);
+const TickType_t I2C_MUTEX_TIMEOUT_LCD_TICKS = pdMS_TO_TICKS(120);
+const unsigned long LCD_RECOVER_RETRY_MS = 1500;
+const unsigned long LCD_MUTEX_WARN_MS = 2000;
 const float CV_DEADBAND_V = 0.12;
 const float CV_SOFT_OVERVOLTAGE_V = 58.6;         // เข้าโซนนี้ให้กด Duty ลงแรงขึ้น
 const float BAT_OVERVOLTAGE_CUTOFF_V = 59.0;      // เกินค่านี้ให้สั่ง Duty = 0%
@@ -165,6 +169,7 @@ void setup() {
     Serial.begin(115200);
     Wire.begin(21, 22);
     Wire.setTimeOut(25);
+    Wire.setClock(400000);  // ลดเวลาจับ bus ของทั้ง ADS/LCD ลดอาการจอค้างจากการแย่ง I2C
     if (Kp_cv < MIN_REASONABLE_KP_CV) {
         Serial.printf("[WARN] Kp_cv=%.3f too low. Fallback to 0.42 will be used.\n", Kp_cv);
     }
@@ -178,6 +183,10 @@ void setup() {
     bool volt_ok = ads_volt.begin(0x48);
     bool curr_ok = ads_curr.begin(0x49);
     sensor_init_ok = (volt_ok && curr_ok);
+    if (sensor_init_ok) {
+        ads_volt.setDataRate(RATE_ADS1115_860SPS);
+        ads_curr.setDataRate(RATE_ADS1115_860SPS);
+    }
 
     pinMode(RELAY_PV_PIN, OUTPUT);
     pinMode(RELAY_AC_PIN, OUTPUT);
@@ -245,7 +254,7 @@ void TaskSampleData(void * pvParameters) {
         }
 
         bool sample_ok = false;
-        if (xSemaphoreTake(i2c_Mutex, 50)) {
+        if (xSemaphoreTake(i2c_Mutex, I2C_MUTEX_TIMEOUT_SAMPLE_TICKS)) {
             raw_mv_v0 = ads_volt.readADC_SingleEnded(0) * 0.1875;
             raw_mv_v1 = ads_volt.readADC_SingleEnded(2) * 0.1875;
             raw_mv_v2 = ads_volt.readADC_SingleEnded(1) * 0.1875;
@@ -648,6 +657,7 @@ void TaskLCDLoop(void * pvParameters) {
     bool show_no_power_alert = false;
     unsigned long alert_millis = 0;
     unsigned long last_lcd_recover = 0;
+    unsigned long last_lcd_warn = 0;
     int lcd_mutex_fail_count = 0;
 
     bool start_raw_last = HIGH, stop_raw_last = HIGH;
@@ -703,7 +713,7 @@ void TaskLCDLoop(void * pvParameters) {
         last_start_state = current_start; last_stop_state = current_stop;
 
         if (system_ON != last_system_state) {
-            if (xSemaphoreTake(i2c_Mutex, 50)) {
+            if (xSemaphoreTake(i2c_Mutex, I2C_MUTEX_TIMEOUT_LCD_TICKS)) {
                 lcd.clear();
                 xSemaphoreGive(i2c_Mutex);
                 lcd_mutex_fail_count = 0;
@@ -718,7 +728,7 @@ void TaskLCDLoop(void * pvParameters) {
 
         if (show_no_power_alert && (now - alert_millis > 3000)) {
             show_no_power_alert = false;
-            if (xSemaphoreTake(i2c_Mutex, 50)) {
+            if (xSemaphoreTake(i2c_Mutex, I2C_MUTEX_TIMEOUT_LCD_TICKS)) {
                 lcd.clear();
                 xSemaphoreGive(i2c_Mutex);
                 lcd_mutex_fail_count = 0;
@@ -727,7 +737,7 @@ void TaskLCDLoop(void * pvParameters) {
             }
         }
 
-        if (xSemaphoreTake(i2c_Mutex, 50)) {
+        if (xSemaphoreTake(i2c_Mutex, I2C_MUTEX_TIMEOUT_LCD_TICKS)) {
             if (system_ON && charge_full_hold) {
                 lcd.setCursor(0, 0); lcd.print("BATTERY FULL HOLD    ");
                 lcd.setCursor(0, 1); lcd.printf("BAT:%5.1fV I:%4.2fA  ", v_bat_filt, i_bat_filt);
@@ -755,15 +765,21 @@ void TaskLCDLoop(void * pvParameters) {
             lcd_mutex_fail_count++;
         }
 
+        if (lcd_mutex_fail_count > 0 && (now - last_lcd_warn >= LCD_MUTEX_WARN_MS)) {
+            last_lcd_warn = now;
+            Serial.printf("[WARN] LCD mutex contention count=%d\n", lcd_mutex_fail_count);
+        }
+
         // กู้ LCD เฉพาะเมื่อมีอาการค้างจริง ไม่ init ทุกคาบเวลา
-        if (lcd_mutex_fail_count >= 5 && (now - last_lcd_recover > 2000)) {
+        if (lcd_mutex_fail_count >= 8 && (now - last_lcd_recover > LCD_RECOVER_RETRY_MS)) {
             last_lcd_recover = now;
-            if (xSemaphoreTake(i2c_Mutex, 50)) {
+            if (xSemaphoreTake(i2c_Mutex, I2C_MUTEX_TIMEOUT_LCD_TICKS)) {
                 lcd.init();
                 lcd.backlight();
                 lcd.clear();
                 xSemaphoreGive(i2c_Mutex);
                 lcd_mutex_fail_count = 0;
+                Serial.println("[INFO] LCD recovered by re-init.");
             }
         }
 
