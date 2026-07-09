@@ -59,13 +59,21 @@ const float MIN_REASONABLE_KP_CV = 0.10;
 const float MAX_REASONABLE_KI_CC = 0.05;
 const unsigned long MAX_REASONABLE_CV_FINE_UP_INTERVAL_MS = 3000;
 const unsigned long BOOST_MPPT_INTERVAL_MS = 150;
-const float BOOST_MPPT_V_STEP = 0.08;
-const float BOOST_MPPT_MIN_DELTA_P_W = 0.3;
-const float BOOST_CC_SOFT_MARGIN_A = 0.15;
-const float BOOST_CC_HARD_MARGIN_A = 0.35;
+const float BOOST_MPPT_V_STEP_NORMAL = 0.08;
+const float BOOST_MPPT_V_STEP_LOW_SUN = 0.05;
+const float BOOST_MPPT_MIN_DELTA_P_W = 0.25;
+const float BOOST_MPPT_TARGET_MIN_NORMAL = 41.0;
+const float BOOST_MPPT_TARGET_MIN_LOW_SUN = 38.5;
+const float BOOST_LOW_SUN_ENTRY_V = 40.8;
+const float BOOST_LOW_SUN_EXIT_V = 41.6;
+const float BOOST_BAT_CURRENT_LIMIT_MARGIN_A = 0.20;
 const float BOOST_PID_POS_LIMIT = 1.0;
 const float BOOST_PID_NEG_LIMIT = -2.0;
 const float BOOST_SOFTSTART_STEP = 1.0;
+const float BOOST_MIN_VALID_PV_V = 5.0;
+const float BOOST_PV_SHUTDOWN_LOW_SUN_V = 37.5;
+const unsigned long BOOST_PV_SHUTDOWN_NORMAL_MS = 2000;
+const unsigned long BOOST_PV_SHUTDOWN_LOW_SUN_MS = 7000;
 const float FULL_DETECT_VOLTAGE = 58.3;
 const float FULL_END_CURRENT = 0.45;              // 15% ของกระแส CC (3A)
 const unsigned long FULL_CONFIRM_MS = 300000;     // เงื่อนไข FULL ต้องต่อเนื่อง 5 นาที
@@ -232,6 +240,7 @@ void TaskSampleData(void * pvParameters) {
     float v_solar_old = 0.0;
     int mppt_direction = 1;
     unsigned long last_mppt_time = 0;
+    bool low_sun_mode = false;
 
     unsigned long pv_collapse_start_time = 0;
     bool pv_is_collapsing = false;
@@ -387,10 +396,13 @@ void TaskSampleData(void * pvParameters) {
                     vTaskDelay(500 / portTICK_PERIOD_MS);
                     digitalWrite(RELAY_PV_PIN, HIGH);
                     currentState = STATE_BOOST;
+                    low_sun_mode = (v_solar <= BOOST_LOW_SUN_ENTRY_V);
 
                     v_solar_old = v_solar;
                     p_solar_old = v_solar * i_solar;
-                    v_solar_target = v_solar - 1.0;
+                    float target_floor = low_sun_mode ? BOOST_MPPT_TARGET_MIN_LOW_SUN : BOOST_MPPT_TARGET_MIN_NORMAL;
+                    v_solar_target = v_solar - 0.8;
+                    if (v_solar_target < target_floor) v_solar_target = target_floor;
                     pid_integral = 0; pid_last_error = 0;
                     pid_integral_cc = 0; pid_last_error_cc = 0;
                     pid_integral_cv = 0; pid_last_error_cv = 0;
@@ -414,15 +426,25 @@ void TaskSampleData(void * pvParameters) {
                 }
             }
             else if (currentState == STATE_BOOST) {
-                if (v_solar < UNDER_PV_VOLTAGE_CRIT) {
+                bool prev_low_sun_mode = low_sun_mode;
+                if (v_solar <= BOOST_LOW_SUN_ENTRY_V) low_sun_mode = true;
+                else if (v_solar >= BOOST_LOW_SUN_EXIT_V) low_sun_mode = false;
+                if (prev_low_sun_mode != low_sun_mode) {
+                    Serial.printf("[INFO] BOOST mode=%s (PV=%.1fV)\n", low_sun_mode ? "LOW_SUN" : "NORMAL", v_solar);
+                }
+
+                float pv_shutdown_v = low_sun_mode ? BOOST_PV_SHUTDOWN_LOW_SUN_V : UNDER_PV_VOLTAGE_CRIT;
+                unsigned long pv_shutdown_confirm_ms = low_sun_mode ? BOOST_PV_SHUTDOWN_LOW_SUN_MS : BOOST_PV_SHUTDOWN_NORMAL_MS;
+                if (v_solar < pv_shutdown_v) {
                     if (!pv_is_collapsing) {
                         pv_is_collapsing = true;
                         pv_collapse_start_time = now;
                     }
 
-                    if (now - pv_collapse_start_time >= 2000) {
+                    if (now - pv_collapse_start_time >= pv_shutdown_confirm_ms) {
                         system_ON = false;
-                        Serial.println("[CRITICAL] Solar panel fully collapsed below 39V! Auto-Shutdown.");
+                        Serial.printf("[CRITICAL] Solar collapsed below %.1fV for %lums. Auto-Shutdown.\n",
+                                      pv_shutdown_v, pv_shutdown_confirm_ms);
                     }
                 } else {
                     pv_is_collapsing = false;
@@ -439,6 +461,7 @@ void TaskSampleData(void * pvParameters) {
             currentState = STATE_OFF;
             raw_duty = 0;
             pv_is_collapsing = false;
+            low_sun_mode = false;
         }
 
         if (system_ON && currentState != STATE_OFF) {
@@ -539,15 +562,11 @@ void TaskSampleData(void * pvParameters) {
                     raw_duty -= 10;
                     pid_integral = 0;
                 }
-                else if (v_bat_filt >= TARGET_CV_VOLTAGE || i_bat_filt >= (TARGET_CC_CURRENT + BOOST_CC_HARD_MARGIN_A)) {
-                    raw_duty -= 4;
+                else if (v_bat_filt >= TARGET_CV_VOLTAGE || i_bat_filt >= (TARGET_CC_CURRENT + BOOST_BAT_CURRENT_LIMIT_MARGIN_A)) {
+                    raw_duty -= 3;
                     pid_integral = 0;
                 }
-                else if (i_bat_filt >= (TARGET_CC_CURRENT + BOOST_CC_SOFT_MARGIN_A)) {
-                    raw_duty -= 2;
-                    pid_integral = 0;
-                }
-                else if (v_solar == 0.0 || i_solar == 0.0) {
+                else if (v_solar <= BOOST_MIN_VALID_PV_V) {
                     raw_duty = 0; pid_integral = 0;
                 }
                 else {
@@ -567,15 +586,18 @@ void TaskSampleData(void * pvParameters) {
                             }
                         }
 
-                        v_solar_target += (mppt_direction * BOOST_MPPT_V_STEP);
-                        if (v_solar_target < 41.0) v_solar_target = 41.0;
+                        float step_v = low_sun_mode ? BOOST_MPPT_V_STEP_LOW_SUN : BOOST_MPPT_V_STEP_NORMAL;
+                        float target_floor = low_sun_mode ? BOOST_MPPT_TARGET_MIN_LOW_SUN : BOOST_MPPT_TARGET_MIN_NORMAL;
+                        v_solar_target += (mppt_direction * step_v);
+                        if (v_solar_target < target_floor) v_solar_target = target_floor;
                         if (v_solar_target > 48.0) v_solar_target = 48.0;
 
                         p_solar_old = p_solar; v_solar_old = v_solar;
                     }
 
+                    float target_floor = low_sun_mode ? BOOST_MPPT_TARGET_MIN_LOW_SUN : BOOST_MPPT_TARGET_MIN_NORMAL;
                     pid_error = v_solar - v_solar_target;
-                    if (v_solar < 41.0) {
+                    if (v_solar < (target_floor - 0.3)) {
                         pid_integral = 0;
                     } else {
                         pid_integral += pid_error;
@@ -586,7 +608,7 @@ void TaskSampleData(void * pvParameters) {
                     float pid_output = (Kp * pid_error) + (Ki * pid_integral) + (Kd * pid_derivative);
 
                     // ระบบแก้ล็อกช่วงเริ่มต้น (Soft-start ในโหมดแผง)
-                    if (raw_duty < 30 && v_solar > 41.0) {
+                    if (raw_duty < 30 && v_solar > target_floor) {
                         pid_output = BOOST_SOFTSTART_STEP;
                     } else {
                         if (pid_output > BOOST_PID_POS_LIMIT) pid_output = BOOST_PID_POS_LIMIT;
@@ -642,7 +664,7 @@ void TaskSampleData(void * pvParameters) {
             last_debug_time = now;
             const char* state_label = charge_full_hold
                 ? "FULL_HOLD"
-                : (currentState == STATE_BOOST ? "BOOST" : (currentState == STATE_FORWARD ? "FORWARD" : "OFF"));
+                : (currentState == STATE_BOOST ? (low_sun_mode ? "BOOST_LOW" : "BOOST") : (currentState == STATE_FORWARD ? "FORWARD" : "OFF"));
             Serial.println("=========================================================================================");
             Serial.printf("[DEBUG INTERFACE] System: %s | State: %s | Active Duty: %d%%\n",
                           (system_ON ? "ON " : "OFF"),
