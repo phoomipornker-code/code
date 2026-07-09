@@ -90,6 +90,7 @@ const float CAL_SCALE_I_BAT   = 42.46;
 
 const float NOISE_V_THRESHOLD = 0.5;
 const float NOISE_I_THRESHOLD = 0.08;
+const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 
 // =========================================================================
 // ตัวแปรระบบ
@@ -424,7 +425,10 @@ void TaskSampleData(void * pvParameters) {
                 // ☀️ โหมด PV: ระบบควบคุมแผงและระบบป้องกันฝั่งเอาต์พุตขั้นเด็ดขาด
                 // =================================================================
 
-                if (v_bat_filt >= TARGET_CV_VOLTAGE || i_bat_charge_filt >= TARGET_CC_CURRENT) {
+                bool charge_is_active = (i_bat_charge_filt >= MIN_CURRENT_FOR_ACTIVE_CHARGE) ||
+                                        (i_solar_mag >= MIN_CURRENT_FOR_ACTIVE_CHARGE);
+                if ((v_bat_filt >= TARGET_CV_VOLTAGE && charge_is_active) ||
+                    (i_bat_charge_filt >= TARGET_CC_CURRENT)) {
                     duty_accumulator -= 5.0;
                     pid_integral = 0;
                 }
@@ -498,7 +502,9 @@ void TaskSampleData(void * pvParameters) {
 
             total_Wh += ((v_bat * i_bat_charge_filt) * (now - last_millis)) / 3600000.0;
 
-            if ((v_bat_filt >= FULL_DETECT_VOLTAGE) && (i_bat_charge_filt <= FULL_END_CURRENT)) {
+            bool full_window_current = (i_bat_charge_filt >= NOISE_I_THRESHOLD) &&
+                                       (i_bat_charge_filt <= FULL_END_CURRENT);
+            if ((v_bat_filt >= FULL_DETECT_VOLTAGE) && full_window_current) {
                 if (full_condition_start_ms == 0) full_condition_start_ms = now;
                 if (now - full_condition_start_ms >= FULL_CONFIRM_MS) {
                     charge_full_hold = true;
