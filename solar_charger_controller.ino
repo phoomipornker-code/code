@@ -64,7 +64,7 @@ const float BOOST_MPPT_V_STEP_LOW_SUN = 0.05;
 const float BOOST_MPPT_MIN_DELTA_P_W = 0.25;
 const float BOOST_MPPT_TARGET_MIN_NORMAL = 40.8;
 const float BOOST_MPPT_TARGET_MIN_LOW_SUN = 39.8;
-const float BOOST_MPPT_TARGET_CEILING_V = 41.0;    // ชนเพดาน MPPT ที่ 41V ตามต้องการ
+const float BOOST_MPPT_TARGET_CEILING_V = 42.0;    // ชนเพดาน MPPT ที่ 42V ตามต้องการ
 const float BOOST_LOW_SUN_ENTRY_V = 40.6;
 const float BOOST_LOW_SUN_EXIT_V = 41.3;
 const float BOOST_BAT_CURRENT_LIMIT_MARGIN_A = 0.20;
@@ -87,6 +87,10 @@ const unsigned long BOOST_LANDING_UP_INTERVAL_MS = 140;
 const unsigned long BOOST_LANDING_UP_INTERVAL_LOW_SUN_MS = 220;
 const unsigned long BOOST_LANDING_DOWN_INTERVAL_MS = 120;
 const unsigned long BOOST_LANDING_DOWN_INTERVAL_LOW_SUN_MS = 180;
+const float BOOST_FAST_FALL_DV_THRESHOLD_V = -0.22; // ถ้า PV ตกเร็ว ให้เร่งลด duty ทันแสงตก
+const float BOOST_FAST_FALL_ERR_THRESHOLD_V = -0.45;
+const int BOOST_FAST_FALL_DOWN_STEP = -2;
+const unsigned long BOOST_FAST_FALL_DOWN_INTERVAL_MS = 60;
 const int BOOST_LOW_SUN_MIN_DUTY = 8;
 const float BOOST_LOW_SUN_HOLD_MIN_V = 39.6;
 const float BOOST_LOW_SUN_HOLD_MAX_V = 41.0;
@@ -269,6 +273,7 @@ void TaskSampleData(void * pvParameters) {
     bool overvoltage_duty_zero_active = false;
     float duty_step_accumulator = 0.0;
     float boost_duty_step_accumulator = 0.0;
+    bool boost_fast_fall = false;
     unsigned long last_forward_up_step_ms = 0;
     unsigned long last_boost_down_step_ms = 0;
     unsigned long last_boost_up_step_ms = 0;
@@ -593,8 +598,10 @@ void TaskSampleData(void * pvParameters) {
                 else if (v_solar <= BOOST_MIN_VALID_PV_V) {
                     raw_duty = 0; pid_integral = 0;
                     boost_duty_step_accumulator = 0.0;
+                    boost_fast_fall = false;
                 }
                 else {
+                    boost_fast_fall = false;
                     bool boost_hold_rise =
                         (v_bat_filt >= (TARGET_CV_VOLTAGE + BOOST_HOLD_CV_MARGIN_V)) ||
                         (i_bat_filt >= (TARGET_CC_CURRENT + BOOST_BAT_CURRENT_LIMIT_MARGIN_A));
@@ -613,6 +620,9 @@ void TaskSampleData(void * pvParameters) {
                                 else             mppt_direction = 1;
                             }
                         }
+                        if (delta_v <= BOOST_FAST_FALL_DV_THRESHOLD_V) {
+                            boost_fast_fall = true;
+                        }
 
                         float step_v = low_sun_mode ? BOOST_MPPT_V_STEP_LOW_SUN : BOOST_MPPT_V_STEP_NORMAL;
                         float target_floor = low_sun_mode ? BOOST_MPPT_TARGET_MIN_LOW_SUN : BOOST_MPPT_TARGET_MIN_NORMAL;
@@ -625,6 +635,9 @@ void TaskSampleData(void * pvParameters) {
 
                     float target_floor = low_sun_mode ? BOOST_MPPT_TARGET_MIN_LOW_SUN : BOOST_MPPT_TARGET_MIN_NORMAL;
                     pid_error = v_solar - v_solar_target;
+                    if (pid_error <= BOOST_FAST_FALL_ERR_THRESHOLD_V) {
+                        boost_fast_fall = true;
+                    }
                     if (v_solar < (target_floor - 0.3)) {
                         pid_integral = 0;
                     } else {
@@ -680,7 +693,16 @@ void TaskSampleData(void * pvParameters) {
                     bool boost_landing_phase =
                         (v_solar <= (v_solar_target + BOOST_LANDING_BAND_V)) ||
                         (i_bat_filt >= (TARGET_CC_CURRENT - BOOST_LANDING_BAND_A));
-                    if (boost_step < 0 && boost_landing_phase) {
+                    if (boost_step < 0 && boost_fast_fall) {
+                        if (now - last_boost_down_step_ms < BOOST_FAST_FALL_DOWN_INTERVAL_MS) {
+                            boost_step = 0;
+                            if (boost_duty_step_accumulator < -0.95) boost_duty_step_accumulator = -0.95;
+                        } else {
+                            if (boost_step > BOOST_FAST_FALL_DOWN_STEP) boost_step = BOOST_FAST_FALL_DOWN_STEP;
+                            last_boost_down_step_ms = now;
+                        }
+                    }
+                    else if (boost_step < 0 && boost_landing_phase) {
                         unsigned long min_down_interval_ms = low_sun_mode
                             ? BOOST_LANDING_DOWN_INTERVAL_LOW_SUN_MS
                             : BOOST_LANDING_DOWN_INTERVAL_MS;
