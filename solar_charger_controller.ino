@@ -62,10 +62,10 @@ const unsigned long BOOST_MPPT_INTERVAL_MS = 150;
 const float BOOST_MPPT_V_STEP_NORMAL = 0.08;
 const float BOOST_MPPT_V_STEP_LOW_SUN = 0.05;
 const float BOOST_MPPT_MIN_DELTA_P_W = 0.25;
-const float BOOST_MPPT_TARGET_MIN_NORMAL = 41.0;
-const float BOOST_MPPT_TARGET_MIN_LOW_SUN = 38.5;
-const float BOOST_LOW_SUN_ENTRY_V = 40.8;
-const float BOOST_LOW_SUN_EXIT_V = 41.6;
+const float BOOST_MPPT_TARGET_MIN_NORMAL = 40.8;
+const float BOOST_MPPT_TARGET_MIN_LOW_SUN = 39.8;
+const float BOOST_LOW_SUN_ENTRY_V = 40.6;
+const float BOOST_LOW_SUN_EXIT_V = 41.3;
 const float BOOST_BAT_CURRENT_LIMIT_MARGIN_A = 0.20;
 const float BOOST_BAT_CURRENT_HARD_EXTRA_A = 0.50;
 const int BOOST_DUTY_TRIM_SOFT = 1;
@@ -79,6 +79,8 @@ const float BOOST_PID_NEG_LIMIT_LOW_SUN = -0.6;
 const float BOOST_SOFTSTART_STEP = 1.0;
 const float BOOST_MIN_VALID_PV_V = 5.0;
 const float BOOST_VSOLAR_COLLAPSE_STEP = -2.0;
+const float BOOST_VSOLAR_GUARD_OFFSET_V = 0.2;
+const float BOOST_VSOLAR_CRITICAL_OFFSET_V = -0.2;
 const float BOOST_LANDING_BAND_V = 0.6;            // เข้าโซนลงจอดเมื่อแรงดันแผงใกล้เป้า
 const float BOOST_LANDING_BAND_A = 0.25;           // หรือกระแสแบตใกล้ CC ให้ชะลอขาลง
 const unsigned long BOOST_LANDING_DOWN_INTERVAL_MS = 120;
@@ -656,9 +658,11 @@ void TaskSampleData(void * pvParameters) {
                     float boost_pid_neg_limit = low_sun_mode ? BOOST_PID_NEG_LIMIT_LOW_SUN : BOOST_PID_NEG_LIMIT_NORMAL;
                     if (pid_output < boost_pid_neg_limit) pid_output = boost_pid_neg_limit;
 
-                    if (v_solar <= 40.5) {
+                    float pv_guard_v = target_floor + BOOST_VSOLAR_GUARD_OFFSET_V;
+                    float pv_critical_v = target_floor + BOOST_VSOLAR_CRITICAL_OFFSET_V;
+                    if (v_solar <= pv_guard_v) {
                         if (pid_output > 0) pid_output = 0;
-                        if (v_solar <= 40.0) pid_output = BOOST_VSOLAR_COLLAPSE_STEP;
+                        if (v_solar <= pv_critical_v) pid_output = BOOST_VSOLAR_COLLAPSE_STEP;
                         else if (pid_output < boost_pid_neg_limit) pid_output = boost_pid_neg_limit;
                     }
 
