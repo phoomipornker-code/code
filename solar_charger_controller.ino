@@ -26,9 +26,10 @@ Adafruit_ADS1115 ads_curr;
 const float TARGET_CV_VOLTAGE = 58.4;
 const float TARGET_CC_CURRENT = 3.0;
 
-const float MIN_PV_VOLTAGE = 41.0;         // เริ่มทำงานเมื่อแผงถึง 41V
+const float MIN_PV_VOLTAGE_START = 40.0;   // เกณฑ์เริ่มทำงานฝั่ง PV (ผ่อนเล็กน้อยให้เริ่มติดง่ายขึ้น)
 const float UNDER_PV_VOLTAGE_CRIT = 39.0;  // ต่ำกว่า 39V เกิน 2 วินาที สั่งตัด
-const float MIN_AC_VOLTAGE = 140.0;
+const float MIN_AC_VOLTAGE_START = 120.0;  // เกณฑ์เริ่มทำงานฝั่ง AC (ช่วยกรณีคาลิเบรตต่ำกว่าจริง)
+const float MIN_AC_VOLTAGE_KEEP = 110.0;   // เกณฑ์คงการทำงานฝั่ง AC
 
 const int MAX_DUTY_FORWARD = 490;
 const int MAX_DUTY_BOOST   = 760;
@@ -352,7 +353,7 @@ void TaskSampleData(void * pvParameters) {
             if (charge_full_hold) {
                 disablePowerStage();
                 if ((v_bat_filt <= RESTART_CHARGE_VOLTAGE) &&
-                    (v_solar >= MIN_PV_VOLTAGE || v_ac_in >= MIN_AC_VOLTAGE)) {
+                    (v_solar >= MIN_PV_VOLTAGE_START || v_ac_in >= MIN_AC_VOLTAGE_START)) {
                     charge_full_hold = false;
                     Serial.println("[INFO] Battery dropped to restart threshold. Charging resumed.");
                 }
@@ -364,7 +365,7 @@ void TaskSampleData(void * pvParameters) {
             }
 
             if (currentState == STATE_OFF) {
-                if (v_solar >= MIN_PV_VOLTAGE) {
+                if (v_solar >= MIN_PV_VOLTAGE_START) {
                     ledcWrite(PWM_FORWARD_PIN, 0); ledcWrite(PWM_BOOST_PIN, 0);
                     digitalWrite(RELAY_AC_PIN, LOW);
                     vTaskDelay(500 / portTICK_PERIOD_MS);
@@ -380,7 +381,7 @@ void TaskSampleData(void * pvParameters) {
                     raw_duty = 20;
                     pv_is_collapsing = false;
                 }
-                else if (v_ac_in >= MIN_AC_VOLTAGE) {
+                else if (v_ac_in >= MIN_AC_VOLTAGE_START) {
                     ledcWrite(PWM_FORWARD_PIN, 0); ledcWrite(PWM_BOOST_PIN, 0);
                     digitalWrite(RELAY_PV_PIN, LOW);
                     vTaskDelay(500 / portTICK_PERIOD_MS);
@@ -391,6 +392,8 @@ void TaskSampleData(void * pvParameters) {
                     raw_duty = 10;
                 }
                 else {
+                    Serial.printf("[INFO] Start source not ready. PV=%.1fV (<%.1f) AC=%.1fV (<%.1f)\n",
+                                  v_solar, MIN_PV_VOLTAGE_START, v_ac_in, MIN_AC_VOLTAGE_START);
                     system_ON = false;
                 }
             }
@@ -410,7 +413,7 @@ void TaskSampleData(void * pvParameters) {
                 }
             }
             else if (currentState == STATE_FORWARD) {
-                if (v_ac_in < MIN_AC_VOLTAGE) { system_ON = false; }
+                if (v_ac_in < MIN_AC_VOLTAGE_KEEP) { system_ON = false; }
             }
         }
 
@@ -682,14 +685,19 @@ void TaskLCDLoop(void * pvParameters) {
             charge_full_hold = false;
             show_no_power_alert = false;
         } else if (start_edge) {
-            if (sensor_init_ok && (v_solar >= MIN_PV_VOLTAGE || v_ac_in >= MIN_AC_VOLTAGE)) {
+            if (sensor_init_ok && (v_solar >= MIN_PV_VOLTAGE_START || v_ac_in >= MIN_AC_VOLTAGE_START)) {
                 system_ON = true;
                 charge_full_hold = false;
                 show_no_power_alert = false;
+                Serial.printf("[INFO] START accepted. PV=%.1fV AC=%.1fV\n", v_solar, v_ac_in);
             } else {
                 system_ON = false;
                 show_no_power_alert = true;
                 alert_millis = now;
+                Serial.printf("[WARN] START blocked. sensor=%d PV=%.1fV (need %.1f) AC=%.1fV (need %.1f)\n",
+                              sensor_init_ok ? 1 : 0,
+                              v_solar, MIN_PV_VOLTAGE_START,
+                              v_ac_in, MIN_AC_VOLTAGE_START);
             }
         }
         last_start_state = current_start; last_stop_state = current_stop;
