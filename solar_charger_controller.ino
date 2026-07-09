@@ -36,20 +36,23 @@ const int MAX_DUTY_BOOST   = 760;
 // ถ้าอ่าน ADC ไม่สำเร็จเกินช่วงนี้ ให้เข้าสู่โหมดปลอดภัย
 const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
-const float CV_DEADBAND_V = 0.10;
+const float CV_DEADBAND_V = 0.12;
 const float CV_SOFT_OVERVOLTAGE_V = 58.6;         // เข้าโซนนี้ให้กด Duty ลงแรงขึ้น
 const float BAT_OVERVOLTAGE_CUTOFF_V = 59.0;      // เกินค่านี้ให้สั่ง Duty = 0%
 const float BAT_OVERVOLTAGE_RECOVER_V = 58.6;     // ต้องลดต่ำกว่านี้จึงออกจากโหมดป้องกัน
 const unsigned long BAT_OVERVOLTAGE_CONFIRM_MS = 3000; // ถ้ายังเกินต่อเนื่องค่อยตัดระบบ
 const float CV_FINE_ZONE_V = 57.8;                 // ใกล้เต็มเริ่มเข้าโหมดปรับละเอียด
-const float CV_FINE_STEP_UP = 0.03;                // เพิ่ม duty ทีละน้อยมากในช่วง 0-2%
-const float CV_FINE_STEP_DOWN = -0.08;
+const float CV_FINE_STEP_UP = 0.02;                // เพิ่ม duty ให้ละเอียดขึ้น ลดอาการพุ่งในโซน 0-2%
+const float CV_FINE_STEP_DOWN = -0.10;
 const float CV_ULTRA_FINE_ZONE_V = 58.2;           // ช่วงท้ายก่อนเต็ม ใช้ step ละเอียดพิเศษ
-const float CV_ULTRA_FINE_STEP_UP = 0.01;
-const float CV_ULTRA_FINE_STEP_DOWN = -0.05;
-const float CV_RISE_LOCK_V = 58.25;                // สูงกว่าโซนนี้ห้ามเพิ่ม duty
-const unsigned long CV_FINE_UP_STEP_INTERVAL_MS = 900;      // หน่วงการเพิ่ม duty ขาขึ้น
-const unsigned long CV_ULTRA_FINE_UP_STEP_INTERVAL_MS = 1800;
+const float CV_ULTRA_FINE_STEP_UP = 0.005;
+const float CV_ULTRA_FINE_STEP_DOWN = -0.06;
+const float CV_RISE_LOCK_V = 58.20;                // สูงกว่าโซนนี้ห้ามเพิ่ม duty
+const unsigned long CV_FINE_UP_STEP_INTERVAL_MS = 1200;      // หน่วงการเพิ่ม duty ขาขึ้น (อย่าตั้งสูงมากจนชาร์จไม่เข้า)
+const unsigned long CV_ULTRA_FINE_UP_STEP_INTERVAL_MS = 2600;
+const float MIN_REASONABLE_KP_CV = 0.10;
+const float MAX_REASONABLE_KI_CC = 0.05;
+const unsigned long MAX_REASONABLE_CV_FINE_UP_INTERVAL_MS = 3000;
 const float FULL_DETECT_VOLTAGE = 58.3;
 const float FULL_END_CURRENT = 0.45;              // 15% ของกระแส CC (3A)
 const unsigned long FULL_CONFIRM_MS = 300000;     // เงื่อนไข FULL ต้องต่อเนื่อง 5 นาที
@@ -75,9 +78,9 @@ const float Kp_cc = 0.15;  // แบตเตอรี่ลิเธียม�
 const float Ki_cc = 0.01;
 const float Kd_cc = 0.005;
 
-const float Kp_cv = 0.5;   // ลด Gain เพื่อให้ช่วงใกล้ CV แกว่งน้อยลง
-const float Ki_cv = 0.015;
-const float Kd_cv = 0.005;
+const float Kp_cv = 0.42;   // ถ้าต่ำเกินไปจะเร่ง duty ไม่พอจนดูเหมือนไม่ชาร์จ
+const float Ki_cv = 0.010;
+const float Kd_cv = 0.004;
 
 float pid_error_cc = 0.0, pid_last_error_cc = 0.0, pid_integral_cc = 0.0;
 float pid_error_cv = 0.0, pid_last_error_cv = 0.0, pid_integral_cv = 0.0;
@@ -161,6 +164,15 @@ void setup() {
     Serial.begin(115200);
     Wire.begin(21, 22);
     Wire.setTimeOut(25);
+    if (Kp_cv < MIN_REASONABLE_KP_CV) {
+        Serial.printf("[WARN] Kp_cv=%.3f too low. Fallback to 0.42 will be used.\n", Kp_cv);
+    }
+    if (Ki_cc > MAX_REASONABLE_KI_CC) {
+        Serial.printf("[WARN] Ki_cc=%.3f too high. Fallback to 0.01 will be used.\n", Ki_cc);
+    }
+    if (CV_FINE_UP_STEP_INTERVAL_MS > MAX_REASONABLE_CV_FINE_UP_INTERVAL_MS) {
+        Serial.printf("[WARN] CV_FINE_UP_STEP_INTERVAL_MS=%lu too long. Fallback to 1200ms will be used.\n", CV_FINE_UP_STEP_INTERVAL_MS);
+    }
 
     bool volt_ok = ads_volt.begin(0x48);
     bool curr_ok = ads_curr.begin(0x49);
@@ -213,6 +225,10 @@ void TaskSampleData(void * pvParameters) {
     bool overvoltage_duty_zero_active = false;
     float duty_step_accumulator = 0.0;
     unsigned long last_forward_up_step_ms = 0;
+    const float kp_cv_effective = (Kp_cv < MIN_REASONABLE_KP_CV) ? 0.42f : Kp_cv;
+    const float ki_cc_effective = (Ki_cc > MAX_REASONABLE_KI_CC) ? 0.01f : Ki_cc;
+    const unsigned long cv_fine_up_interval_effective =
+        (CV_FINE_UP_STEP_INTERVAL_MS > MAX_REASONABLE_CV_FINE_UP_INTERVAL_MS) ? 1200UL : CV_FINE_UP_STEP_INTERVAL_MS;
 
     for(;;) {
         unsigned long now = millis();
@@ -423,7 +439,7 @@ void TaskSampleData(void * pvParameters) {
                 pid_integral_cc += pid_error_cc;
                 pid_integral_cc = constrain(pid_integral_cc, -100, 100);
                 float delta_error_cc = pid_error_cc - pid_last_error_cc;
-                float pid_out_cc = (Kp_cc * pid_error_cc) + (Ki_cc * pid_integral_cc) + (Kd_cc * delta_error_cc);
+                float pid_out_cc = (Kp_cc * pid_error_cc) + (ki_cc_effective * pid_integral_cc) + (Kd_cc * delta_error_cc);
                 pid_last_error_cc = pid_error_cc;
 
                 // 2. ลูปควบคุมแรงดันคงที่ (Constant Voltage Loop - CV) เป้าหมาย 58.4V
@@ -435,7 +451,7 @@ void TaskSampleData(void * pvParameters) {
                 pid_integral_cv += pid_error_cv;
                 pid_integral_cv = constrain(pid_integral_cv, -100, 100);
                 float delta_error_cv = pid_error_cv - pid_last_error_cv;
-                float pid_out_cv = (Kp_cv * pid_error_cv) + (Ki_cv * pid_integral_cv) + (Kd_cv * delta_error_cv);
+                float pid_out_cv = (kp_cv_effective * pid_error_cv) + (Ki_cv * pid_integral_cv) + (Kd_cv * delta_error_cv);
                 pid_last_error_cv = pid_error_cv;
 
                 // เลือกค่าเอาต์พุตจากวงจร PID ที่ปลอดภัยและมีค่าต่ำที่สุด ป้องกัน Overshoot
@@ -480,7 +496,7 @@ void TaskSampleData(void * pvParameters) {
 
                 // โซนปลาย CV: ขาขึ้นต้องช้ากว่าขาลงเพื่อลดการกระชากแรงดัน
                 if (duty_step > 0 && v_bat_filt >= CV_FINE_ZONE_V && raw_duty <= 25) {
-                    unsigned long min_up_interval = CV_FINE_UP_STEP_INTERVAL_MS;
+                    unsigned long min_up_interval = cv_fine_up_interval_effective;
                     if (v_bat_filt >= CV_ULTRA_FINE_ZONE_V && raw_duty <= 15) {
                         min_up_interval = CV_ULTRA_FINE_UP_STEP_INTERVAL_MS;
                     }
