@@ -70,12 +70,19 @@ const float BOOST_BAT_CURRENT_LIMIT_MARGIN_A = 0.20;
 const float BOOST_BAT_CURRENT_HARD_EXTRA_A = 0.50;
 const int BOOST_DUTY_TRIM_SOFT = 1;
 const int BOOST_DUTY_TRIM_HARD = 1;
+const unsigned long BOOST_DUTY_TRIM_SOFT_INTERVAL_MS = 140;
+const unsigned long BOOST_DUTY_TRIM_HARD_INTERVAL_MS = 100;
+const unsigned long BOOST_DUTY_TRIM_CV_INTERVAL_MS = 80;
 const float BOOST_PID_POS_LIMIT = 1.0;
 const float BOOST_PID_NEG_LIMIT_NORMAL = -1.0;
 const float BOOST_PID_NEG_LIMIT_LOW_SUN = -0.6;
 const float BOOST_SOFTSTART_STEP = 1.0;
 const float BOOST_MIN_VALID_PV_V = 5.0;
 const float BOOST_VSOLAR_COLLAPSE_STEP = -2.0;
+const float BOOST_LANDING_BAND_V = 0.6;            // เข้าโซนลงจอดเมื่อแรงดันแผงใกล้เป้า
+const float BOOST_LANDING_BAND_A = 0.25;           // หรือกระแสแบตใกล้ CC ให้ชะลอขาลง
+const unsigned long BOOST_LANDING_DOWN_INTERVAL_MS = 120;
+const unsigned long BOOST_LANDING_DOWN_INTERVAL_LOW_SUN_MS = 180;
 const float BOOST_PV_SHUTDOWN_LOW_SUN_V = 37.5;
 const unsigned long BOOST_PV_SHUTDOWN_NORMAL_MS = 2000;
 const unsigned long BOOST_PV_SHUTDOWN_LOW_SUN_MS = 7000;
@@ -255,7 +262,10 @@ void TaskSampleData(void * pvParameters) {
     unsigned long overvoltage_start_ms = 0;
     bool overvoltage_duty_zero_active = false;
     float duty_step_accumulator = 0.0;
+    float boost_duty_step_accumulator = 0.0;
     unsigned long last_forward_up_step_ms = 0;
+    unsigned long last_boost_down_step_ms = 0;
+    unsigned long last_boost_trim_ms = 0;
     const float kp_cv_effective = (Kp_cv < MIN_REASONABLE_KP_CV) ? 0.42f : Kp_cv;
     const float ki_cc_effective = (Ki_cc > MAX_REASONABLE_KI_CC) ? 0.01f : Ki_cc;
     const unsigned long cv_fine_up_interval_effective =
@@ -475,6 +485,11 @@ void TaskSampleData(void * pvParameters) {
                 duty_step_accumulator = 0.0;
                 last_forward_up_step_ms = 0;
             }
+            if (currentState != STATE_BOOST) {
+                boost_duty_step_accumulator = 0.0;
+                last_boost_down_step_ms = 0;
+                last_boost_trim_ms = 0;
+            }
 
             if (currentState == STATE_FORWARD) {
                 // =================================================================
@@ -566,20 +581,33 @@ void TaskSampleData(void * pvParameters) {
                 if (v_bat_filt >= CV_SOFT_OVERVOLTAGE_V) {
                     raw_duty -= 10;
                     pid_integral = 0;
+                    boost_duty_step_accumulator = 0.0;
                 }
                 else if (v_bat_filt >= TARGET_CV_VOLTAGE) {
-                    raw_duty -= BOOST_DUTY_TRIM_HARD;
+                    if (now - last_boost_trim_ms >= BOOST_DUTY_TRIM_CV_INTERVAL_MS) {
+                        raw_duty -= BOOST_DUTY_TRIM_HARD;
+                        last_boost_trim_ms = now;
+                    }
                     pid_integral = 0;
+                    boost_duty_step_accumulator = 0.0;
                 }
                 else if (i_bat_filt >= (TARGET_CC_CURRENT + BOOST_BAT_CURRENT_LIMIT_MARGIN_A)) {
                     float over_current_a = i_bat_filt - TARGET_CC_CURRENT;
-                    raw_duty -= (over_current_a >= (BOOST_BAT_CURRENT_LIMIT_MARGIN_A + BOOST_BAT_CURRENT_HARD_EXTRA_A))
-                        ? BOOST_DUTY_TRIM_HARD
-                        : BOOST_DUTY_TRIM_SOFT;
+                    bool hard_trim = (over_current_a >= (BOOST_BAT_CURRENT_LIMIT_MARGIN_A + BOOST_BAT_CURRENT_HARD_EXTRA_A));
+                    int trim_step = hard_trim ? BOOST_DUTY_TRIM_HARD : BOOST_DUTY_TRIM_SOFT;
+                    unsigned long trim_interval_ms = hard_trim
+                        ? BOOST_DUTY_TRIM_HARD_INTERVAL_MS
+                        : BOOST_DUTY_TRIM_SOFT_INTERVAL_MS;
+                    if (now - last_boost_trim_ms >= trim_interval_ms) {
+                        raw_duty -= trim_step;
+                        last_boost_trim_ms = now;
+                    }
                     pid_integral = 0;
+                    boost_duty_step_accumulator = 0.0;
                 }
                 else if (v_solar <= BOOST_MIN_VALID_PV_V) {
                     raw_duty = 0; pid_integral = 0;
+                    boost_duty_step_accumulator = 0.0;
                 }
                 else {
                     if (now - last_mppt_time >= BOOST_MPPT_INTERVAL_MS) {
@@ -634,7 +662,31 @@ void TaskSampleData(void * pvParameters) {
                         else if (pid_output < boost_pid_neg_limit) pid_output = boost_pid_neg_limit;
                     }
 
-                    raw_duty += (int)round(pid_output);
+                    boost_duty_step_accumulator += pid_output;
+                    int boost_step = 0;
+                    if (boost_duty_step_accumulator >= 1.0) {
+                        boost_step = (int)floor(boost_duty_step_accumulator);
+                    } else if (boost_duty_step_accumulator <= -1.0) {
+                        boost_step = (int)ceil(boost_duty_step_accumulator);
+                    }
+
+                    bool boost_landing_phase =
+                        (v_solar <= (v_solar_target + BOOST_LANDING_BAND_V)) ||
+                        (i_bat_filt >= (TARGET_CC_CURRENT - BOOST_LANDING_BAND_A));
+                    if (boost_step < 0 && boost_landing_phase) {
+                        unsigned long min_down_interval_ms = low_sun_mode
+                            ? BOOST_LANDING_DOWN_INTERVAL_LOW_SUN_MS
+                            : BOOST_LANDING_DOWN_INTERVAL_MS;
+                        if (now - last_boost_down_step_ms < min_down_interval_ms) {
+                            boost_step = 0;
+                            if (boost_duty_step_accumulator < -0.95) boost_duty_step_accumulator = -0.95;
+                        } else {
+                            last_boost_down_step_ms = now;
+                        }
+                    }
+
+                    raw_duty += boost_step;
+                    boost_duty_step_accumulator -= boost_step;
                     pid_last_error = pid_error;
                 }
             }
@@ -668,6 +720,9 @@ void TaskSampleData(void * pvParameters) {
             overvoltage_duty_zero_active = false;
             overvoltage_start_ms = 0;
             duty_step_accumulator = 0.0;
+            boost_duty_step_accumulator = 0.0;
+            last_boost_down_step_ms = 0;
+            last_boost_trim_ms = 0;
         }
 
         last_millis = now;
