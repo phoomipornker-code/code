@@ -118,6 +118,10 @@ const float BOOST_SAFE_I_HEADROOM = 0.15;
 const float BOOST_SAFE_BAT_HEADROOM = 0.3;
 const float HARD_OVP_TRIP_VOLTAGE = 60.5;
 const float HARD_OVP_RELEASE_VOLTAGE = 58.0;
+const bool ENABLE_DEBUG_VERBOSE = true;           // ดีบักเดิมหลายบรรทัด
+const bool ENABLE_PLOTTER_STREAM = true;          // สตรีม 1 บรรทัดสำหรับ Serial Plotter
+const unsigned long DEBUG_PRINT_INTERVAL_MS = 500;
+const unsigned long PLOTTER_PRINT_INTERVAL_MS = 100;
 
 // =========================================================================
 // ตัวแปรระบบ
@@ -290,6 +294,7 @@ void TaskSampleData(void * pvParameters) {
     bool pv_is_collapsing = false;
     unsigned long boost_mode_enter_ms = 0;
     unsigned long last_debug_time = 0;
+    unsigned long last_plotter_time = 0;
     unsigned long last_sensor_error_log = 0;
     unsigned long full_condition_start_ms = 0;
     unsigned long high_voltage_stop_start_ms = 0;
@@ -724,7 +729,24 @@ void TaskSampleData(void * pvParameters) {
         last_millis = now;
         active_duty_percent = round(((float)raw_duty * 100.0) / 1023.0);
 
-        if (now - last_debug_time >= 500) {
+        if (ENABLE_PLOTTER_STREAM && (now - last_plotter_time >= PLOTTER_PRINT_INTERVAL_MS)) {
+            last_plotter_time = now;
+            int mode_code = 0;
+            if (charge_full_hold) mode_code = 5;
+            else if (ovp_latched) mode_code = 6;
+            else if (currentState == STATE_FORWARD) mode_code = 4;
+            else if (currentState == STATE_BOOST) {
+                if (boostMode == BOOST_RAMP) mode_code = 1;
+                else if (boostMode == BOOST_MPPT) mode_code = 2;
+                else mode_code = 3;
+            }
+
+            // Plotter-compatible line: one sample per line, tab-separated channels.
+            Serial.printf("Vpv:%.2f\tVbat:%.2f\tIbatt:%.2f\tDuty:%.1f\tMode:%d\n",
+                          v_solar, v_bat_filt, i_bat_charge_filt, (float)raw_duty, mode_code);
+        }
+
+        if (ENABLE_DEBUG_VERBOSE && (now - last_debug_time >= DEBUG_PRINT_INTERVAL_MS)) {
             last_debug_time = now;
             const char* state_label = "OFF";
             if (charge_full_hold) {
