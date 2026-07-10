@@ -24,7 +24,7 @@ Adafruit_ADS1115 ads_curr;
 // =========================================================================
 // ตั้งค่าเป้าหมาย และ เกณฑ์ความปลอดภัยขั้นต่ำ (Safety Thresholds)
 // =========================================================================
-const float TARGET_CV_VOLTAGE = 55.8;           // LiFePO4 16S: ~3.49V/cell (ตั้งแบบปลอดภัย)
+const float TARGET_CV_VOLTAGE = 58.0;           // ผู้ใช้ต้องการ CV คงที่ที่ 58V
 const float TARGET_CC_CURRENT = 3.0;
 
 const float MIN_PV_VOLTAGE = 42.0;         // เริ่มทำงานเมื่อแผงถึง 42V
@@ -38,12 +38,12 @@ const int MAX_DUTY_BOOST   = 760;
 const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
 const float CV_DEADBAND_V = 0.10;
-const float FULL_DETECT_VOLTAGE = 55.6;
+const float FULL_DETECT_VOLTAGE = 57.8;
 const float FULL_END_CURRENT = 0.45;              // 15% ของกระแส CC (3A)
 const unsigned long FULL_CONFIRM_MS = 300000;     // เงื่อนไข FULL ต้องต่อเนื่อง 5 นาที
-const float HIGH_VOLTAGE_STOP_VOLTAGE = 57.4;     // LiFePO4 16S: pre-OVP stop ก่อน 3.60V/cell
+const float HIGH_VOLTAGE_STOP_VOLTAGE = 58.8;     // pre-OVP stop ก่อน hard OVP
 const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 10000;
-const float RESTART_CHARGE_VOLTAGE = 54.4;        // ฮิสเทอรีซิสหลังเต็มสำหรับ LiFePO4 16S
+const float RESTART_CHARGE_VOLTAGE = 55.8;        // ฮิสเทอรีซิสหลังเต็มสำหรับ CV 58V
 
 // =========================================================================
 // ตัวแปรและค่าคงที่สำหรับ PID Control (โหมด BOOST คุมแรงดันแผงโซล่าเซลล์)
@@ -98,14 +98,14 @@ const float ADC_GLITCH_CURRENT_GATE_A = 0.35;
 const unsigned long ADC_GLITCH_LOG_MS = 1000;
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 const float BOOST_VOLTAGE_FLOOR = 42.0;
-const float BOOST_BAT_VOLTAGE_LIMIT = 56.2;
-const float BOOST_CV_TARGET_VOLTAGE = 55.8;
+const float BOOST_BAT_VOLTAGE_LIMIT = 58.2;
+const float BOOST_CV_TARGET_VOLTAGE = 58.0;
 const float BOOST_START_I_TARGET = 1.0;
 const float BOOST_START_EFF_EST = 0.90;
 const int BOOST_START_DUTY_MIN_RAW = 60;
 const int BOOST_START_DUTY_MAX_RAW = 320;
-const float BOOST_CV_ENTRY_VOLTAGE = 55.0;
-const float BOOST_CV_EXIT_VOLTAGE = 54.6;
+const float BOOST_CV_ENTRY_VOLTAGE = 57.2;
+const float BOOST_CV_EXIT_VOLTAGE = 56.8;
 const unsigned long BOOST_RAMP_DURATION_MS = 2500;
 const float BOOST_RAMP_STEP = 1.2;
 const float BOOST_CV_KP = 1.1;
@@ -127,8 +127,8 @@ const float BOOST_RECOVERY_TARGET_V = 42.3;
 const float BOOST_SAFE_V_HEADROOM = 0.4;
 const float BOOST_SAFE_I_HEADROOM = 0.15;
 const float BOOST_SAFE_BAT_HEADROOM = 0.3;
-const float HARD_OVP_TRIP_VOLTAGE = 58.4;         // LiFePO4 16S absolute upper bound (~3.65V/cell)
-const float HARD_OVP_RELEASE_VOLTAGE = 57.0;
+const float HARD_OVP_TRIP_VOLTAGE = 59.2;         // กันทริปจาก overshoot เล็กน้อย แต่ยังหยุดทันทีเมื่อพุ่งจริง
+const float HARD_OVP_RELEASE_VOLTAGE = 58.2;
 const bool ENABLE_DEBUG_VERBOSE = true;           // ดีบักเดิมหลายบรรทัด
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 500;
 const unsigned long LCD_REFRESH_INTERVAL_MS = 180;
