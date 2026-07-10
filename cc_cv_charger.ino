@@ -113,8 +113,12 @@ const float BOOST_OC_SOFT_DOWN_GAIN = 1.6;
 const float BOOST_OC_HARD_DOWN_BASE = 3.0;
 const float BOOST_OC_HARD_DOWN_GAIN = 2.0;
 const float BOOST_MIN_DUTY_WHILE_LIMITING = 20.0;
-const float BOOST_CEILING_RELEASE_STEP = 0.8;
+const float BOOST_CEILING_RELEASE_STEP = 1.6;
 const float BOOST_VBAT_HARD_OVERSHOOT_MARGIN = 0.20;
+const int BOOST_CEILING_FLOOR_RAW = 24;
+const float BOOST_MPPT_MIN_CURRENT_FOR_UPDATE = 0.20;
+const unsigned long BOOST_MPPT_LOW_CURRENT_FALLBACK_MS = 2500;
+const float BOOST_RECOVERY_TARGET_V = 42.3;
 const float BOOST_SAFE_V_HEADROOM = 0.4;
 const float BOOST_SAFE_I_HEADROOM = 0.15;
 const float BOOST_SAFE_BAT_HEADROOM = 0.3;
@@ -295,6 +299,7 @@ void TaskSampleData(void * pvParameters) {
     unsigned long pv_collapse_start_time = 0;
     bool pv_is_collapsing = false;
     unsigned long boost_mode_enter_ms = 0;
+    unsigned long mppt_low_current_start_ms = 0;
     unsigned long last_debug_time = 0;
     unsigned long last_sensor_error_log = 0;
     unsigned long full_condition_start_ms = 0;
@@ -536,6 +541,7 @@ void TaskSampleData(void * pvParameters) {
                 }
                 else {
                     if (boostMode == BOOST_RAMP) {
+                        mppt_low_current_start_ms = 0;
                         if (v_bat_filt >= BOOST_CV_ENTRY_VOLTAGE) {
                             boostMode = BOOST_CV_HOLD;
                             pid_integral_cv = 0;
@@ -557,7 +563,11 @@ void TaskSampleData(void * pvParameters) {
                         }
                     }
                     else if (boostMode == BOOST_MPPT) {
-                        if ((now - last_mppt_time >= 100) && (i_solar_mag > 0.0)) {
+                        bool mppt_has_useful_current =
+                            (i_solar_mag >= BOOST_MPPT_MIN_CURRENT_FOR_UPDATE) ||
+                            (i_bat_charge_filt >= BOOST_MPPT_MIN_CURRENT_FOR_UPDATE);
+
+                        if ((now - last_mppt_time >= 100) && mppt_has_useful_current) {
                             last_mppt_time = now;
                             float p_solar = v_solar * i_solar_mag;
                             float delta_p = p_solar - p_solar_old;
@@ -578,6 +588,23 @@ void TaskSampleData(void * pvParameters) {
                             if (v_solar_target > 48.0) v_solar_target = 48.0;
 
                             p_solar_old = p_solar; v_solar_old = v_solar;
+                        }
+
+                        if (!mppt_has_useful_current) {
+                            if (mppt_low_current_start_ms == 0) mppt_low_current_start_ms = now;
+                            if (now - mppt_low_current_start_ms >= BOOST_MPPT_LOW_CURRENT_FALLBACK_MS) {
+                                boostMode = BOOST_RAMP;
+                                v_solar_target = BOOST_RECOVERY_TARGET_V;
+                                pid_integral = 0;
+                                pid_last_error = 0;
+                                if (duty_accumulator < BOOST_CEILING_FLOOR_RAW) {
+                                    duty_accumulator = BOOST_CEILING_FLOOR_RAW;
+                                }
+                                mppt_low_current_start_ms = 0;
+                                Serial.println("[INFO] MPPT low-current fallback -> BOOST_RAMP.");
+                            }
+                        } else {
+                            mppt_low_current_start_ms = 0;
                         }
 
                         pid_error = v_solar - v_solar_target;
@@ -610,9 +637,11 @@ void TaskSampleData(void * pvParameters) {
                             boostMode = BOOST_CV_HOLD;
                             pid_integral_cv = 0;
                             pid_last_error_cv = 0;
+                            mppt_low_current_start_ms = 0;
                         }
                     }
                     else { // BOOST_CV_HOLD
+                        mppt_low_current_start_ms = 0;
                         pid_error_cv = BOOST_BAT_VOLTAGE_LIMIT - v_bat_filt;
                         if (fabs(pid_error_cv) <= CV_DEADBAND_V) {
                             pid_error_cv = 0.0;
@@ -647,11 +676,18 @@ void TaskSampleData(void * pvParameters) {
                 bool near_i_limit = (i_bat_charge_filt >= (TARGET_CC_CURRENT - BOOST_SAFE_I_HEADROOM));
                 bool near_bat_limit = (v_bat_filt >= (BOOST_BAT_VOLTAGE_LIMIT - BOOST_SAFE_BAT_HEADROOM));
                 bool hold_duty_ceiling = near_v_limit || near_i_limit || near_bat_limit;
+                bool hard_limit_active =
+                    (i_bat_charge_filt > (TARGET_CC_CURRENT + BOOST_OC_HARD_MARGIN_A)) ||
+                    (v_bat_filt > (BOOST_BAT_VOLTAGE_LIMIT + BOOST_VBAT_HARD_OVERSHOOT_MARGIN));
 
                 // เข้าใกล้ลิมิต: ล็อกเพดาน duty ไม่ให้เพิ่มต่อ; ออกจากลิมิตแล้วค่อยคืนเพดานช้าๆ
                 if (hold_duty_ceiling) {
-                    if (duty_before_control < boost_duty_ceiling) {
-                        boost_duty_ceiling = duty_before_control;
+                    float ceiling_lock_target = duty_before_control;
+                    if (!hard_limit_active && ceiling_lock_target < BOOST_CEILING_FLOOR_RAW) {
+                        ceiling_lock_target = BOOST_CEILING_FLOOR_RAW;
+                    }
+                    if (ceiling_lock_target < boost_duty_ceiling) {
+                        boost_duty_ceiling = ceiling_lock_target;
                     }
                 } else {
                     boost_duty_ceiling += BOOST_CEILING_RELEASE_STEP;
