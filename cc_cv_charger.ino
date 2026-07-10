@@ -128,6 +128,10 @@ const int BOOST_CEILING_RECOVERY_FLOOR_RAW = 180;
 const float BOOST_CV_STALL_MARGIN_V = 1.0;
 const float BOOST_CV_STALL_CURRENT_A = 0.18;
 const unsigned long BOOST_CV_STALL_TIMEOUT_MS = 1800;
+const int BOOST_STUCK_CEIL_RAW = 80;
+const float BOOST_STUCK_RECOVER_MARGIN_V = 1.2;
+const float BOOST_STUCK_RECOVER_CURRENT_A = 0.20;
+const unsigned long BOOST_STUCK_RECOVER_TIMEOUT_MS = 1500;
 const float BOOST_CURRENT_CAP_V1 = 56.8;
 const float BOOST_CURRENT_CAP_V2 = 57.2;
 const float BOOST_CURRENT_CAP_V3 = 57.6;
@@ -377,6 +381,10 @@ void calibrateCurrentOffsetsAtBoot() {
 void setup() {
     Serial.begin(115200);
     Serial.printf("[BOOT] Firmware: %s\n", FW_VERSION_TAG);
+    Serial.printf("[BOOT] CFG CV=%.2fV CVentry=%.2fV CVexit=%.2fV forceCV=%.2fV capV=%.1f/%.1f/%.1f/%.1f\n",
+                  BOOST_CV_TARGET_VOLTAGE, BOOST_CV_ENTRY_VOLTAGE, BOOST_CV_EXIT_VOLTAGE,
+                  BOOST_FORCE_CV_VOLTAGE, BOOST_NEAR_FULL_V0, BOOST_NEAR_FULL_V1,
+                  BOOST_NEAR_FULL_V2, BOOST_NEAR_FULL_V3);
     Wire.begin(21, 22);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(25);
@@ -434,6 +442,7 @@ void TaskSampleData(void * pvParameters) {
     unsigned long boost_mode_enter_ms = 0;
     unsigned long mppt_low_current_start_ms = 0;
     unsigned long cv_stall_start_ms = 0;
+    unsigned long low_ceiling_start_ms = 0;
     unsigned long last_debug_time = 0;
     unsigned long last_sensor_error_log = 0;
     unsigned long full_condition_start_ms = 0;
@@ -781,6 +790,7 @@ void TaskSampleData(void * pvParameters) {
                     if (boostMode == BOOST_RAMP) {
                         mppt_low_current_start_ms = 0;
                         cv_stall_start_ms = 0;
+                        low_ceiling_start_ms = 0;
                         if (v_bat_filt >= BOOST_FORCE_CV_VOLTAGE || v_bat_filt >= BOOST_CV_ENTRY_VOLTAGE) {
                             boostMode = BOOST_CV_HOLD;
                             pid_integral_cv = 0;
@@ -803,6 +813,7 @@ void TaskSampleData(void * pvParameters) {
                     }
                     else if (boostMode == BOOST_MPPT) {
                         cv_stall_start_ms = 0;
+                        low_ceiling_start_ms = 0;
                         if (v_bat_filt >= BOOST_FORCE_CV_VOLTAGE) {
                             boostMode = BOOST_CV_HOLD;
                             pid_integral_cv = 0;
@@ -897,6 +908,7 @@ void TaskSampleData(void * pvParameters) {
                             pid_integral_cv = 0;
                             pid_last_error_cv = 0;
                             cv_stall_start_ms = 0;
+                            low_ceiling_start_ms = 0;
                             if (boost_duty_ceiling < BOOST_CEILING_RECOVERY_FLOOR_RAW) {
                                 boost_duty_ceiling = BOOST_CEILING_RECOVERY_FLOOR_RAW;
                             }
@@ -937,6 +949,7 @@ void TaskSampleData(void * pvParameters) {
                                 pid_integral = 0;
                                 pid_last_error = 0;
                                 cv_stall_start_ms = 0;
+                                low_ceiling_start_ms = 0;
                             } else {
                                 bool cv_stalled_low = (v_bat_filt < (BOOST_CV_TARGET_VOLTAGE - BOOST_CV_STALL_MARGIN_V)) &&
                                                       (i_bat_charge_filt < BOOST_CV_STALL_CURRENT_A);
@@ -955,6 +968,7 @@ void TaskSampleData(void * pvParameters) {
                                             duty_accumulator = BOOST_CEILING_FLOOR_RAW;
                                         }
                                         cv_stall_start_ms = 0;
+                                        low_ceiling_start_ms = 0;
                                         Serial.println("[INFO] CV stall fallback -> BOOST_RAMP.");
                                     }
                                 } else {
@@ -1013,6 +1027,33 @@ void TaskSampleData(void * pvParameters) {
                 }
                 if (boost_duty_ceiling > (float)vbat_duty_cap) {
                     boost_duty_ceiling = (float)vbat_duty_cap;
+                }
+
+                // ถ้าเพดาน duty ต่ำผิดปกตินาน ทั้งที่แรงดันยังไม่ใกล้ 58V และกระแสแทบไม่ไหล ให้กู้กลับ RAMP
+                bool low_ceiling_stuck =
+                    (boost_duty_ceiling <= BOOST_STUCK_CEIL_RAW) &&
+                    (v_bat_filt < (BOOST_CV_TARGET_VOLTAGE - BOOST_STUCK_RECOVER_MARGIN_V)) &&
+                    (i_bat_charge_filt < BOOST_STUCK_RECOVER_CURRENT_A);
+                if (low_ceiling_stuck) {
+                    if (low_ceiling_start_ms == 0) low_ceiling_start_ms = now;
+                    if (now - low_ceiling_start_ms >= BOOST_STUCK_RECOVER_TIMEOUT_MS) {
+                        boostMode = BOOST_RAMP;
+                        pid_integral = 0;
+                        pid_last_error = 0;
+                        pid_integral_cv = 0;
+                        pid_last_error_cv = 0;
+                        if (boost_duty_ceiling < BOOST_CEILING_RECOVERY_FLOOR_RAW) {
+                            boost_duty_ceiling = BOOST_CEILING_RECOVERY_FLOOR_RAW;
+                        }
+                        if (duty_accumulator < BOOST_CEILING_FLOOR_RAW) {
+                            duty_accumulator = BOOST_CEILING_FLOOR_RAW;
+                        }
+                        low_ceiling_start_ms = 0;
+                        cv_stall_start_ms = 0;
+                        Serial.println("[WARN] LOW-CEIL recovery -> BOOST_RAMP.");
+                    }
+                } else {
+                    low_ceiling_start_ms = 0;
                 }
 
                 if (v_solar < BOOST_VOLTAGE_FLOOR) {
