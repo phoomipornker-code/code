@@ -170,6 +170,8 @@ volatile int boost_start_duty_raw = 20;
 volatile float boost_duty_ceiling = MAX_DUTY_BOOST;
 int raw_duty = 0;
 float duty_accumulator = 0.0;          // เก็บ duty แบบทศนิยม เพื่อลด dead-zone จาก round()
+float boost_dither_phase = 0.0;        // สะสมเศษ duty เพื่อทำ sub-LSB averaging
+float forward_dither_phase = 0.0;
 float total_Wh = 0;
 unsigned long last_millis = 0;
 
@@ -203,6 +205,7 @@ void TaskSampleData(void * pvParameters);
 void TaskLCDLoop(void * pvParameters);
 void calibrateCurrentOffsetsAtBoot();
 int calcInitialBoostDutyRaw(float v_pv_now, float v_bat_now);
+int quantizeDutyWithDither(float duty_cmd, float *phase, int max_duty);
 void lcdPrintLineRaw(uint8_t row, const char *text);
 void lcdPrintLineFmt(uint8_t row, const char *fmt, ...);
 void reinitI2CBusAndLCD();
@@ -233,6 +236,19 @@ int calcInitialBoostDutyRaw(float v_pv_now, float v_bat_now) {
     return constrain(raw, BOOST_START_DUTY_MIN_RAW, max_start_duty);
 }
 
+int quantizeDutyWithDither(float duty_cmd, float *phase, int max_duty) {
+    duty_cmd = constrain(duty_cmd, 0.0f, (float)max_duty);
+    int base = (int)floorf(duty_cmd);
+    float frac = duty_cmd - (float)base;
+    *phase += frac;
+    if (*phase >= 1.0f) {
+        base += 1;
+        *phase -= 1.0f;
+    }
+    if (*phase < 0.0f) *phase = 0.0f;
+    return constrain(base, 0, max_duty);
+}
+
 static inline int16_t readADCStable(Adafruit_ADS1115 &adc, uint8_t channel, bool discard_first = false) {
     if (discard_first) {
         (void)adc.readADC_SingleEnded(channel);
@@ -253,6 +269,8 @@ static inline void disablePowerStage() {
     boost_duty_ceiling = MAX_DUTY_BOOST;
     raw_duty = 0;
     duty_accumulator = 0.0;
+    boost_dither_phase = 0.0;
+    forward_dither_phase = 0.0;
     digitalWrite(RELAY_PV_PIN, LOW);
     digitalWrite(RELAY_AC_PIN, LOW);
     ledcWrite(PWM_FORWARD_PIN, 0);
@@ -636,6 +654,8 @@ void TaskSampleData(void * pvParameters) {
             boost_duty_ceiling = MAX_DUTY_BOOST;
             raw_duty = 0;
             duty_accumulator = 0.0;
+            boost_dither_phase = 0.0;
+            forward_dither_phase = 0.0;
             pv_is_collapsing = false;
         }
 
@@ -944,12 +964,15 @@ void TaskSampleData(void * pvParameters) {
             }
 
             duty_accumulator = constrain(duty_accumulator, 0.0, (float)allowed_max_duty);
-            raw_duty = (int)roundf(duty_accumulator);
 
             if (currentState == STATE_FORWARD) {
+                raw_duty = quantizeDutyWithDither(duty_accumulator, &forward_dither_phase, allowed_max_duty);
+                boost_dither_phase = 0.0;
                 ledcWrite(PWM_FORWARD_PIN, raw_duty);
                 ledcWrite(PWM_BOOST_PIN, 0);
             } else if (currentState == STATE_BOOST) {
+                raw_duty = quantizeDutyWithDither(duty_accumulator, &boost_dither_phase, allowed_max_duty);
+                forward_dither_phase = 0.0;
                 ledcWrite(PWM_BOOST_PIN, raw_duty);
                 ledcWrite(PWM_FORWARD_PIN, 0);
             }
