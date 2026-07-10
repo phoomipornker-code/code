@@ -113,6 +113,8 @@ const float BOOST_OC_SOFT_DOWN_GAIN = 1.6;
 const float BOOST_OC_HARD_DOWN_BASE = 3.0;
 const float BOOST_OC_HARD_DOWN_GAIN = 2.0;
 const float BOOST_MIN_DUTY_WHILE_LIMITING = 20.0;
+const float BOOST_CEILING_RELEASE_STEP = 0.8;
+const float BOOST_VBAT_HARD_OVERSHOOT_MARGIN = 0.20;
 const float BOOST_SAFE_V_HEADROOM = 0.4;
 const float BOOST_SAFE_I_HEADROOM = 0.15;
 const float BOOST_SAFE_BAT_HEADROOM = 0.3;
@@ -137,6 +139,7 @@ volatile bool system_ON = false;
 volatile bool charge_full_hold = false;
 volatile int active_duty_percent = 0;
 volatile int boost_start_duty_raw = 20;
+volatile float boost_duty_ceiling = MAX_DUTY_BOOST;
 int raw_duty = 0;
 float duty_accumulator = 0.0;          // เก็บ duty แบบทศนิยม เพื่อลด dead-zone จาก round()
 float total_Wh = 0;
@@ -200,6 +203,7 @@ static inline int16_t readADCStable(Adafruit_ADS1115 &adc, uint8_t channel) {
 static inline void disablePowerStage() {
     currentState = STATE_OFF;
     boostMode = BOOST_RAMP;
+    boost_duty_ceiling = MAX_DUTY_BOOST;
     raw_duty = 0;
     duty_accumulator = 0.0;
     digitalWrite(RELAY_PV_PIN, LOW);
@@ -426,6 +430,7 @@ void TaskSampleData(void * pvParameters) {
                     boost_start_duty_raw = calcInitialBoostDutyRaw(v_solar, vbat_for_start);
                     raw_duty = boost_start_duty_raw;
                     duty_accumulator = (float)boost_start_duty_raw;
+                    boost_duty_ceiling = MAX_DUTY_BOOST;
                     pv_is_collapsing = false;
                     Serial.printf("[INFO] BOOST start duty=%d (Hybrid init).\n", boost_start_duty_raw);
                 }
@@ -442,6 +447,7 @@ void TaskSampleData(void * pvParameters) {
                     raw_duty = 10;
                     duty_accumulator = 10.0;
                     boost_start_duty_raw = 20;
+                    boost_duty_ceiling = MAX_DUTY_BOOST;
                 }
                 else {
                     system_ON = false;
@@ -476,6 +482,7 @@ void TaskSampleData(void * pvParameters) {
             boostMode = BOOST_RAMP;
             boost_mode_enter_ms = 0;
             boost_start_duty_raw = 20;
+            boost_duty_ceiling = MAX_DUTY_BOOST;
             raw_duty = 0;
             duty_accumulator = 0.0;
             pv_is_collapsing = false;
@@ -639,6 +646,23 @@ void TaskSampleData(void * pvParameters) {
 
             // Guardrail ตอนเริ่มและขณะบูสต์: รักษา I<=3A, Vpv>=42V และ Vbatt<=58V
             if (currentState == STATE_BOOST) {
+                bool near_v_limit = (v_solar <= (BOOST_VOLTAGE_FLOOR + BOOST_SAFE_V_HEADROOM));
+                bool near_i_limit = (i_bat_charge_filt >= (TARGET_CC_CURRENT - BOOST_SAFE_I_HEADROOM));
+                bool near_bat_limit = (v_bat_filt >= (BOOST_BAT_VOLTAGE_LIMIT - BOOST_SAFE_BAT_HEADROOM));
+                bool hold_duty_ceiling = near_v_limit || near_i_limit || near_bat_limit;
+
+                // เข้าใกล้ลิมิต: ล็อกเพดาน duty ไม่ให้เพิ่มต่อ; ออกจากลิมิตแล้วค่อยคืนเพดานช้าๆ
+                if (hold_duty_ceiling) {
+                    if (duty_before_control < boost_duty_ceiling) {
+                        boost_duty_ceiling = duty_before_control;
+                    }
+                } else {
+                    boost_duty_ceiling += BOOST_CEILING_RELEASE_STEP;
+                    if (boost_duty_ceiling > (float)allowed_max_duty) {
+                        boost_duty_ceiling = (float)allowed_max_duty;
+                    }
+                }
+
                 if (v_solar < BOOST_VOLTAGE_FLOOR) {
                     float v_under = BOOST_VOLTAGE_FLOOR - v_solar;
                     duty_accumulator -= (3.0 + (v_under * 3.5));
@@ -664,22 +688,26 @@ void TaskSampleData(void * pvParameters) {
                 }
                 if (v_bat_filt > BOOST_BAT_VOLTAGE_LIMIT) {
                     float over_bat_v = v_bat_filt - BOOST_BAT_VOLTAGE_LIMIT;
-                    duty_accumulator -= (5.0 + (over_bat_v * 10.0));
+                    if (over_bat_v > BOOST_VBAT_HARD_OVERSHOOT_MARGIN) {
+                        duty_accumulator -= (4.0 + (over_bat_v * 9.0));
+                    } else {
+                        duty_accumulator -= (1.5 + (over_bat_v * 6.0));
+                    }
                     pid_integral = 0;
                 }
 
-                // จำกัดความเร็วขาขึ้นของ duty เมื่อเข้าใกล้ข้อจำกัด 42V/3A
+                // จำกัดความเร็วขาขึ้นเมื่อเข้าใกล้ข้อจำกัดเพื่อกัน overshoot
                 float duty_delta = duty_accumulator - duty_before_control;
-                if (duty_delta > 0.0) {
-                    bool near_v_limit = (v_solar <= (BOOST_VOLTAGE_FLOOR + BOOST_SAFE_V_HEADROOM));
-                    bool near_i_limit = (i_bat_charge_filt >= (TARGET_CC_CURRENT - BOOST_SAFE_I_HEADROOM));
-                    bool near_bat_limit = (v_bat_filt >= (BOOST_BAT_VOLTAGE_LIMIT - BOOST_SAFE_BAT_HEADROOM));
-                    if (near_v_limit || near_i_limit || near_bat_limit) {
-                        const float LIMITED_UP_STEP = 0.6;
-                        if (duty_delta > LIMITED_UP_STEP) {
-                            duty_accumulator = duty_before_control + LIMITED_UP_STEP;
-                        }
+                if (duty_delta > 0.0 && hold_duty_ceiling) {
+                    const float LIMITED_UP_STEP = 0.35;
+                    if (duty_delta > LIMITED_UP_STEP) {
+                        duty_accumulator = duty_before_control + LIMITED_UP_STEP;
                     }
+                }
+
+                // เพดาน duty แบบ dynamic: ถึงเงื่อนไขแล้วไม่ให้เพิ่มต่อจนกว่าจะหลุดจากโซนลิมิต
+                if (duty_accumulator > boost_duty_ceiling) {
+                    duty_accumulator = boost_duty_ceiling;
                 }
             }
 
@@ -761,10 +789,11 @@ void TaskSampleData(void * pvParameters) {
                 state_label = "FORWARD";
             }
             Serial.println("=========================================================================================");
-            Serial.printf("[DEBUG INTERFACE] System: %s | State: %s | Active Duty: %d%%\n",
+            Serial.printf("[DEBUG INTERFACE] System: %s | State: %s | Active Duty: %d%% | DutyCeil:%3d%%\n",
                           (system_ON ? "ON " : "OFF"),
                           state_label,
-                          active_duty_percent);
+                          active_duty_percent,
+                          (int)roundf((boost_duty_ceiling * 100.0f) / 1023.0f));
             Serial.printf("  [PV SOLAR] Calc Volt: %5.1f V | RAW Pin A0: %7.1f mV | Target: %.2f V\n", v_solar, raw_mv_v0, v_solar_target);
             Serial.printf("  [PV CURR ] Calc Amps: %5.2f A (|I|=%5.2fA) | RAW Pin A0: %7.1f mV\n", i_solar, i_solar_mag, raw_mv_i0);
             Serial.printf("  [BATTERY ] Calc Volt: %5.1f V | RAW Pin A1: %7.1f mV\n", v_bat, raw_mv_v2);
