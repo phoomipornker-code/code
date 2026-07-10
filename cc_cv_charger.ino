@@ -121,31 +121,31 @@ const float BOOST_OC_SOFT_DOWN_GAIN = 1.6;
 const float BOOST_OC_HARD_DOWN_BASE = 3.0;
 const float BOOST_OC_HARD_DOWN_GAIN = 2.0;
 const float BOOST_MIN_DUTY_WHILE_LIMITING = 20.0;
-const float BOOST_CEILING_RELEASE_STEP = 3.2;
+const float BOOST_CEILING_RELEASE_STEP = 2.0;
 const float BOOST_VBAT_HARD_OVERSHOOT_MARGIN = 0.20;
 const int BOOST_CEILING_FLOOR_RAW = 24;
-const int BOOST_CEILING_RECOVERY_FLOOR_RAW = 180;
+const int BOOST_CEILING_RECOVERY_FLOOR_RAW = 130;
 const float BOOST_CV_STALL_MARGIN_V = 1.0;
 const float BOOST_CV_STALL_CURRENT_A = 0.18;
 const unsigned long BOOST_CV_STALL_TIMEOUT_MS = 1800;
-const int BOOST_STUCK_CEIL_RAW = 80;
+const int BOOST_STUCK_CEIL_RAW = 65;
 const float BOOST_STUCK_RECOVER_MARGIN_V = 1.2;
 const float BOOST_STUCK_RECOVER_CURRENT_A = 0.20;
 const unsigned long BOOST_STUCK_RECOVER_TIMEOUT_MS = 1500;
 const float BOOST_CURRENT_CAP_V1 = 56.8;
 const float BOOST_CURRENT_CAP_V2 = 57.2;
 const float BOOST_CURRENT_CAP_V3 = 57.6;
-const float BOOST_CURRENT_CAP_A1 = 1.6;
-const float BOOST_CURRENT_CAP_A2 = 1.2;
-const float BOOST_CURRENT_CAP_A3 = 0.9;
+const float BOOST_CURRENT_CAP_A1 = 1.4;
+const float BOOST_CURRENT_CAP_A2 = 1.1;
+const float BOOST_CURRENT_CAP_A3 = 0.85;
 const float BOOST_NEAR_FULL_V0 = 56.8;
 const float BOOST_NEAR_FULL_V1 = 57.2;
 const float BOOST_NEAR_FULL_V2 = 57.6;
 const float BOOST_NEAR_FULL_V3 = 58.0;
-const int BOOST_DUTY_CAP_V0_RAW = 220;
-const int BOOST_DUTY_CAP_V1_RAW = 170;
-const int BOOST_DUTY_CAP_V2_RAW = 130;
-const int BOOST_DUTY_CAP_V3_RAW = 95;
+const int BOOST_DUTY_CAP_V0_RAW = 200;
+const int BOOST_DUTY_CAP_V1_RAW = 155;
+const int BOOST_DUTY_CAP_V2_RAW = 120;
+const int BOOST_DUTY_CAP_V3_RAW = 90;
 const float BOOST_FORCE_CV_VOLTAGE = 57.0;
 const float BOOST_FORCE_CV_RELEASE = 56.6;
 const float BOOST_DIRECT_CV_START_VOLTAGE = 57.0;
@@ -188,7 +188,7 @@ volatile bool system_ON = false;
 volatile bool charge_full_hold = false;
 volatile int active_duty_percent = 0;
 volatile int boost_start_duty_raw = 20;
-volatile float boost_duty_ceiling = MAX_DUTY_BOOST;
+volatile float boost_duty_ceiling = 0.0;
 int raw_duty = 0;
 float duty_accumulator = 0.0;          // เก็บ duty แบบทศนิยม เพื่อลด dead-zone จาก round()
 float boost_dither_phase = 0.0;        // สะสมเศษ duty เพื่อทำ sub-LSB averaging
@@ -304,7 +304,7 @@ static inline int16_t readADCStable(Adafruit_ADS1115 &adc, uint8_t channel, bool
 static inline void disablePowerStage() {
     currentState = STATE_OFF;
     boostMode = BOOST_RAMP;
-    boost_duty_ceiling = MAX_DUTY_BOOST;
+    boost_duty_ceiling = 0.0;
     raw_duty = 0;
     duty_accumulator = 0.0;
     boost_dither_phase = 0.0;
@@ -689,7 +689,7 @@ void TaskSampleData(void * pvParameters) {
                     raw_duty = 10;
                     duty_accumulator = 10.0;
                     boost_start_duty_raw = 20;
-                    boost_duty_ceiling = MAX_DUTY_BOOST;
+                    boost_duty_ceiling = 0.0;
                 }
                 else {
                     system_ON = false;
@@ -724,7 +724,7 @@ void TaskSampleData(void * pvParameters) {
             boostMode = BOOST_RAMP;
             boost_mode_enter_ms = 0;
             boost_start_duty_raw = 20;
-            boost_duty_ceiling = MAX_DUTY_BOOST;
+            boost_duty_ceiling = 0.0;
             raw_duty = 0;
             duty_accumulator = 0.0;
             boost_dither_phase = 0.0;
@@ -1195,11 +1195,15 @@ void TaskSampleData(void * pvParameters) {
                 state_label = "FORWARD";
             }
             Serial.println("=========================================================================================");
+            int duty_ceil_percent = 0;
+            if (system_ON && currentState == STATE_BOOST) {
+                duty_ceil_percent = (int)roundf((boost_duty_ceiling * 100.0f) / 1023.0f);
+            }
             Serial.printf("[DEBUG INTERFACE] System: %s | State: %s | Active Duty: %d%% | DutyCeil:%3d%%\n",
                           (system_ON ? "ON " : "OFF"),
                           state_label,
                           active_duty_percent,
-                          (int)roundf((boost_duty_ceiling * 100.0f) / 1023.0f));
+                          duty_ceil_percent);
             Serial.printf("  [PV SOLAR] Calc Volt: %5.1f V | RAW Pin A0: %7.1f mV | Target: %.2f V\n", v_solar, raw_mv_v0, v_solar_target);
             Serial.printf("  [PV CURR ] Calc Amps: %5.2f A (|I|=%5.2fA) | RAW Pin A0: %7.1f mV\n", i_solar, i_solar_mag, raw_mv_i0);
             Serial.printf("  [BATTERY ] Calc Volt: %5.1f V | RAW Pin A1: %7.1f mV\n", v_bat, raw_mv_v2);
