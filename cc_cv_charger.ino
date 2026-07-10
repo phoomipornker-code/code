@@ -106,6 +106,13 @@ const float BOOST_RAMP_STEP = 1.2;
 const float BOOST_CV_KP = 1.1;
 const float BOOST_CV_KI = 0.03;
 const float BOOST_CV_KD = 0.02;
+const float BOOST_OC_SOFT_MARGIN_A = 0.05;
+const float BOOST_OC_HARD_MARGIN_A = 0.80;
+const float BOOST_OC_SOFT_DOWN_BASE = 1.0;
+const float BOOST_OC_SOFT_DOWN_GAIN = 1.6;
+const float BOOST_OC_HARD_DOWN_BASE = 3.0;
+const float BOOST_OC_HARD_DOWN_GAIN = 2.0;
+const float BOOST_MIN_DUTY_WHILE_LIMITING = 20.0;
 const float BOOST_SAFE_V_HEADROOM = 0.4;
 const float BOOST_SAFE_I_HEADROOM = 0.15;
 const float BOOST_SAFE_BAT_HEADROOM = 0.3;
@@ -631,10 +638,24 @@ void TaskSampleData(void * pvParameters) {
                     float v_under = BOOST_VOLTAGE_FLOOR - v_solar;
                     duty_accumulator -= (3.0 + (v_under * 3.5));
                 }
-                if (i_bat_charge_filt > TARGET_CC_CURRENT) {
+                if (i_bat_charge_filt > (TARGET_CC_CURRENT + BOOST_OC_SOFT_MARGIN_A)) {
                     float over_current = i_bat_charge_filt - TARGET_CC_CURRENT;
-                    duty_accumulator -= (5.0 + (over_current * 3.0));
+                    float duty_down = BOOST_OC_SOFT_DOWN_BASE + (over_current * BOOST_OC_SOFT_DOWN_GAIN);
+                    if (over_current > BOOST_OC_HARD_MARGIN_A) {
+                        duty_down = BOOST_OC_HARD_DOWN_BASE + (over_current * BOOST_OC_HARD_DOWN_GAIN);
+                    }
+                    duty_accumulator -= duty_down;
+
+                    // กัน duty ตกเป็นศูนย์ทันทีจากโอเวอร์คเรนต์ชั่วคราวระหว่างที่แรงดันยังอยู่ในโซนใช้งาน
+                    bool can_hold_min_duty = (over_current <= BOOST_OC_HARD_MARGIN_A) &&
+                                             (v_solar > (BOOST_VOLTAGE_FLOOR + 0.8)) &&
+                                             (v_bat_filt < (BOOST_BAT_VOLTAGE_LIMIT - 0.4));
+                    if (can_hold_min_duty && duty_accumulator < BOOST_MIN_DUTY_WHILE_LIMITING) {
+                        duty_accumulator = BOOST_MIN_DUTY_WHILE_LIMITING;
+                    }
+
                     pid_integral = 0;
+                    pid_integral_cv *= 0.8;
                 }
                 if (v_bat_filt > BOOST_BAT_VOLTAGE_LIMIT) {
                     float over_bat_v = v_bat_filt - BOOST_BAT_VOLTAGE_LIMIT;
