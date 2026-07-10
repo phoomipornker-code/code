@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-stability-v4";
+const char* FW_VERSION_TAG = "cv58-stability-v5";
 
 // =========================================================================
 // ตั้งค่า Hardware & ขาต่อใช้งาน PWM แยก 2 วงจร
@@ -165,8 +165,8 @@ const float BOOST_SAFE_V_HEADROOM = 0.4;
 const float BOOST_SAFE_I_HEADROOM = 0.15;
 const float BOOST_SAFE_BAT_HEADROOM = 0.3;
 const float HARD_OVP_TRIP_VOLTAGE = 58.4;
-const float HARD_OVP_RELEASE_VOLTAGE = 56.8;
-const unsigned long HARD_OVP_RELEASE_DELAY_MS = 8000;
+const float HARD_OVP_RELEASE_VOLTAGE = 57.4;
+const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 const bool ENABLE_DEBUG_VERBOSE = true;           // ดีบักเดิมหลายบรรทัด
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 500;
 const unsigned long LCD_REFRESH_INTERVAL_MS = 180;
@@ -591,8 +591,8 @@ void TaskSampleData(void * pvParameters) {
 
             if (ovp_latched &&
                 (now - ovp_trip_ms >= HARD_OVP_RELEASE_DELAY_MS) &&
-                v_bat <= HARD_OVP_RELEASE_VOLTAGE &&
-                v_bat_filt <= HARD_OVP_RELEASE_VOLTAGE) {
+                v_bat_filt <= HARD_OVP_RELEASE_VOLTAGE &&
+                v_bat <= (HARD_OVP_RELEASE_VOLTAGE + 0.8f)) {
                 ovp_latched = false;
                 Serial.printf("[INFO] OVP latch cleared at %.2fV (release=%.2fV).\n",
                               max(v_bat, v_bat_filt), HARD_OVP_RELEASE_VOLTAGE);
