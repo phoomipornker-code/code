@@ -38,11 +38,11 @@ const int MAX_DUTY_BOOST   = 760;
 const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
 const float CV_DEADBAND_V = 0.10;
-const float FULL_DETECT_VOLTAGE = 57.6;
-const float FULL_END_CURRENT = 0.45;              // 15% ของกระแส CC (3A)
-const unsigned long FULL_CONFIRM_MS = 300000;     // เงื่อนไข FULL ต้องต่อเนื่อง 5 นาที
-const float HIGH_VOLTAGE_STOP_VOLTAGE = 58.1;     // pre-OVP stop ก่อน hard OVP (ต่ำกว่า BMS cut)
-const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 300;
+const float FULL_DETECT_VOLTAGE = 57.95;          // มองว่าเข้าใกล้ 58V แล้วค่อยพิจารณาเต็ม
+const float FULL_END_CURRENT = 0.12;              // เต็มเมื่อกระแสชาร์จใกล้ศูนย์
+const unsigned long FULL_CONFIRM_MS = 90000;      // เงื่อนไข FULL ต้องต่อเนื่อง 90 วินาที
+const float HIGH_VOLTAGE_STOP_VOLTAGE = 58.3;     // pre-OVP stop ก่อน hard OVP
+const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 600;
 const float RESTART_CHARGE_VOLTAGE = 55.6;        // ฮิสเทอรีซิสหลังเต็มสำหรับ CV 58V
 
 // =========================================================================
@@ -98,8 +98,8 @@ const float ADC_GLITCH_CURRENT_GATE_A = 0.35;
 const unsigned long ADC_GLITCH_LOG_MS = 1000;
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 const float BOOST_VOLTAGE_FLOOR = 42.0;
-const float BOOST_BAT_VOLTAGE_LIMIT = 57.8;
-const float BOOST_CV_TARGET_VOLTAGE = 57.9;
+const float BOOST_BAT_VOLTAGE_LIMIT = 58.1;
+const float BOOST_CV_TARGET_VOLTAGE = 58.0;
 const float BOOST_START_I_TARGET = 1.0;
 const float BOOST_START_EFF_EST = 0.90;
 const int BOOST_START_DUTY_MIN_RAW = 30;
