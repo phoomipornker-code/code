@@ -38,12 +38,12 @@ const int MAX_DUTY_BOOST   = 760;
 const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
 const float CV_DEADBAND_V = 0.10;
-const float FULL_DETECT_VOLTAGE = 57.8;
+const float FULL_DETECT_VOLTAGE = 57.6;
 const float FULL_END_CURRENT = 0.45;              // 15% ของกระแส CC (3A)
 const unsigned long FULL_CONFIRM_MS = 300000;     // เงื่อนไข FULL ต้องต่อเนื่อง 5 นาที
-const float HIGH_VOLTAGE_STOP_VOLTAGE = 58.4;     // pre-OVP stop ก่อน hard OVP
-const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 1500;
-const float RESTART_CHARGE_VOLTAGE = 55.8;        // ฮิสเทอรีซิสหลังเต็มสำหรับ CV 58V
+const float HIGH_VOLTAGE_STOP_VOLTAGE = 58.1;     // pre-OVP stop ก่อน hard OVP (ต่ำกว่า BMS cut)
+const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 300;
+const float RESTART_CHARGE_VOLTAGE = 55.6;        // ฮิสเทอรีซิสหลังเต็มสำหรับ CV 58V
 
 // =========================================================================
 // ตัวแปรและค่าคงที่สำหรับ PID Control (โหมด BOOST คุมแรงดันแผงโซล่าเซลล์)
@@ -98,15 +98,15 @@ const float ADC_GLITCH_CURRENT_GATE_A = 0.35;
 const unsigned long ADC_GLITCH_LOG_MS = 1000;
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 const float BOOST_VOLTAGE_FLOOR = 42.0;
-const float BOOST_BAT_VOLTAGE_LIMIT = 58.2;
-const float BOOST_CV_TARGET_VOLTAGE = 58.0;
+const float BOOST_BAT_VOLTAGE_LIMIT = 57.8;
+const float BOOST_CV_TARGET_VOLTAGE = 57.9;
 const float BOOST_START_I_TARGET = 1.0;
 const float BOOST_START_EFF_EST = 0.90;
-const int BOOST_START_DUTY_MIN_RAW = 60;
-const int BOOST_START_DUTY_MAX_RAW = 320;
-const int BOOST_START_DUTY_NEAR_FULL_CAP_RAW = 130;
-const float BOOST_CV_ENTRY_VOLTAGE = 56.2;
-const float BOOST_CV_EXIT_VOLTAGE = 55.8;
+const int BOOST_START_DUTY_MIN_RAW = 30;
+const int BOOST_START_DUTY_MAX_RAW = 240;
+const int BOOST_START_DUTY_NEAR_FULL_CAP_RAW = 70;
+const float BOOST_CV_ENTRY_VOLTAGE = 55.8;
+const float BOOST_CV_EXIT_VOLTAGE = 55.4;
 const unsigned long BOOST_RAMP_DURATION_MS = 2500;
 const float BOOST_RAMP_STEP = 1.2;
 const float BOOST_CV_KP = 1.1;
@@ -122,29 +122,29 @@ const float BOOST_MIN_DUTY_WHILE_LIMITING = 20.0;
 const float BOOST_CEILING_RELEASE_STEP = 1.6;
 const float BOOST_VBAT_HARD_OVERSHOOT_MARGIN = 0.20;
 const int BOOST_CEILING_FLOOR_RAW = 24;
-const float BOOST_CURRENT_CAP_V1 = 55.8;
-const float BOOST_CURRENT_CAP_V2 = 56.2;
-const float BOOST_CURRENT_CAP_V3 = 56.6;
-const float BOOST_CURRENT_CAP_A1 = 1.2;
-const float BOOST_CURRENT_CAP_A2 = 1.0;
-const float BOOST_CURRENT_CAP_A3 = 0.8;
-const float BOOST_NEAR_FULL_V0 = 55.0;
-const float BOOST_NEAR_FULL_V1 = 55.8;
-const float BOOST_NEAR_FULL_V2 = 56.2;
-const float BOOST_NEAR_FULL_V3 = 56.6;
-const int BOOST_DUTY_CAP_V0_RAW = 140;
-const int BOOST_DUTY_CAP_V1_RAW = 120;
-const int BOOST_DUTY_CAP_V2_RAW = 100;
-const int BOOST_DUTY_CAP_V3_RAW = 85;
-const float BOOST_FORCE_CV_VOLTAGE = 55.2;
-const float BOOST_FORCE_CV_RELEASE = 54.8;
-const float BOOST_DIRECT_CV_START_VOLTAGE = 55.2;
-const int BOOST_START_DUTY_SEED_RAW = 20;
+const float BOOST_CURRENT_CAP_V1 = 55.4;
+const float BOOST_CURRENT_CAP_V2 = 55.8;
+const float BOOST_CURRENT_CAP_V3 = 56.2;
+const float BOOST_CURRENT_CAP_A1 = 0.9;
+const float BOOST_CURRENT_CAP_A2 = 0.7;
+const float BOOST_CURRENT_CAP_A3 = 0.55;
+const float BOOST_NEAR_FULL_V0 = 54.8;
+const float BOOST_NEAR_FULL_V1 = 55.4;
+const float BOOST_NEAR_FULL_V2 = 55.8;
+const float BOOST_NEAR_FULL_V3 = 56.2;
+const int BOOST_DUTY_CAP_V0_RAW = 90;
+const int BOOST_DUTY_CAP_V1_RAW = 75;
+const int BOOST_DUTY_CAP_V2_RAW = 60;
+const int BOOST_DUTY_CAP_V3_RAW = 48;
+const float BOOST_FORCE_CV_VOLTAGE = 54.8;
+const float BOOST_FORCE_CV_RELEASE = 54.4;
+const float BOOST_DIRECT_CV_START_VOLTAGE = 54.8;
+const int BOOST_START_DUTY_SEED_RAW = 8;
 const int BOOST_START_DUTY_SEED_NEAR_FULL_RAW = 0;
-const int BOOST_START_TARGET_NEAR_FULL_MAX_RAW = 80;
+const int BOOST_START_TARGET_NEAR_FULL_MAX_RAW = 60;
 const unsigned long BOOST_START_SETTLE_MS = 350;
-const float BOOST_VBAT_SPIKE_PRECUT_DELTA_V = 1.2;
-const float BOOST_VBAT_SPIKE_PRECUT_RAW_ABOVE_FILT_V = 1.5;
+const float BOOST_VBAT_SPIKE_PRECUT_DELTA_V = 0.7;
+const float BOOST_VBAT_SPIKE_PRECUT_RAW_ABOVE_FILT_V = 1.0;
 const float BOOST_CV_UP_STEP_V1 = 0.20;
 const float BOOST_CV_UP_STEP_V2 = 0.05;
 const float BOOST_CV_UP_STEP_V3 = 0.00;
@@ -154,8 +154,9 @@ const float BOOST_RECOVERY_TARGET_V = 42.3;
 const float BOOST_SAFE_V_HEADROOM = 0.4;
 const float BOOST_SAFE_I_HEADROOM = 0.15;
 const float BOOST_SAFE_BAT_HEADROOM = 0.3;
-const float HARD_OVP_TRIP_VOLTAGE = 58.8;
-const float HARD_OVP_RELEASE_VOLTAGE = 57.8;
+const float HARD_OVP_TRIP_VOLTAGE = 58.4;
+const float HARD_OVP_RELEASE_VOLTAGE = 56.0;
+const unsigned long HARD_OVP_RELEASE_DELAY_MS = 8000;
 const bool ENABLE_DEBUG_VERBOSE = true;           // ดีบักเดิมหลายบรรทัด
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 500;
 const unsigned long LCD_REFRESH_INTERVAL_MS = 180;
@@ -172,6 +173,7 @@ volatile float i_bat_charge_filt = 0;  // กระแสชาร์จใช�
 volatile float i_bat_charge_abs = 0;   // กระแสชาร์จแบบไม่ฟิลเตอร์สำหรับกัน overshoot เร็ว
 volatile bool ovp_latched = false;
 volatile float ovp_trip_voltage = 0.0;
+volatile unsigned long ovp_trip_ms = 0;
 volatile bool system_ON = false;
 volatile bool charge_full_hold = false;
 volatile int active_duty_percent = 0;
@@ -531,6 +533,7 @@ void TaskSampleData(void * pvParameters) {
                 (v_bat >= HARD_OVP_TRIP_VOLTAGE || v_bat_filt >= HARD_OVP_TRIP_VOLTAGE)) {
                 ovp_latched = true;
                 ovp_trip_voltage = max(v_bat, v_bat_filt);
+                ovp_trip_ms = now;
                 forceSafeShutdown();
                 Serial.printf("[CRITICAL] HARD OVP TRIP at %.2fV (trip=%.2fV). Output disabled.\n",
                               ovp_trip_voltage, HARD_OVP_TRIP_VOLTAGE);
@@ -546,6 +549,7 @@ void TaskSampleData(void * pvParameters) {
                 v_bat > (v_bat_filt + 3.0f)) {
                 ovp_latched = true;
                 ovp_trip_voltage = v_bat;
+                ovp_trip_ms = now;
                 forceSafeShutdown();
                 Serial.printf("[CRITICAL] RUNAWAY-CUT at %.2fV (filt=%.2fV, duty=%d).\n",
                               v_bat, v_bat_filt, raw_duty);
@@ -562,12 +566,14 @@ void TaskSampleData(void * pvParameters) {
                 v_bat > (v_bat_filt + BOOST_VBAT_SPIKE_PRECUT_RAW_ABOVE_FILT_V)) {
                 ovp_latched = true;
                 ovp_trip_voltage = v_bat;
+                ovp_trip_ms = now;
                 forceSafeShutdown();
                 Serial.printf("[CRITICAL] SPIKE-PRECUT at %.2fV (step=%.2fV, filt=%.2fV, duty=%d).\n",
                               v_bat, vbat_step, v_bat_filt, raw_duty);
             }
 
             if (ovp_latched &&
+                (now - ovp_trip_ms >= HARD_OVP_RELEASE_DELAY_MS) &&
                 v_bat <= HARD_OVP_RELEASE_VOLTAGE &&
                 v_bat_filt <= HARD_OVP_RELEASE_VOLTAGE) {
                 ovp_latched = false;
