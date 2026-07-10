@@ -92,6 +92,9 @@ const float CAL_SCALE_I_BAT   = 42.46;
 
 const float NOISE_V_THRESHOLD = 0.5;
 const float NOISE_I_THRESHOLD = 0.08;
+const float ADC_RAW_MIN_VALID_MV = 80.0;
+const float ADC_GLITCH_CURRENT_GATE_A = 0.35;
+const unsigned long ADC_GLITCH_LOG_MS = 1000;
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 const float BOOST_VOLTAGE_FLOOR = 42.0;
 const float BOOST_BAT_VOLTAGE_LIMIT = 58.0;
@@ -196,7 +199,10 @@ int calcInitialBoostDutyRaw(float v_pv_now, float v_bat_now) {
     return constrain(raw, BOOST_START_DUTY_MIN_RAW, BOOST_START_DUTY_MAX_RAW);
 }
 
-static inline int16_t readADCStable(Adafruit_ADS1115 &adc, uint8_t channel) {
+static inline int16_t readADCStable(Adafruit_ADS1115 &adc, uint8_t channel, bool discard_first = false) {
+    if (discard_first) {
+        (void)adc.readADC_SingleEnded(channel);
+    }
     // Fast read path: one conversion is usually enough at high data-rate.
     // If a corrupted negative code appears on single-ended channel, retry once.
     int16_t sample = adc.readADC_SingleEnded(channel);
@@ -236,9 +242,10 @@ void calibrateCurrentOffsetsAtBoot() {
     vTaskDelay(100 / portTICK_PERIOD_MS);
 
     for (int i = 0; i < CAL_SAMPLES; i++) {
-        sum_i0 += readADCStable(ads_curr, 0) * 0.1875;
-        sum_i1 += readADCStable(ads_curr, 1) * 0.1875;
-        sum_i2 += readADCStable(ads_curr, 2) * 0.1875;
+        // Keep calibration robust against mux-settling artifacts.
+        sum_i0 += readADCStable(ads_curr, 0, true) * 0.1875;
+        sum_i1 += readADCStable(ads_curr, 1, true) * 0.1875;
+        sum_i2 += readADCStable(ads_curr, 2, true) * 0.1875;
         vTaskDelay(2 / portTICK_PERIOD_MS);
     }
 
@@ -315,6 +322,9 @@ void TaskSampleData(void * pvParameters) {
     unsigned long last_sensor_error_log = 0;
     unsigned long full_condition_start_ms = 0;
     unsigned long high_voltage_stop_start_ms = 0;
+    float last_valid_raw_mv_v0 = NAN;
+    float last_valid_raw_mv_v2 = NAN;
+    unsigned long last_adc_glitch_log = 0;
 
     for(;;) {
         unsigned long now = millis();
@@ -331,13 +341,42 @@ void TaskSampleData(void * pvParameters) {
 
         bool sample_ok = false;
         if (xSemaphoreTake(i2c_Mutex, 50)) {
-            raw_mv_v0 = readADCStable(ads_volt, 0) * 0.1875;
-            raw_mv_v1 = readADCStable(ads_volt, 2) * 0.1875;
-            raw_mv_v2 = readADCStable(ads_volt, 1) * 0.1875;
+            // Voltage channels are more sensitive to mux-settling; discard-first keeps readings stable.
+            raw_mv_v0 = readADCStable(ads_volt, 0, true) * 0.1875;
+            raw_mv_v1 = readADCStable(ads_volt, 2, true) * 0.1875;
+            raw_mv_v2 = readADCStable(ads_volt, 1, true) * 0.1875;
 
             raw_mv_i0 = readADCStable(ads_curr, 0) * 0.1875;
             raw_mv_i1 = readADCStable(ads_curr, 1) * 0.1875;
             raw_mv_i2 = readADCStable(ads_curr, 2) * 0.1875;
+
+            bool power_stage_active = (raw_duty > 0);
+            bool solar_raw_glitch = (raw_mv_v0 < ADC_RAW_MIN_VALID_MV) &&
+                                    (power_stage_active ||
+                                     i_solar_mag > ADC_GLITCH_CURRENT_GATE_A ||
+                                     i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A);
+            bool bat_raw_glitch = (raw_mv_v2 < ADC_RAW_MIN_VALID_MV) &&
+                                  (power_stage_active ||
+                                   i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A);
+
+            if (solar_raw_glitch && !isnan(last_valid_raw_mv_v0)) {
+                raw_mv_v0 = last_valid_raw_mv_v0;
+            } else if (!solar_raw_glitch) {
+                last_valid_raw_mv_v0 = raw_mv_v0;
+            }
+
+            if (bat_raw_glitch && !isnan(last_valid_raw_mv_v2)) {
+                raw_mv_v2 = last_valid_raw_mv_v2;
+            } else if (!bat_raw_glitch) {
+                last_valid_raw_mv_v2 = raw_mv_v2;
+            }
+
+            if ((solar_raw_glitch || bat_raw_glitch) &&
+                (now - last_adc_glitch_log >= ADC_GLITCH_LOG_MS)) {
+                last_adc_glitch_log = now;
+                Serial.printf("[WARN] ADC glitch filtered: PVraw=%.1fmV BATraw=%.1fmV duty=%d Is=%.2fA Ib=%.2fA\n",
+                              raw_mv_v0, raw_mv_v2, raw_duty, i_solar_mag, i_bat_charge_filt);
+            }
 
             float mv_pure_v0 = raw_mv_v0 - OFFSET_V_SOLAR; if (mv_pure_v0 < 0.0) mv_pure_v0 = 0.0;
             float mv_pure_v1 = raw_mv_v1 - OFFSET_V_AC;    if (mv_pure_v1 < 0.0) mv_pure_v1 = 0.0;
