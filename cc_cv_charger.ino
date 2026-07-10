@@ -131,6 +131,7 @@ const float HARD_OVP_RELEASE_VOLTAGE = 58.0;
 const bool ENABLE_DEBUG_VERBOSE = true;           // ดีบักเดิมหลายบรรทัด
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 500;
 const unsigned long LCD_REFRESH_INTERVAL_MS = 180;
+const uint32_t I2C_CLOCK_HZ = 100000;
 
 // =========================================================================
 // ตัวแปรระบบ
@@ -182,6 +183,7 @@ void calibrateCurrentOffsetsAtBoot();
 int calcInitialBoostDutyRaw(float v_pv_now, float v_bat_now);
 void lcdPrintLineRaw(uint8_t row, const char *text);
 void lcdPrintLineFmt(uint8_t row, const char *fmt, ...);
+void reinitI2CBusAndLCD();
 
 int calcInitialBoostDutyRaw(float v_pv_now, float v_bat_now) {
     float vout = (v_bat_now > (BOOST_VOLTAGE_FLOOR + 0.8)) ? v_bat_now : (BOOST_VOLTAGE_FLOOR + 0.8);
@@ -251,6 +253,18 @@ void lcdPrintLineFmt(uint8_t row, const char *fmt, ...) {
     lcdPrintLineRaw(row, tmp);
 }
 
+void reinitI2CBusAndLCD() {
+    // Re-init I2C/LCD together to recover from occasional LCD bus lockups.
+    Wire.end();
+    delay(2);
+    Wire.begin(21, 22);
+    Wire.setClock(I2C_CLOCK_HZ);
+    Wire.setTimeOut(25);
+    lcd.init();
+    lcd.backlight();
+    lcd.clear();
+}
+
 void calibrateCurrentOffsetsAtBoot() {
     const int CAL_SAMPLES = 80;
     float sum_i0 = 0.0;
@@ -283,6 +297,7 @@ void calibrateCurrentOffsetsAtBoot() {
 void setup() {
     Serial.begin(115200);
     Wire.begin(21, 22);
+    Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(25);
 
     bool volt_ok = ads_volt.begin(0x48);
@@ -307,8 +322,7 @@ void setup() {
     ledcWrite(PWM_BOOST_PIN, 0);
 
     i2c_Mutex = xSemaphoreCreateMutex();
-    lcd.init();
-    lcd.backlight();
+    reinitI2CBusAndLCD();
 
     if (!sensor_init_ok) {
         Serial.println("[FATAL] ADS1115 init failed. System is locked in safe standby.");
@@ -319,7 +333,7 @@ void setup() {
     }
 
     xTaskCreatePinnedToCore(TaskSampleData, "ADC_PWM_Task", 4096, NULL, 2, NULL, 0);
-    xTaskCreatePinnedToCore(TaskLCDLoop, "LCD_Task", 4096, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(TaskLCDLoop, "LCD_Task", 8192, NULL, 1, NULL, 1);
 }
 
 void loop() { vTaskDelay(1000); }
@@ -1035,9 +1049,7 @@ void TaskLCDLoop(void * pvParameters) {
         if (lcd_mutex_fail_count >= 12 && (now - last_lcd_recover > 5000)) {
             last_lcd_recover = now;
             if (xSemaphoreTake(i2c_Mutex, 50)) {
-                lcd.init();
-                lcd.backlight();
-                lcd.clear();
+                reinitI2CBusAndLCD();
                 xSemaphoreGive(i2c_Mutex);
                 lcd_mutex_fail_count = 0;
                 last_lcd_refresh = 0;
