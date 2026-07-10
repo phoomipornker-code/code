@@ -2,6 +2,7 @@
 #include <Adafruit_ADS1X15.h>
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
+#include <stdarg.h>
 
 // =========================================================================
 // ตั้งค่า Hardware & ขาต่อใช้งาน PWM แยก 2 วงจร
@@ -129,6 +130,7 @@ const float HARD_OVP_TRIP_VOLTAGE = 60.5;
 const float HARD_OVP_RELEASE_VOLTAGE = 58.0;
 const bool ENABLE_DEBUG_VERBOSE = true;           // ดีบักเดิมหลายบรรทัด
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 500;
+const unsigned long LCD_REFRESH_INTERVAL_MS = 180;
 
 // =========================================================================
 // ตัวแปรระบบ
@@ -178,6 +180,8 @@ void TaskSampleData(void * pvParameters);
 void TaskLCDLoop(void * pvParameters);
 void calibrateCurrentOffsetsAtBoot();
 int calcInitialBoostDutyRaw(float v_pv_now, float v_bat_now);
+void lcdPrintLineRaw(uint8_t row, const char *text);
+void lcdPrintLineFmt(uint8_t row, const char *fmt, ...);
 
 int calcInitialBoostDutyRaw(float v_pv_now, float v_bat_now) {
     float vout = (v_bat_now > (BOOST_VOLTAGE_FLOOR + 0.8)) ? v_bat_now : (BOOST_VOLTAGE_FLOOR + 0.8);
@@ -229,6 +233,22 @@ static inline void forceSafeShutdown() {
     system_ON = false;
     charge_full_hold = false;
     disablePowerStage();
+}
+
+void lcdPrintLineRaw(uint8_t row, const char *text) {
+    char line[21];
+    snprintf(line, sizeof(line), "%-20.20s", text);
+    lcd.setCursor(0, row);
+    lcd.print(line);
+}
+
+void lcdPrintLineFmt(uint8_t row, const char *fmt, ...) {
+    char tmp[48];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(tmp, sizeof(tmp), fmt, args);
+    va_end(args);
+    lcdPrintLineRaw(row, tmp);
 }
 
 void calibrateCurrentOffsetsAtBoot() {
@@ -882,6 +902,7 @@ void TaskLCDLoop(void * pvParameters) {
     bool show_ovp_alert = false;
     unsigned long alert_millis = 0;
     unsigned long last_lcd_recover = 0;
+    unsigned long last_lcd_refresh = 0;
     int lcd_mutex_fail_count = 0;
 
     bool start_raw_last = HIGH, stop_raw_last = HIGH;
@@ -974,41 +995,44 @@ void TaskLCDLoop(void * pvParameters) {
             }
         }
 
-        if (xSemaphoreTake(i2c_Mutex, 50)) {
-            if (system_ON && charge_full_hold) {
-                lcd.setCursor(0, 0); lcd.print("BATTERY FULL HOLD    ");
-                lcd.setCursor(0, 1); lcd.printf("BAT:%5.1fV I:%4.2fA  ", v_bat_filt, i_bat_filt);
-                lcd.setCursor(0, 2); lcd.printf("Resume <= %5.1fV     ", RESTART_CHARGE_VOLTAGE);
-                lcd.setCursor(0, 3); lcd.print("Press STOP to cancel ");
-            } else if (system_ON) {
-                lcd.setCursor(0, 0); lcd.printf("ACTIVE   DUTY:%3d%%   ", active_duty_percent);
-                lcd.setCursor(0, 1); lcd.printf("%-8s   PWR:%5.1fWh ", (currentState == STATE_BOOST ? "BOOST PV" : "FORW AC"), total_Wh);
-                lcd.setCursor(0, 2); lcd.printf("IN :%5.1fV %5.1fA   ", (currentState == STATE_BOOST ? v_solar : v_ac_in), (currentState == STATE_BOOST ? i_solar : i_ac_in));
-                lcd.setCursor(0, 3); lcd.printf("OUT:%5.1fV %5.1fA   ", v_bat, i_bat);
-            } else if (ovp_latched || show_ovp_alert) {
-                lcd.setCursor(0, 0); lcd.print("    OVP TRIPPED      ");
-                lcd.setCursor(0, 1); lcd.printf("VBAT:%5.1fV TRIP:%4.1f", v_bat_filt, ovp_trip_voltage);
-                lcd.setCursor(0, 2); lcd.printf("REL <= %5.1fV        ", HARD_OVP_RELEASE_VOLTAGE);
-                lcd.setCursor(0, 3); lcd.print("WAIT VOLTAGE DROP    ");
-            } else if (show_no_power_alert) {
-                lcd.setCursor(0, 0); lcd.print("      ERROR      ");
-                lcd.setCursor(0, 1); lcd.print("  NO INPUT POWER!   ");
-                lcd.setCursor(0, 2); lcd.print(" Check PV / AC Line ");
-                lcd.setCursor(0, 3); lcd.print("  CANNOT ACTIVATE   ");
+        if (now - last_lcd_refresh >= LCD_REFRESH_INTERVAL_MS) {
+            if (xSemaphoreTake(i2c_Mutex, 50)) {
+                if (system_ON && charge_full_hold) {
+                    lcdPrintLineRaw(0, "BATTERY FULL HOLD");
+                    lcdPrintLineFmt(1, "BAT:%5.1fV I:%4.2fA", v_bat_filt, i_bat_filt);
+                    lcdPrintLineFmt(2, "Resume <= %5.1fV", RESTART_CHARGE_VOLTAGE);
+                    lcdPrintLineRaw(3, "Press STOP to cancel");
+                } else if (system_ON) {
+                    lcdPrintLineFmt(0, "ACTIVE   DUTY:%3d%%", active_duty_percent);
+                    lcdPrintLineFmt(1, "%-8s PWR:%5.1fWh", (currentState == STATE_BOOST ? "BOOST PV" : "FORW AC"), total_Wh);
+                    lcdPrintLineFmt(2, "IN :%5.1fV %5.1fA", (currentState == STATE_BOOST ? v_solar : v_ac_in), (currentState == STATE_BOOST ? i_solar : i_ac_in));
+                    lcdPrintLineFmt(3, "OUT:%5.1fV %5.1fA", v_bat, i_bat);
+                } else if (ovp_latched || show_ovp_alert) {
+                    lcdPrintLineRaw(0, "OVP TRIPPED");
+                    lcdPrintLineFmt(1, "VBAT:%5.1fV T:%4.1f", v_bat_filt, ovp_trip_voltage);
+                    lcdPrintLineFmt(2, "REL <= %5.1fV", HARD_OVP_RELEASE_VOLTAGE);
+                    lcdPrintLineRaw(3, "WAIT VOLTAGE DROP");
+                } else if (show_no_power_alert) {
+                    lcdPrintLineRaw(0, "ERROR");
+                    lcdPrintLineRaw(1, "NO INPUT POWER!");
+                    lcdPrintLineRaw(2, "Check PV / AC Line");
+                    lcdPrintLineRaw(3, "CANNOT ACTIVATE");
+                } else {
+                    lcdPrintLineRaw(0, "STANDBY");
+                    lcdPrintLineFmt(1, "PV :%5.1fV AC:%5.1fV", v_solar, v_ac_in);
+                    lcdPrintLineFmt(2, "BATT:%5.1fV", v_bat);
+                    lcdPrintLineRaw(3, "");
+                }
+                xSemaphoreGive(i2c_Mutex);
+                lcd_mutex_fail_count = 0;
+                last_lcd_refresh = now;
             } else {
-                lcd.setCursor(0, 0); lcd.print("STANDBY             ");
-                lcd.setCursor(0, 1); lcd.printf("PV :%5.1fV AC:%5.1fV", v_solar, v_ac_in);
-                lcd.setCursor(0, 2); lcd.printf("BATT:%5.1fV         ", v_bat);
-                lcd.setCursor(0, 3); lcd.print("                    ");
+                lcd_mutex_fail_count++;
             }
-            xSemaphoreGive(i2c_Mutex);
-            lcd_mutex_fail_count = 0;
-        } else {
-            lcd_mutex_fail_count++;
         }
 
         // กู้ LCD เฉพาะเมื่อมีอาการค้างจริง ไม่ init ทุกคาบเวลา
-        if (lcd_mutex_fail_count >= 5 && (now - last_lcd_recover > 2000)) {
+        if (lcd_mutex_fail_count >= 12 && (now - last_lcd_recover > 5000)) {
             last_lcd_recover = now;
             if (xSemaphoreTake(i2c_Mutex, 50)) {
                 lcd.init();
@@ -1016,6 +1040,7 @@ void TaskLCDLoop(void * pvParameters) {
                 lcd.clear();
                 xSemaphoreGive(i2c_Mutex);
                 lcd_mutex_fail_count = 0;
+                last_lcd_refresh = 0;
             }
         }
 
