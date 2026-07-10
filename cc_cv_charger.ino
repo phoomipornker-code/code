@@ -122,24 +122,27 @@ const float BOOST_MIN_DUTY_WHILE_LIMITING = 20.0;
 const float BOOST_CEILING_RELEASE_STEP = 1.6;
 const float BOOST_VBAT_HARD_OVERSHOOT_MARGIN = 0.20;
 const int BOOST_CEILING_FLOOR_RAW = 24;
-const float BOOST_CURRENT_CAP_V1 = 56.3;
-const float BOOST_CURRENT_CAP_V2 = 56.8;
-const float BOOST_CURRENT_CAP_V3 = 57.2;
-const float BOOST_CURRENT_CAP_A1 = 2.4;
-const float BOOST_CURRENT_CAP_A2 = 1.9;
-const float BOOST_CURRENT_CAP_A3 = 1.4;
+const float BOOST_CURRENT_CAP_V1 = 55.8;
+const float BOOST_CURRENT_CAP_V2 = 56.2;
+const float BOOST_CURRENT_CAP_V3 = 56.6;
+const float BOOST_CURRENT_CAP_A1 = 1.2;
+const float BOOST_CURRENT_CAP_A2 = 1.0;
+const float BOOST_CURRENT_CAP_A3 = 0.8;
 const float BOOST_NEAR_FULL_V0 = 55.0;
-const float BOOST_NEAR_FULL_V1 = 56.4;
-const float BOOST_NEAR_FULL_V2 = 56.8;
-const float BOOST_NEAR_FULL_V3 = 57.1;
-const int BOOST_DUTY_CAP_V0_RAW = 220;
-const int BOOST_DUTY_CAP_V1_RAW = 200;
-const int BOOST_DUTY_CAP_V2_RAW = 180;
-const int BOOST_DUTY_CAP_V3_RAW = 150;
-const float BOOST_DIRECT_CV_START_VOLTAGE = 55.0;
-const int BOOST_START_DUTY_SEED_RAW = 70;
-const int BOOST_START_DUTY_SEED_NEAR_FULL_RAW = 40;
-const int BOOST_START_TARGET_NEAR_FULL_MAX_RAW = 120;
+const float BOOST_NEAR_FULL_V1 = 55.8;
+const float BOOST_NEAR_FULL_V2 = 56.2;
+const float BOOST_NEAR_FULL_V3 = 56.6;
+const int BOOST_DUTY_CAP_V0_RAW = 140;
+const int BOOST_DUTY_CAP_V1_RAW = 120;
+const int BOOST_DUTY_CAP_V2_RAW = 100;
+const int BOOST_DUTY_CAP_V3_RAW = 85;
+const float BOOST_FORCE_CV_VOLTAGE = 55.2;
+const float BOOST_FORCE_CV_RELEASE = 54.8;
+const float BOOST_DIRECT_CV_START_VOLTAGE = 55.2;
+const int BOOST_START_DUTY_SEED_RAW = 20;
+const int BOOST_START_DUTY_SEED_NEAR_FULL_RAW = 0;
+const int BOOST_START_TARGET_NEAR_FULL_MAX_RAW = 80;
+const unsigned long BOOST_START_SETTLE_MS = 350;
 const float BOOST_VBAT_SPIKE_PRECUT_DELTA_V = 1.2;
 const float BOOST_VBAT_SPIKE_PRECUT_RAW_ABOVE_FILT_V = 1.5;
 const float BOOST_CV_UP_STEP_V1 = 0.20;
@@ -211,6 +214,7 @@ void TaskSampleData(void * pvParameters);
 void TaskLCDLoop(void * pvParameters);
 void calibrateCurrentOffsetsAtBoot();
 int calcInitialBoostDutyRaw(float v_pv_now, float v_bat_now);
+int calcBoostDutyCapRaw(float v_bat_now, int default_cap);
 int quantizeDutyWithDither(float duty_cmd, float *phase, int max_duty);
 void lcdPrintLineRaw(uint8_t row, const char *text);
 void lcdPrintLineFmt(uint8_t row, const char *fmt, ...);
@@ -240,6 +244,22 @@ int calcInitialBoostDutyRaw(float v_pv_now, float v_bat_now) {
         max_start_duty = min(BOOST_START_DUTY_MAX_RAW, BOOST_START_DUTY_NEAR_FULL_CAP_RAW + 20);
     }
     return constrain(raw, BOOST_START_DUTY_MIN_RAW, max_start_duty);
+}
+
+int calcBoostDutyCapRaw(float v_bat_now, int default_cap) {
+    int cap = default_cap;
+    if (v_bat_now >= BOOST_NEAR_FULL_V3) {
+        cap = BOOST_DUTY_CAP_V3_RAW;
+    } else if (v_bat_now >= BOOST_NEAR_FULL_V2) {
+        cap = BOOST_DUTY_CAP_V2_RAW;
+    } else if (v_bat_now >= BOOST_NEAR_FULL_V1) {
+        cap = BOOST_DUTY_CAP_V1_RAW;
+    } else if (v_bat_now >= BOOST_NEAR_FULL_V0) {
+        cap = BOOST_DUTY_CAP_V0_RAW;
+    }
+    if (cap > default_cap) cap = default_cap;
+    if (cap < 0) cap = 0;
+    return cap;
 }
 
 int quantizeDutyWithDither(float duty_cmd, float *phase, int max_duty) {
@@ -622,7 +642,12 @@ void TaskSampleData(void * pvParameters) {
                         raw_duty = boost_start_target_raw;
                     }
                     duty_accumulator = (float)raw_duty;
-                    boost_duty_ceiling = MAX_DUTY_BOOST;
+                    int start_duty_cap = calcBoostDutyCapRaw(vbat_for_start, MAX_DUTY_BOOST);
+                    boost_duty_ceiling = (float)start_duty_cap;
+                    if (duty_accumulator > boost_duty_ceiling) {
+                        duty_accumulator = boost_duty_ceiling;
+                        raw_duty = (int)roundf(duty_accumulator);
+                    }
                     pv_is_collapsing = false;
                     Serial.printf("[INFO] BOOST start seed=%d target=%d mode=%s.\n",
                                   raw_duty, boost_start_duty_raw,
@@ -734,9 +759,14 @@ void TaskSampleData(void * pvParameters) {
                     pid_integral_cv = 0;
                 }
                 else {
+                    if ((boost_mode_enter_ms > 0) && (now - boost_mode_enter_ms < BOOST_START_SETTLE_MS)) {
+                        duty_accumulator = 0.0;
+                        pid_integral = 0;
+                        pid_integral_cv = 0;
+                    } else
                     if (boostMode == BOOST_RAMP) {
                         mppt_low_current_start_ms = 0;
-                        if (v_bat_filt >= BOOST_CV_ENTRY_VOLTAGE) {
+                        if (v_bat_filt >= BOOST_FORCE_CV_VOLTAGE || v_bat_filt >= BOOST_CV_ENTRY_VOLTAGE) {
                             boostMode = BOOST_CV_HOLD;
                             pid_integral_cv = 0;
                             pid_last_error_cv = 0;
@@ -757,6 +787,12 @@ void TaskSampleData(void * pvParameters) {
                         }
                     }
                     else if (boostMode == BOOST_MPPT) {
+                        if (v_bat_filt >= BOOST_FORCE_CV_VOLTAGE) {
+                            boostMode = BOOST_CV_HOLD;
+                            pid_integral_cv = 0;
+                            pid_last_error_cv = 0;
+                            mppt_low_current_start_ms = 0;
+                        } else {
                         bool mppt_has_useful_current =
                             (i_solar_mag >= BOOST_MPPT_MIN_CURRENT_FOR_UPDATE) ||
                             (i_bat_charge_filt >= BOOST_MPPT_MIN_CURRENT_FOR_UPDATE);
@@ -833,6 +869,7 @@ void TaskSampleData(void * pvParameters) {
                             pid_last_error_cv = 0;
                             mppt_low_current_start_ms = 0;
                         }
+                        }
                     }
                     else { // BOOST_CV_HOLD
                         mppt_low_current_start_ms = 0;
@@ -861,6 +898,7 @@ void TaskSampleData(void * pvParameters) {
                         duty_accumulator += cv_hold_output;
 
                         if (v_bat_filt <= BOOST_CV_EXIT_VOLTAGE &&
+                            v_bat_filt <= BOOST_FORCE_CV_RELEASE &&
                             i_bat_charge_filt < (TARGET_CC_CURRENT - 0.3)) {
                             boostMode = BOOST_MPPT;
                             pid_integral = 0;
@@ -882,16 +920,8 @@ void TaskSampleData(void * pvParameters) {
                 }
                 float i_charge_for_guardrail = max(i_bat_charge_filt, i_bat_charge_abs);
 
-                int vbat_duty_cap = allowed_max_duty;
-                if (v_bat_filt >= BOOST_NEAR_FULL_V3) {
-                    vbat_duty_cap = BOOST_DUTY_CAP_V3_RAW;
-                } else if (v_bat_filt >= BOOST_NEAR_FULL_V2) {
-                    vbat_duty_cap = BOOST_DUTY_CAP_V2_RAW;
-                } else if (v_bat_filt >= BOOST_NEAR_FULL_V1) {
-                    vbat_duty_cap = BOOST_DUTY_CAP_V1_RAW;
-                } else if (v_bat_filt >= BOOST_NEAR_FULL_V0) {
-                    vbat_duty_cap = BOOST_DUTY_CAP_V0_RAW;
-                }
+                float vbat_for_cap = max(v_bat_filt, v_bat);
+                int vbat_duty_cap = calcBoostDutyCapRaw(vbat_for_cap, allowed_max_duty);
 
                 bool near_v_limit = (v_solar <= (BOOST_VOLTAGE_FLOOR + BOOST_SAFE_V_HEADROOM));
                 bool near_i_limit = (i_charge_for_guardrail >= (boost_current_limit - BOOST_SAFE_I_HEADROOM));
