@@ -4,6 +4,8 @@
 #include <math.h>
 #include <stdarg.h>
 
+const char* FW_VERSION_TAG = "cv58-stability-v4";
+
 // =========================================================================
 // ตั้งค่า Hardware & ขาต่อใช้งาน PWM แยก 2 วงจร
 // =========================================================================
@@ -119,9 +121,13 @@ const float BOOST_OC_SOFT_DOWN_GAIN = 1.6;
 const float BOOST_OC_HARD_DOWN_BASE = 3.0;
 const float BOOST_OC_HARD_DOWN_GAIN = 2.0;
 const float BOOST_MIN_DUTY_WHILE_LIMITING = 20.0;
-const float BOOST_CEILING_RELEASE_STEP = 1.6;
+const float BOOST_CEILING_RELEASE_STEP = 3.2;
 const float BOOST_VBAT_HARD_OVERSHOOT_MARGIN = 0.20;
 const int BOOST_CEILING_FLOOR_RAW = 24;
+const int BOOST_CEILING_RECOVERY_FLOOR_RAW = 180;
+const float BOOST_CV_STALL_MARGIN_V = 1.0;
+const float BOOST_CV_STALL_CURRENT_A = 0.18;
+const unsigned long BOOST_CV_STALL_TIMEOUT_MS = 1800;
 const float BOOST_CURRENT_CAP_V1 = 56.8;
 const float BOOST_CURRENT_CAP_V2 = 57.2;
 const float BOOST_CURRENT_CAP_V3 = 57.6;
@@ -370,6 +376,7 @@ void calibrateCurrentOffsetsAtBoot() {
 // =========================================================================
 void setup() {
     Serial.begin(115200);
+    Serial.printf("[BOOT] Firmware: %s\n", FW_VERSION_TAG);
     Wire.begin(21, 22);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(25);
@@ -426,6 +433,7 @@ void TaskSampleData(void * pvParameters) {
     bool pv_is_collapsing = false;
     unsigned long boost_mode_enter_ms = 0;
     unsigned long mppt_low_current_start_ms = 0;
+    unsigned long cv_stall_start_ms = 0;
     unsigned long last_debug_time = 0;
     unsigned long last_sensor_error_log = 0;
     unsigned long full_condition_start_ms = 0;
@@ -772,6 +780,7 @@ void TaskSampleData(void * pvParameters) {
                     } else
                     if (boostMode == BOOST_RAMP) {
                         mppt_low_current_start_ms = 0;
+                        cv_stall_start_ms = 0;
                         if (v_bat_filt >= BOOST_FORCE_CV_VOLTAGE || v_bat_filt >= BOOST_CV_ENTRY_VOLTAGE) {
                             boostMode = BOOST_CV_HOLD;
                             pid_integral_cv = 0;
@@ -793,6 +802,7 @@ void TaskSampleData(void * pvParameters) {
                         }
                     }
                     else if (boostMode == BOOST_MPPT) {
+                        cv_stall_start_ms = 0;
                         if (v_bat_filt >= BOOST_FORCE_CV_VOLTAGE) {
                             boostMode = BOOST_CV_HOLD;
                             pid_integral_cv = 0;
@@ -879,36 +889,78 @@ void TaskSampleData(void * pvParameters) {
                     }
                     else { // BOOST_CV_HOLD
                         mppt_low_current_start_ms = 0;
-                        pid_error_cv = BOOST_CV_TARGET_VOLTAGE - v_bat_filt;
-                        if (fabs(pid_error_cv) <= CV_DEADBAND_V) {
-                            pid_error_cv = 0.0;
-                            pid_integral_cv *= 0.90;
-                        }
-                        pid_integral_cv += pid_error_cv;
-                        pid_integral_cv = constrain(pid_integral_cv, -120, 120);
-                        float delta_error_cv = pid_error_cv - pid_last_error_cv;
-                        float cv_hold_output = (BOOST_CV_KP * pid_error_cv) +
-                                               (BOOST_CV_KI * pid_integral_cv) +
-                                               (BOOST_CV_KD * delta_error_cv);
-                        pid_last_error_cv = pid_error_cv;
-
-                        float cv_up_limit = 1.0;
-                        if (v_bat_filt >= BOOST_NEAR_FULL_V3) cv_up_limit = BOOST_CV_UP_STEP_V3;
-                        else if (v_bat_filt >= BOOST_NEAR_FULL_V2) cv_up_limit = BOOST_CV_UP_STEP_V2;
-                        else if (v_bat_filt >= BOOST_NEAR_FULL_V1) cv_up_limit = BOOST_CV_UP_STEP_V1;
-                        if (cv_hold_output > cv_up_limit) cv_hold_output = cv_up_limit;
-
-                        float cv_down_limit = (v_bat_filt >= BOOST_NEAR_FULL_V2) ? -4.2 : -3.0;
-                        if (cv_hold_output < cv_down_limit) cv_hold_output = cv_down_limit;
-
-                        duty_accumulator += cv_hold_output;
-
-                        if (v_bat_filt <= BOOST_CV_EXIT_VOLTAGE &&
-                            v_bat_filt <= BOOST_FORCE_CV_RELEASE &&
-                            i_bat_charge_filt < (TARGET_CC_CURRENT - 0.3)) {
-                            boostMode = BOOST_MPPT;
+                        if (v_bat_filt < BOOST_FORCE_CV_RELEASE) {
+                            // หลุดจากโซน CV ชัดเจน ให้กลับ RAMP เพื่อฟื้น duty เร็วขึ้น
+                            boostMode = BOOST_RAMP;
                             pid_integral = 0;
                             pid_last_error = 0;
+                            pid_integral_cv = 0;
+                            pid_last_error_cv = 0;
+                            cv_stall_start_ms = 0;
+                            if (boost_duty_ceiling < BOOST_CEILING_RECOVERY_FLOOR_RAW) {
+                                boost_duty_ceiling = BOOST_CEILING_RECOVERY_FLOOR_RAW;
+                            }
+                            if (duty_accumulator < BOOST_CEILING_FLOOR_RAW) {
+                                duty_accumulator = BOOST_CEILING_FLOOR_RAW;
+                            }
+                            Serial.println("[INFO] CV escape -> BOOST_RAMP (voltage below CV release).");
+                        } else {
+                            pid_error_cv = BOOST_CV_TARGET_VOLTAGE - v_bat_filt;
+                            if (fabs(pid_error_cv) <= CV_DEADBAND_V) {
+                                pid_error_cv = 0.0;
+                                pid_integral_cv *= 0.90;
+                            }
+                            pid_integral_cv += pid_error_cv;
+                            pid_integral_cv = constrain(pid_integral_cv, -120, 120);
+                            float delta_error_cv = pid_error_cv - pid_last_error_cv;
+                            float cv_hold_output = (BOOST_CV_KP * pid_error_cv) +
+                                                   (BOOST_CV_KI * pid_integral_cv) +
+                                                   (BOOST_CV_KD * delta_error_cv);
+                            pid_last_error_cv = pid_error_cv;
+
+                            float cv_up_limit = 1.0;
+                            if (v_bat_filt >= BOOST_NEAR_FULL_V3) cv_up_limit = BOOST_CV_UP_STEP_V3;
+                            else if (v_bat_filt >= BOOST_NEAR_FULL_V2) cv_up_limit = BOOST_CV_UP_STEP_V2;
+                            else if (v_bat_filt >= BOOST_NEAR_FULL_V1) cv_up_limit = BOOST_CV_UP_STEP_V1;
+                            if (cv_hold_output > cv_up_limit) cv_hold_output = cv_up_limit;
+
+                            float cv_down_limit = (v_bat_filt >= BOOST_NEAR_FULL_V2) ? -4.2 : -3.0;
+                            if (cv_hold_output < cv_down_limit) cv_hold_output = cv_down_limit;
+
+                            duty_accumulator += cv_hold_output;
+
+                            bool cv_exit_to_mppt = (v_bat_filt <= BOOST_CV_EXIT_VOLTAGE) &&
+                                                   (v_bat_filt <= BOOST_FORCE_CV_RELEASE) &&
+                                                   (i_bat_charge_filt < (TARGET_CC_CURRENT - 0.3));
+                            if (cv_exit_to_mppt) {
+                                boostMode = BOOST_MPPT;
+                                pid_integral = 0;
+                                pid_last_error = 0;
+                                cv_stall_start_ms = 0;
+                            } else {
+                                bool cv_stalled_low = (v_bat_filt < (BOOST_CV_TARGET_VOLTAGE - BOOST_CV_STALL_MARGIN_V)) &&
+                                                      (i_bat_charge_filt < BOOST_CV_STALL_CURRENT_A);
+                                if (cv_stalled_low) {
+                                    if (cv_stall_start_ms == 0) cv_stall_start_ms = now;
+                                    if (now - cv_stall_start_ms >= BOOST_CV_STALL_TIMEOUT_MS) {
+                                        boostMode = BOOST_RAMP;
+                                        pid_integral = 0;
+                                        pid_last_error = 0;
+                                        pid_integral_cv = 0;
+                                        pid_last_error_cv = 0;
+                                        if (boost_duty_ceiling < BOOST_CEILING_RECOVERY_FLOOR_RAW) {
+                                            boost_duty_ceiling = BOOST_CEILING_RECOVERY_FLOOR_RAW;
+                                        }
+                                        if (duty_accumulator < BOOST_CEILING_FLOOR_RAW) {
+                                            duty_accumulator = BOOST_CEILING_FLOOR_RAW;
+                                        }
+                                        cv_stall_start_ms = 0;
+                                        Serial.println("[INFO] CV stall fallback -> BOOST_RAMP.");
+                                    }
+                                } else {
+                                    cv_stall_start_ms = 0;
+                                }
+                            }
                         }
                     }
                 }
@@ -950,6 +1002,13 @@ void TaskSampleData(void * pvParameters) {
                     boost_duty_ceiling += BOOST_CEILING_RELEASE_STEP;
                     if (boost_duty_ceiling > (float)allowed_max_duty) {
                         boost_duty_ceiling = (float)allowed_max_duty;
+                    }
+                    bool need_recovery_floor =
+                        (boostMode != BOOST_CV_HOLD) &&
+                        (v_bat_filt < (BOOST_CV_TARGET_VOLTAGE - BOOST_CV_STALL_MARGIN_V)) &&
+                        (i_bat_charge_filt < BOOST_CV_STALL_CURRENT_A);
+                    if (need_recovery_floor && boost_duty_ceiling < BOOST_CEILING_RECOVERY_FLOOR_RAW) {
+                        boost_duty_ceiling = BOOST_CEILING_RECOVERY_FLOOR_RAW;
                     }
                 }
                 if (boost_duty_ceiling > (float)vbat_duty_cap) {
