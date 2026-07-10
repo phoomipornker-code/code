@@ -602,19 +602,25 @@ void TaskSampleData(void * pvParameters) {
                     pid_integral_cc = 0; pid_last_error_cc = 0;
                     pid_integral_cv = 0; pid_last_error_cv = 0;
                     float vbat_for_start = (v_bat_filt > NOISE_V_THRESHOLD) ? v_bat_filt : v_bat;
-                    boost_start_duty_raw = calcInitialBoostDutyRaw(v_solar, vbat_for_start); // target duty สำหรับ RAMP
+                    int boost_start_target_raw = calcInitialBoostDutyRaw(v_solar, vbat_for_start); // target duty สำหรับ RAMP
                     bool start_in_cv_hold = (vbat_for_start >= BOOST_DIRECT_CV_START_VOLTAGE);
                     if (start_in_cv_hold) {
                         boostMode = BOOST_CV_HOLD;
-                        boost_start_duty_raw = min(boost_start_duty_raw, BOOST_START_TARGET_NEAR_FULL_MAX_RAW);
+                        if (boost_start_target_raw > BOOST_START_TARGET_NEAR_FULL_MAX_RAW) {
+                            boost_start_target_raw = BOOST_START_TARGET_NEAR_FULL_MAX_RAW;
+                        }
                         pid_integral_cv = 0;
                         pid_last_error_cv = 0;
                     }
+                    boost_start_duty_raw = boost_start_target_raw;
                     int start_seed = BOOST_START_DUTY_SEED_RAW;
                     if (vbat_for_start >= BOOST_NEAR_FULL_V0) {
                         start_seed = BOOST_START_DUTY_SEED_NEAR_FULL_RAW;
                     }
-                    raw_duty = min(start_seed, boost_start_duty_raw);
+                    raw_duty = start_seed;
+                    if (raw_duty > boost_start_target_raw) {
+                        raw_duty = boost_start_target_raw;
+                    }
                     duty_accumulator = (float)raw_duty;
                     boost_duty_ceiling = MAX_DUTY_BOOST;
                     pv_is_collapsing = false;
