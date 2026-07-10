@@ -128,16 +128,22 @@ const float BOOST_CURRENT_CAP_V3 = 57.2;
 const float BOOST_CURRENT_CAP_A1 = 2.4;
 const float BOOST_CURRENT_CAP_A2 = 1.9;
 const float BOOST_CURRENT_CAP_A3 = 1.4;
+const float BOOST_NEAR_FULL_V0 = 55.0;
 const float BOOST_NEAR_FULL_V1 = 56.4;
 const float BOOST_NEAR_FULL_V2 = 56.8;
 const float BOOST_NEAR_FULL_V3 = 57.1;
-const int BOOST_DUTY_CAP_V1_RAW = 240;
-const int BOOST_DUTY_CAP_V2_RAW = 220;
-const int BOOST_DUTY_CAP_V3_RAW = 200;
+const int BOOST_DUTY_CAP_V0_RAW = 220;
+const int BOOST_DUTY_CAP_V1_RAW = 200;
+const int BOOST_DUTY_CAP_V2_RAW = 180;
+const int BOOST_DUTY_CAP_V3_RAW = 150;
+const float BOOST_DIRECT_CV_START_VOLTAGE = 55.0;
+const int BOOST_START_DUTY_SEED_RAW = 70;
+const int BOOST_START_DUTY_SEED_NEAR_FULL_RAW = 40;
+const int BOOST_START_TARGET_NEAR_FULL_MAX_RAW = 120;
 const float BOOST_VBAT_SPIKE_PRECUT_DELTA_V = 1.2;
 const float BOOST_VBAT_SPIKE_PRECUT_RAW_ABOVE_FILT_V = 1.5;
-const float BOOST_CV_UP_STEP_V1 = 0.35;
-const float BOOST_CV_UP_STEP_V2 = 0.12;
+const float BOOST_CV_UP_STEP_V1 = 0.20;
+const float BOOST_CV_UP_STEP_V2 = 0.05;
 const float BOOST_CV_UP_STEP_V3 = 0.00;
 const float BOOST_MPPT_MIN_CURRENT_FOR_UPDATE = 0.20;
 const unsigned long BOOST_MPPT_LOW_CURRENT_FALLBACK_MS = 2500;
@@ -596,12 +602,25 @@ void TaskSampleData(void * pvParameters) {
                     pid_integral_cc = 0; pid_last_error_cc = 0;
                     pid_integral_cv = 0; pid_last_error_cv = 0;
                     float vbat_for_start = (v_bat_filt > NOISE_V_THRESHOLD) ? v_bat_filt : v_bat;
-                    boost_start_duty_raw = calcInitialBoostDutyRaw(v_solar, vbat_for_start);
-                    raw_duty = boost_start_duty_raw;
-                    duty_accumulator = (float)boost_start_duty_raw;
+                    boost_start_duty_raw = calcInitialBoostDutyRaw(v_solar, vbat_for_start); // target duty สำหรับ RAMP
+                    bool start_in_cv_hold = (vbat_for_start >= BOOST_DIRECT_CV_START_VOLTAGE);
+                    if (start_in_cv_hold) {
+                        boostMode = BOOST_CV_HOLD;
+                        boost_start_duty_raw = min(boost_start_duty_raw, BOOST_START_TARGET_NEAR_FULL_MAX_RAW);
+                        pid_integral_cv = 0;
+                        pid_last_error_cv = 0;
+                    }
+                    int start_seed = BOOST_START_DUTY_SEED_RAW;
+                    if (vbat_for_start >= BOOST_NEAR_FULL_V0) {
+                        start_seed = BOOST_START_DUTY_SEED_NEAR_FULL_RAW;
+                    }
+                    raw_duty = min(start_seed, boost_start_duty_raw);
+                    duty_accumulator = (float)raw_duty;
                     boost_duty_ceiling = MAX_DUTY_BOOST;
                     pv_is_collapsing = false;
-                    Serial.printf("[INFO] BOOST start duty=%d (Hybrid init).\n", boost_start_duty_raw);
+                    Serial.printf("[INFO] BOOST start seed=%d target=%d mode=%s.\n",
+                                  raw_duty, boost_start_duty_raw,
+                                  (boostMode == BOOST_CV_HOLD ? "CV_HOLD" : "RAMP"));
                 }
                 else if (v_ac_in >= MIN_AC_VOLTAGE) {
                     ledcWrite(PWM_FORWARD_PIN, 0); ledcWrite(PWM_BOOST_PIN, 0);
@@ -864,6 +883,8 @@ void TaskSampleData(void * pvParameters) {
                     vbat_duty_cap = BOOST_DUTY_CAP_V2_RAW;
                 } else if (v_bat_filt >= BOOST_NEAR_FULL_V1) {
                     vbat_duty_cap = BOOST_DUTY_CAP_V1_RAW;
+                } else if (v_bat_filt >= BOOST_NEAR_FULL_V0) {
+                    vbat_duty_cap = BOOST_DUTY_CAP_V0_RAW;
                 }
 
                 bool near_v_limit = (v_solar <= (BOOST_VOLTAGE_FLOOR + BOOST_SAFE_V_HEADROOM));
@@ -946,6 +967,11 @@ void TaskSampleData(void * pvParameters) {
                         duty_accumulator -= (1.5 + (over_bat_v * 6.0));
                     }
                     pid_integral = 0;
+                }
+                if (v_bat > (v_bat_filt + 0.9f)) {
+                    duty_accumulator -= 10.0;
+                    pid_integral = 0;
+                    pid_integral_cv *= 0.7;
                 }
 
                 // จำกัดความเร็วขาขึ้นเมื่อเข้าใกล้ข้อจำกัดเพื่อกัน overshoot
