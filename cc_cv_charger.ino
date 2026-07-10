@@ -99,12 +99,13 @@ const unsigned long ADC_GLITCH_LOG_MS = 1000;
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 const float BOOST_VOLTAGE_FLOOR = 42.0;
 const float BOOST_BAT_VOLTAGE_LIMIT = 58.0;
+const float BOOST_CV_TARGET_VOLTAGE = 55.8;
 const float BOOST_START_I_TARGET = 1.0;
 const float BOOST_START_EFF_EST = 0.90;
 const int BOOST_START_DUTY_MIN_RAW = 60;
 const int BOOST_START_DUTY_MAX_RAW = 320;
-const float BOOST_CV_ENTRY_VOLTAGE = 57.8;
-const float BOOST_CV_EXIT_VOLTAGE = 57.2;
+const float BOOST_CV_ENTRY_VOLTAGE = 55.2;
+const float BOOST_CV_EXIT_VOLTAGE = 54.8;
 const unsigned long BOOST_RAMP_DURATION_MS = 2500;
 const float BOOST_RAMP_STEP = 1.2;
 const float BOOST_CV_KP = 1.1;
@@ -726,7 +727,7 @@ void TaskSampleData(void * pvParameters) {
                     }
                     else { // BOOST_CV_HOLD
                         mppt_low_current_start_ms = 0;
-                        pid_error_cv = BOOST_BAT_VOLTAGE_LIMIT - v_bat_filt;
+                        pid_error_cv = BOOST_CV_TARGET_VOLTAGE - v_bat_filt;
                         if (fabs(pid_error_cv) <= CV_DEADBAND_V) {
                             pid_error_cv = 0.0;
                             pid_integral_cv *= 0.90;
@@ -754,11 +755,11 @@ void TaskSampleData(void * pvParameters) {
                 }
             }
 
-            // Guardrail ตอนเริ่มและขณะบูสต์: รักษา I<=3A, Vpv>=42V และ Vbatt<=58V
+            // Guardrail ตอนเริ่มและขณะบูสต์: รักษา I<=3A, Vpv>=42V และกันแรงดันแบตพุ่ง
             if (currentState == STATE_BOOST) {
                 bool near_v_limit = (v_solar <= (BOOST_VOLTAGE_FLOOR + BOOST_SAFE_V_HEADROOM));
                 bool near_i_limit = (i_bat_charge_filt >= (TARGET_CC_CURRENT - BOOST_SAFE_I_HEADROOM));
-                bool near_bat_limit = (v_bat_filt >= (BOOST_BAT_VOLTAGE_LIMIT - BOOST_SAFE_BAT_HEADROOM));
+                bool near_bat_limit = (v_bat_filt >= (BOOST_CV_TARGET_VOLTAGE - BOOST_SAFE_BAT_HEADROOM));
                 bool hold_duty_ceiling = near_v_limit || near_i_limit || near_bat_limit;
                 bool hard_limit_active =
                     (i_bat_charge_filt > (TARGET_CC_CURRENT + BOOST_OC_HARD_MARGIN_A)) ||
@@ -802,6 +803,12 @@ void TaskSampleData(void * pvParameters) {
 
                     pid_integral = 0;
                     pid_integral_cv *= 0.8;
+                }
+                if (v_bat_filt > BOOST_CV_TARGET_VOLTAGE) {
+                    float over_cv_target = v_bat_filt - BOOST_CV_TARGET_VOLTAGE;
+                    duty_accumulator -= (2.2 + (over_cv_target * 7.5));
+                    pid_integral = 0;
+                    pid_integral_cv *= 0.75;
                 }
                 if (v_bat_filt > BOOST_BAT_VOLTAGE_LIMIT) {
                     float over_bat_v = v_bat_filt - BOOST_BAT_VOLTAGE_LIMIT;
