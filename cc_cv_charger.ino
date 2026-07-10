@@ -197,9 +197,14 @@ int calcInitialBoostDutyRaw(float v_pv_now, float v_bat_now) {
 }
 
 static inline int16_t readADCStable(Adafruit_ADS1115 &adc, uint8_t channel) {
-    // Discard first conversion after channel switch to reduce mux settling artifacts.
-    (void)adc.readADC_SingleEnded(channel);
-    return adc.readADC_SingleEnded(channel);
+    // Fast read path: one conversion is usually enough at high data-rate.
+    // If a corrupted negative code appears on single-ended channel, retry once.
+    int16_t sample = adc.readADC_SingleEnded(channel);
+    if (sample < 0) {
+        sample = adc.readADC_SingleEnded(channel);
+        if (sample < 0) sample = 0;
+    }
+    return sample;
 }
 
 static inline void disablePowerStage() {
@@ -256,6 +261,12 @@ void setup() {
     bool volt_ok = ads_volt.begin(0x48);
     bool curr_ok = ads_curr.begin(0x49);
     sensor_init_ok = (volt_ok && curr_ok);
+
+    if (sensor_init_ok) {
+        // Reduce ADC conversion latency to avoid blocking LCD task on I2C mutex.
+        ads_volt.setDataRate(RATE_ADS1115_860SPS);
+        ads_curr.setDataRate(RATE_ADS1115_860SPS);
+    }
 
     pinMode(RELAY_PV_PIN, OUTPUT);
     pinMode(RELAY_AC_PIN, OUTPUT);
