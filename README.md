@@ -31,3 +31,4 @@ and confirm ADS1115 channel mapping matches your wiring.
 Recent control update:
 
 - fixed startup deadlock where very low sampled PV power could clamp current reference and keep boost duty too low to ramp into real charging.
+- added one-point PV voltage trim factor (`FIELD_TRIM_V_SOLAR`) to align ADC reading with multimeter measurements.

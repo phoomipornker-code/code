@@ -65,6 +65,7 @@ float pid_error_cv = 0.0, pid_last_error_cv = 0.0, pid_integral_cv = 0.0;
 // =========================================================================
 const float OFFSET_V_SOLAR = 0.0;
 const float CAL_SCALE_V_SOLAR = 41.9;
+const float FIELD_TRIM_V_SOLAR = 0.9589;  // one-point trim: 44.3 / 46.2
 
 const float OFFSET_V_AC    = 0.0;
 const float OFFSET_V_BAT   = 0.0;
@@ -461,7 +462,7 @@ void TaskSampleData(void * pvParameters) {
             float mv_pure_i1 = raw_mv_i1 - current_offset_i1;
             float mv_pure_i2 = raw_mv_i2 - current_offset_i2;
 
-            v_solar = (mv_pure_v0 / 1000.0) * CAL_SCALE_V_SOLAR;
+            v_solar = (mv_pure_v0 / 1000.0) * CAL_SCALE_V_SOLAR * FIELD_TRIM_V_SOLAR;
             v_ac_in = (mv_pure_v1 / 1000.0) * CAL_SCALE_V_AC;
             v_bat   = (mv_pure_v2 / 1000.0) * CAL_SCALE_V_BAT;
 

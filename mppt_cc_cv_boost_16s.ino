@@ -95,6 +95,7 @@ static const float VOLT_OUT_MAX = CC_CURRENT_A;
 // --------------------------
 static const float ADC_LSB_MV = 0.1875f;
 static const float CAL_SCALE_V_SOLAR = 41.9f;
+static const float FIELD_TRIM_V_SOLAR = 0.9589f;   // one-point trim: 44.3 / 46.2
 static const float CAL_SCALE_V_BAT = 41.85f;
 static const float CAL_SCALE_I_SOLAR = 42.46f;
 static const float CAL_SCALE_I_BAT = 42.46f;
@@ -247,7 +248,7 @@ static bool readSensors(SensorSample& s) {
   float mv_i_pv = (float)readAdcSingleEndedSafe(ads_curr, 0) * ADC_LSB_MV;
   float mv_i_bat = (float)readAdcSingleEndedSafe(ads_curr, 2) * ADC_LSB_MV;
 
-  float vPv = ((mv_v_pv - OFFSET_V_SOLAR_MV) / 1000.0f) * CAL_SCALE_V_SOLAR;
+  float vPv = ((mv_v_pv - OFFSET_V_SOLAR_MV) / 1000.0f) * CAL_SCALE_V_SOLAR * FIELD_TRIM_V_SOLAR;
   float vBat = ((mv_v_bat - OFFSET_V_BAT_MV) / 1000.0f) * CAL_SCALE_V_BAT;
   float iPv = ((mv_i_pv - OFFSET_I_SOLAR_MV) / 1000.0f) * CAL_SCALE_I_SOLAR;
   float iBat = ((mv_i_bat - OFFSET_I_BAT_MV) / 1000.0f) * CAL_SCALE_I_BAT;
