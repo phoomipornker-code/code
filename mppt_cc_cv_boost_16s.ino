@@ -44,6 +44,7 @@ static const float PV_CRITICAL_LOW_V = 39.0f;
 static const float PV_VREF_MIN_V = 40.0f;
 static const float PV_VREF_MAX_V = 45.0f;
 static const float PV_POWER_LIMIT_W = 650.0f;
+static const float POWER_CAP_ENABLE_W = 80.0f;       // avoid startup deadlock at tiny sampled power
 static const float PV_CURRENT_SOFT_A = 15.5f;
 static const float PV_CURRENT_HARD_A = 16.3f;
 static const float ETA_EST = 0.90f;
@@ -292,8 +293,10 @@ static int estimateBoostDutyRaw(float vin, float vout) {
 }
 
 static float mpptCurrentCapFromPower(const SensorSample& s) {
+  if (g_pAvailFilt < POWER_CAP_ENABLE_W || s.vBat < 5.0f) {
+    return CC_CURRENT_A;
+  }
   float pAvail = min(g_pAvailFilt, PV_POWER_LIMIT_W);
-  if (s.vBat < 5.0f) return 0.0f;
   float capFromPower = (pAvail * ETA_EST) / s.vBat;
   return clampf(capFromPower, 0.0f, CC_CURRENT_A);
 }

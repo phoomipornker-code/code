@@ -27,3 +27,7 @@ Before deploying, verify calibration constants in the sketch:
 - `OFFSET_*`
 
 and confirm ADS1115 channel mapping matches your wiring.
+
+Recent control update:
+
+- fixed startup deadlock where very low sampled PV power could clamp current reference and keep boost duty too low to ramp into real charging.

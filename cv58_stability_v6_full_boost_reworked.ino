@@ -97,6 +97,7 @@ const float BOOST_CV_EXIT_VOLTAGE  = 57.4;
 const float BOOST_PV_POWER_LIMIT_W = 650.0;
 const float BOOST_PV_CURRENT_HARD_A = 16.3;
 const float BOOST_EFF_EST = 0.90;
+const float BOOST_POWER_CAP_ENABLE_W = 80.0;  // avoid startup lock at very low sampled power
 
 const float BOOST_MPPT_STEP_V = 0.10;
 const float BOOST_MPPT_VREF_MIN = 40.0;
@@ -700,8 +701,14 @@ void TaskSampleData(void * pvParameters) {
                         boostNewLastVpv = v_solar;
                     }
 
-                    float pAvail = min(boostNewPAvailFilt, BOOST_PV_POWER_LIMIT_W);
-                    float iRefPower = (v_bat_filt > 5.0f) ? ((pAvail * BOOST_EFF_EST) / v_bat_filt) : 0.0f;
+                    // Power-based cap is enabled only after real transfer is established.
+                    // This prevents a deadlock where low startup duty causes tiny Ppv,
+                    // which then clamps current reference and blocks ramp-up.
+                    float iRefPower = TARGET_CC_CURRENT;
+                    if (boostNewPAvailFilt >= BOOST_POWER_CAP_ENABLE_W && v_bat_filt > 5.0f) {
+                        float pAvail = min(boostNewPAvailFilt, BOOST_PV_POWER_LIMIT_W);
+                        iRefPower = (pAvail * BOOST_EFF_EST) / v_bat_filt;
+                    }
                     float iRef = min(TARGET_CC_CURRENT, min(boostNewIrefMppt, iRefPower));
                     iRef = boostClampf(iRef, 0.0f, TARGET_CC_CURRENT);
 
@@ -736,8 +743,11 @@ void TaskSampleData(void * pvParameters) {
                     float iReq = boostRunPI(vErr, BOOST_VOLT_KP, BOOST_VOLT_KI, dt,
                                             &boostNewVoltIntegrator, BOOST_VOLT_OUT_MIN, BOOST_VOLT_OUT_MAX);
 
-                    float pAvail = min(boostNewPAvailFilt, BOOST_PV_POWER_LIMIT_W);
-                    float iRefPower = (v_bat_filt > 5.0f) ? ((pAvail * BOOST_EFF_EST) / v_bat_filt) : 0.0f;
+                    float iRefPower = TARGET_CC_CURRENT;
+                    if (boostNewPAvailFilt >= BOOST_POWER_CAP_ENABLE_W && v_bat_filt > 5.0f) {
+                        float pAvail = min(boostNewPAvailFilt, BOOST_PV_POWER_LIMIT_W);
+                        iRefPower = (pAvail * BOOST_EFF_EST) / v_bat_filt;
+                    }
                     float iRef = min(iReq, min(boostNewIrefMppt, iRefPower));
                     iRef = boostClampf(iRef, 0.0f, TARGET_CC_CURRENT);
 
