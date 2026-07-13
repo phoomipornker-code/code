@@ -5,6 +5,7 @@
 Added sketch:
 
 - `mppt_cc_cv_boost_16s.ino`
+- `legacy_boost_dropin_patch.md` (drop-in patch for replacing BOOST section in an existing legacy sketch)
 
 This sketch implements state-machine charging:
 
