@@ -17,7 +17,7 @@ This sketch implements state-machine charging:
 Target values currently set:
 
 - CC = `6.0A`
-- CV = `56.0V` (below BMS open observed ~56.2–57.0V)
+- CV = `56.0V` (~3.50V/cell, longevity / BMS-friendly)
 - 16S LiFePO4 thresholds (`CV enter 55.6V`, `force CV 55.8V`, `recharge 54.0V`)
 - PWM = `50kHz`
 - Hard OVP = `57.8V` + early BMS-open preempt and near-zone duty cap

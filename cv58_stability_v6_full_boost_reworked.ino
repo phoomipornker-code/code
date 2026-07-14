@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-stability-v11-bms-preempt";
+const char* FW_VERSION_TAG = "cv58-stability-v12-cv56-conserve";
 
 // =========================================================================
 // Hardware
@@ -26,7 +26,7 @@ Adafruit_ADS1115 ads_curr;
 // =========================================================================
 // Targets / safety thresholds
 // =========================================================================
-// BMS observed opening near ~56.2–57.0V. Keep charger CV clearly below that.
+// CV=56.0V (~3.50V/cell for 16S LFP) — longevity / BMS-friendly cutoff.
 const float TARGET_CV_VOLTAGE = 56.00;
 const float TARGET_CC_CURRENT = 6.0;
 
