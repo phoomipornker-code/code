@@ -36,3 +36,4 @@ Recent control update:
 - confirmed BMS opens near 56.2–57V; charger CV set below BMS, duty capped near zone, PWM killed on jump.
 - fixed CC low-current lock: removed measured-Ppv Iref ceiling; CC now seeks 6A and backs off only on PV collapse.
 - stabilized CV loop: wider hysteresis, Iref slew, near-target gentle duty steps, freeze in deadband.
+- CV IR-compensation + heavy Vfb LPF to reduce current/voltage chatter near 56V.

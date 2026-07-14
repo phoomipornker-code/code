@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-stability-v14-cv-stable";
+const char* FW_VERSION_TAG = "cv58-stability-v15-cv-ir-lpf";
 
 // =========================================================================
 // Hardware
@@ -102,10 +102,12 @@ const float BMS_OPEN_JUMP_DELTA_V = 1.2;
 const float BMS_OPEN_CURRENT_MAX_A = 1.20;
 const float BMS_PREEMPT_DUTY_CAP_RAW = 140.0;
 const float BMS_PREEMPT_ZONE_V = 55.95;
-const float BOOST_CV_IREF_SLEW_A = 0.08;      // A per 20ms control tick
-const float BOOST_CV_NEAR_BAND_V = 0.35;      // within this of target => gentle control
-const float BOOST_CV_DUTY_STEP_NEAR = 0.8;    // raw duty step limit near target
-const float BOOST_CV_DUTY_STEP_FAR = 2.5;
+const float BOOST_CV_IREF_SLEW_A = 0.05;      // A per 20ms control tick
+const float BOOST_CV_NEAR_BAND_V = 0.40;
+const float BOOST_CV_DUTY_STEP_NEAR = 0.6;
+const float BOOST_CV_DUTY_STEP_FAR = 2.0;
+const float BOOST_CV_VFB_ALPHA = 0.08;        // heavy LPF for CV voltage feedback
+const float BOOST_CV_R_WIRE_OHM = 0.12;       // IR compensation (terminal drop)
 
 const float BOOST_PV_POWER_LIMIT_W = 650.0;
 const float BOOST_PV_CURRENT_HARD_A = 16.3;
@@ -187,6 +189,7 @@ float boostNewLastVpv = 0.0f;
 int boostNewMpptDir = 1;
 float boostNewIrefMppt = 1.0f;
 float boostNewIrefCvCmd = 0.0f;
+float boostNewCvVfb = 0.0f;
 float boostNewPAvailFilt = 0.0f;
 unsigned long boostNewLastMpptMs = 0;
 unsigned long boostNewCvEnterMs = 0;
@@ -261,6 +264,7 @@ static inline void boostNewResetOnEntry(float vpvNow) {
     boostNewMpptDir = 1;
     boostNewIrefMppt = TARGET_CC_CURRENT;  // start CC seeking full current
     boostNewIrefCvCmd = 0.5f;
+    boostNewCvVfb = 0.0f;
     boostNewPAvailFilt = 0.0f;
     boostNewLastMpptMs = 0;
     boostNewCvEnterMs = 0;
@@ -796,6 +800,7 @@ void TaskSampleData(void * pvParameters) {
                         boostNewCurrIntegrator = 0.0f;
                         boostNewVoltIntegrator = 0.0f;
                         boostNewIrefCvCmd = boostClampf(i_bat_charge_filt, 0.3f, 2.0f);
+                        boostNewCvVfb = v_bat_filt;
                         boostNewCvEnterMs = 0;
                         Serial.printf("[INFO] Force CV at Vbat=%.2f / filt=%.2f\n", v_bat, v_bat_filt);
                     } else if (v_bat_filt >= BOOST_CV_ENTRY_VOLTAGE) {
@@ -805,6 +810,7 @@ void TaskSampleData(void * pvParameters) {
                             boostNewCurrIntegrator = 0.0f;
                             boostNewVoltIntegrator = 0.0f;
                             boostNewIrefCvCmd = boostClampf(i_bat_charge_filt, 0.3f, 2.0f);
+                            boostNewCvVfb = v_bat_filt;
                         }
                     } else {
                         boostNewCvEnterMs = 0;
@@ -817,11 +823,16 @@ void TaskSampleData(void * pvParameters) {
                         boostNewPAvailFilt = (boostNewPAvailFilt <= 0.01f) ? pPv : (0.22f * pPv + 0.78f * boostNewPAvailFilt);
                     }
 
-                    float vErr = BOOST_CV_TARGET_VOLTAGE - v_bat_filt;
+                    // IR-compensated + heavily filtered voltage feedback (stops I*R chatter).
+                    float vTermComp = v_bat_filt - (i_bat_charge_filt * BOOST_CV_R_WIRE_OHM);
+                    if (boostNewCvVfb <= 1.0f) boostNewCvVfb = vTermComp;
+                    else boostNewCvVfb = (BOOST_CV_VFB_ALPHA * vTermComp) + ((1.0f - BOOST_CV_VFB_ALPHA) * boostNewCvVfb);
+
+                    float vErr = BOOST_CV_TARGET_VOLTAGE - boostNewCvVfb;
                     bool nearTarget = (fabsf(vErr) <= BOOST_CV_NEAR_BAND_V);
-                    if (fabs(vErr) <= CV_DEADBAND_V) {
+                    if (fabsf(vErr) <= CV_DEADBAND_V) {
                         vErr = 0.0f;
-                        boostNewVoltIntegrator *= 0.92f;
+                        boostNewVoltIntegrator *= 0.94f;
                     }
 
                     float iReq = boostRunPI(vErr, BOOST_VOLT_KP, BOOST_VOLT_KI, dt,
@@ -829,8 +840,11 @@ void TaskSampleData(void * pvParameters) {
 
                     // Near target: keep Iref modest so terminal voltage stays calm.
                     if (nearTarget) {
-                        float nearCap = 1.2f + boostClampf(vErr / BOOST_CV_NEAR_BAND_V, 0.0f, 1.0f) * 1.0f;
+                        float nearCap = 0.9f + boostClampf(vErr / BOOST_CV_NEAR_BAND_V, 0.0f, 1.0f) * 1.2f;
                         if (iReq > nearCap) iReq = nearCap;
+                    } else if (vErr > 0.6f) {
+                        // Still well below CV: allow a bit more current to climb.
+                        iReq = min(iReq, 2.8f);
                     }
 
                     if (v_solar < BOOST_PV_COLLAPSE_BACKOFF_V) {
@@ -842,15 +856,15 @@ void TaskSampleData(void * pvParameters) {
 
                     // Slew-limit CV current command to stop Ibat chatter.
                     boostNewIrefCvCmd = boostApplySlew(iReq, boostNewIrefCvCmd,
-                                                       BOOST_CV_IREF_SLEW_A, BOOST_CV_IREF_SLEW_A);
+                                                       BOOST_CV_IREF_SLEW_A, BOOST_CV_IREF_SLEW_A * 1.2f);
                     float iRef = boostNewIrefCvCmd;
 
                     float iErr = iRef - i_bat_charge_filt;
-                    float dDuty = boostRunPI(iErr, BOOST_CURR_KP * (nearTarget ? 0.55f : 0.85f),
-                                             BOOST_CURR_KI * (nearTarget ? 0.45f : 0.70f),
+                    float dDuty = boostRunPI(iErr, BOOST_CURR_KP * (nearTarget ? 0.40f : 0.70f),
+                                             BOOST_CURR_KI * (nearTarget ? 0.30f : 0.55f),
                                              dt, &boostNewCurrIntegrator,
-                                             nearTarget ? -8.0f : BOOST_CURR_OUT_MIN,
-                                             nearTarget ? 8.0f : 18.0f);
+                                             nearTarget ? -5.0f : -12.0f,
+                                             nearTarget ? 5.0f : 14.0f);
 
                     float dutyStepLimit = nearTarget ? BOOST_CV_DUTY_STEP_NEAR : BOOST_CV_DUTY_STEP_FAR;
                     if (dDuty > dutyStepLimit) dDuty = dutyStepLimit;
@@ -858,17 +872,17 @@ void TaskSampleData(void * pvParameters) {
 
                     float dutyTarget = duty_accumulator + dDuty;
 
-                    // Hold gently inside deadband.
-                    if (fabsf(BOOST_CV_TARGET_VOLTAGE - v_bat_filt) <= CV_DEADBAND_V) {
+                    // Hold gently inside deadband of compensated voltage.
+                    if (fabsf(BOOST_CV_TARGET_VOLTAGE - boostNewCvVfb) <= CV_DEADBAND_V) {
                         dutyTarget = duty_accumulator;  // freeze duty
-                        boostNewCurrIntegrator *= 0.95f;
+                        boostNewCurrIntegrator *= 0.96f;
                     }
 
                     // Above target: bleed duty gently (not a hard chop).
-                    if (v_bat_filt > BOOST_CV_TARGET_VOLTAGE) {
-                        float over = v_bat_filt - BOOST_CV_TARGET_VOLTAGE;
-                        dutyTarget -= (0.8f + over * 4.0f);
-                        boostNewVoltIntegrator *= 0.85f;
+                    if (boostNewCvVfb > BOOST_CV_TARGET_VOLTAGE) {
+                        float over = boostNewCvVfb - BOOST_CV_TARGET_VOLTAGE;
+                        dutyTarget -= (0.5f + over * 3.0f);
+                        boostNewVoltIntegrator *= 0.88f;
                     }
                     if (v_bat > (v_bat_filt + 1.5f)) {
                         dutyTarget = min(dutyTarget, duty_accumulator - 6.0f);
@@ -876,8 +890,8 @@ void TaskSampleData(void * pvParameters) {
                     }
 
                     dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
-                    float cvSlewUp = nearTarget ? 1.2f : 2.5f;
-                    float cvSlewDown = nearTarget ? 2.0f : 4.0f;
+                    float cvSlewUp = nearTarget ? 0.9f : 2.0f;
+                    float cvSlewDown = nearTarget ? 1.6f : 3.5f;
                     duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, cvSlewUp, cvSlewDown);
 
                     if (v_bat_filt <= BOOST_CV_EXIT_VOLTAGE) {
@@ -887,12 +901,13 @@ void TaskSampleData(void * pvParameters) {
                             boostNewCurrIntegrator = 0.0f;
                             boostNewVoltIntegrator = 0.0f;
                             boostNewIrefCvCmd = 0.5f;
+                            boostNewCvVfb = 0.0f;
                         }
                     } else {
                         boostNewCvExitMs = 0;
                     }
 
-                    bool doneCond = (v_bat_filt >= FULL_DETECT_VOLTAGE) && (i_bat_charge_filt <= FULL_END_CURRENT);
+                    bool doneCond = (boostNewCvVfb >= FULL_DETECT_VOLTAGE) && (i_bat_charge_filt <= FULL_END_CURRENT);
                     if (doneCond) {
                         if (full_condition_start_ms == 0) full_condition_start_ms = now;
                         if (now - full_condition_start_ms >= FULL_CONFIRM_MS) {
@@ -912,6 +927,7 @@ void TaskSampleData(void * pvParameters) {
                         boostNewCurrIntegrator = 0.0f;
                         boostNewVoltIntegrator = 0.0f;
                         boostNewIrefCvCmd = 0.5f;
+                        boostNewCvVfb = 0.0f;
                     }
                 }
 
@@ -1008,8 +1024,12 @@ void TaskSampleData(void * pvParameters) {
                           (system_ON ? "ON " : "OFF"), state_label, active_duty_percent);
             Serial.printf("  [PV ] V:%5.1fV I:%5.2fA P:%6.1fW | Vref:%.2fV Iref_mppt:%.2fA\n",
                           v_solar, i_solar_mag, (v_solar * i_solar_mag), boostNewPvRef, boostNewIrefMppt);
-            Serial.printf("  [BAT] V:%5.2fV I:%5.2fA (abs:%5.2fA)\n",
+            Serial.printf("  [BAT] V:%5.2fV I:%5.2fA (abs:%5.2fA)",
                           v_bat_filt, i_bat_filt, i_bat_charge_filt);
+            if (currentState == STATE_BOOST && boostNewMode == BOOST_NEW_CV) {
+                Serial.printf(" | Vfb:%.2f IrefCv:%.2fA", boostNewCvVfb, boostNewIrefCvCmd);
+            }
+            Serial.println();
             Serial.printf("  [AC ] V:%5.1fV I:%5.2fA\n", v_ac_in, i_ac_in);
             Serial.println("=========================================================================================");
         }
