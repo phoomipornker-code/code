@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-stability-v13-cc-current-fix";
+const char* FW_VERSION_TAG = "cv58-stability-v14-cv-stable";
 
 // =========================================================================
 // Hardware
@@ -39,7 +39,7 @@ const int MAX_DUTY_BOOST   = 760;
 
 const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
-const float CV_DEADBAND_V = 0.08;
+const float CV_DEADBAND_V = 0.12;
 const float FULL_DETECT_VOLTAGE = 55.90;
 const float FULL_END_CURRENT = 0.50;
 const unsigned long FULL_CONFIRM_MS = 60000;
@@ -93,15 +93,19 @@ const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 // =========================================================================
 const float BOOST_VOLTAGE_FLOOR = 42.0;
 const float BOOST_CV_TARGET_VOLTAGE = 56.00;  // conserve pack: stop/hold at 56V
-const float BOOST_CV_ENTRY_VOLTAGE = 55.60;
-const float BOOST_CV_FORCE_VOLTAGE = 55.80;
-const float BOOST_CV_EXIT_VOLTAGE  = 55.20;
+const float BOOST_CV_ENTRY_VOLTAGE = 55.50;
+const float BOOST_CV_FORCE_VOLTAGE = 55.70;
+const float BOOST_CV_EXIT_VOLTAGE  = 54.80;   // wider hysteresis so CV does not chatter
 const float BOOST_CC_TAPER_START_V = 54.80;
-const float BMS_OPEN_DETECT_V = 56.30;          // preempt before hard open spike
-const float BMS_OPEN_JUMP_DELTA_V = 1.2;        // faster jump detect
+const float BMS_OPEN_DETECT_V = 56.30;
+const float BMS_OPEN_JUMP_DELTA_V = 1.2;
 const float BMS_OPEN_CURRENT_MAX_A = 1.20;
-const float BMS_PREEMPT_DUTY_CAP_RAW = 120.0;   // hard duty ceiling near BMS zone
-const float BMS_PREEMPT_ZONE_V = 55.90;
+const float BMS_PREEMPT_DUTY_CAP_RAW = 140.0;
+const float BMS_PREEMPT_ZONE_V = 55.95;
+const float BOOST_CV_IREF_SLEW_A = 0.08;      // A per 20ms control tick
+const float BOOST_CV_NEAR_BAND_V = 0.35;      // within this of target => gentle control
+const float BOOST_CV_DUTY_STEP_NEAR = 0.8;    // raw duty step limit near target
+const float BOOST_CV_DUTY_STEP_FAR = 2.5;
 
 const float BOOST_PV_POWER_LIMIT_W = 650.0;
 const float BOOST_PV_CURRENT_HARD_A = 16.3;
@@ -116,17 +120,17 @@ const float BOOST_MPPT_VREF_MAX = 45.0;
 const unsigned long BOOST_MPPT_PERIOD_MS = 100;
 const unsigned long BOOST_SOFTSTART_MS = 2500;
 const unsigned long BOOST_CV_ENTER_CONFIRM_MS = 200;   // was 8000ms (too late)
-const unsigned long BOOST_CV_EXIT_CONFIRM_MS = 3000;
 
 const float BOOST_CURR_KP = 14.0;
 const float BOOST_CURR_KI = 55.0;
 const float BOOST_CURR_OUT_MIN = -35.0;
 const float BOOST_CURR_OUT_MAX = 45.0;
 
-const float BOOST_VOLT_KP = 1.2;
-const float BOOST_VOLT_KI = 0.9;
+const float BOOST_VOLT_KP = 0.85;
+const float BOOST_VOLT_KI = 0.45;
 const float BOOST_VOLT_OUT_MIN = 0.0;
-const float BOOST_VOLT_OUT_MAX = TARGET_CC_CURRENT;
+const float BOOST_VOLT_OUT_MAX = 3.5;   // CV should not demand high current near full
+const unsigned long BOOST_CV_EXIT_CONFIRM_MS = 5000;
 
 const float BOOST_DUTY_SLEW_UP = 4.0;
 const float BOOST_DUTY_SLEW_DOWN = 6.0;
@@ -182,6 +186,7 @@ float boostNewLastPower = 0.0f;
 float boostNewLastVpv = 0.0f;
 int boostNewMpptDir = 1;
 float boostNewIrefMppt = 1.0f;
+float boostNewIrefCvCmd = 0.0f;
 float boostNewPAvailFilt = 0.0f;
 unsigned long boostNewLastMpptMs = 0;
 unsigned long boostNewCvEnterMs = 0;
@@ -255,6 +260,7 @@ static inline void boostNewResetOnEntry(float vpvNow) {
     boostNewLastVpv = vpvNow;
     boostNewMpptDir = 1;
     boostNewIrefMppt = TARGET_CC_CURRENT;  // start CC seeking full current
+    boostNewIrefCvCmd = 0.5f;
     boostNewPAvailFilt = 0.0f;
     boostNewLastMpptMs = 0;
     boostNewCvEnterMs = 0;
@@ -789,6 +795,7 @@ void TaskSampleData(void * pvParameters) {
                         boostNewMode = BOOST_NEW_CV;
                         boostNewCurrIntegrator = 0.0f;
                         boostNewVoltIntegrator = 0.0f;
+                        boostNewIrefCvCmd = boostClampf(i_bat_charge_filt, 0.3f, 2.0f);
                         boostNewCvEnterMs = 0;
                         Serial.printf("[INFO] Force CV at Vbat=%.2f / filt=%.2f\n", v_bat, v_bat_filt);
                     } else if (v_bat_filt >= BOOST_CV_ENTRY_VOLTAGE) {
@@ -797,73 +804,89 @@ void TaskSampleData(void * pvParameters) {
                             boostNewMode = BOOST_NEW_CV;
                             boostNewCurrIntegrator = 0.0f;
                             boostNewVoltIntegrator = 0.0f;
+                            boostNewIrefCvCmd = boostClampf(i_bat_charge_filt, 0.3f, 2.0f);
                         }
                     } else {
                         boostNewCvEnterMs = 0;
                     }
                 } else if (boostNewMode == BOOST_NEW_CV) {
+                    // Freeze MPPT Iref hunting in CV — voltage loop owns current request.
                     if (now - boostNewLastMpptMs >= BOOST_MPPT_PERIOD_MS) {
                         boostNewLastMpptMs = now;
                         float pPv = v_solar * i_solar_mag;
                         boostNewPAvailFilt = (boostNewPAvailFilt <= 0.01f) ? pPv : (0.22f * pPv + 0.78f * boostNewPAvailFilt);
-                        float pvErr = v_solar - boostNewPvRef;
-                        boostNewIrefMppt += 0.06f * pvErr;
-                        boostNewIrefMppt = boostClampf(boostNewIrefMppt, 0.0f, TARGET_CC_CURRENT);
                     }
 
                     float vErr = BOOST_CV_TARGET_VOLTAGE - v_bat_filt;
+                    bool nearTarget = (fabsf(vErr) <= BOOST_CV_NEAR_BAND_V);
                     if (fabs(vErr) <= CV_DEADBAND_V) {
                         vErr = 0.0f;
-                        boostNewVoltIntegrator *= 0.90f;
+                        boostNewVoltIntegrator *= 0.92f;
                     }
+
                     float iReq = boostRunPI(vErr, BOOST_VOLT_KP, BOOST_VOLT_KI, dt,
                                             &boostNewVoltIntegrator, BOOST_VOLT_OUT_MIN, BOOST_VOLT_OUT_MAX);
 
-                    float iRef = min(iReq, boostNewIrefMppt);
+                    // Near target: keep Iref modest so terminal voltage stays calm.
+                    if (nearTarget) {
+                        float nearCap = 1.2f + boostClampf(vErr / BOOST_CV_NEAR_BAND_V, 0.0f, 1.0f) * 1.0f;
+                        if (iReq > nearCap) iReq = nearCap;
+                    }
+
                     if (v_solar < BOOST_PV_COLLAPSE_BACKOFF_V) {
                         float sag = BOOST_PV_COLLAPSE_BACKOFF_V - v_solar;
                         float collapseScale = boostClampf(1.0f - (sag * 0.35f), 0.15f, 1.0f);
-                        iRef *= collapseScale;
+                        iReq *= collapseScale;
                     }
-                    iRef = boostClampf(iRef, 0.0f, TARGET_CC_CURRENT);
+                    iReq = boostClampf(iReq, 0.0f, BOOST_VOLT_OUT_MAX);
+
+                    // Slew-limit CV current command to stop Ibat chatter.
+                    boostNewIrefCvCmd = boostApplySlew(iReq, boostNewIrefCvCmd,
+                                                       BOOST_CV_IREF_SLEW_A, BOOST_CV_IREF_SLEW_A);
+                    float iRef = boostNewIrefCvCmd;
 
                     float iErr = iRef - i_bat_charge_filt;
-                    float dDuty = boostRunPI(iErr, BOOST_CURR_KP, BOOST_CURR_KI, dt,
-                                             &boostNewCurrIntegrator, BOOST_CURR_OUT_MIN, BOOST_CURR_OUT_MAX);
+                    float dDuty = boostRunPI(iErr, BOOST_CURR_KP * (nearTarget ? 0.55f : 0.85f),
+                                             BOOST_CURR_KI * (nearTarget ? 0.45f : 0.70f),
+                                             dt, &boostNewCurrIntegrator,
+                                             nearTarget ? -8.0f : BOOST_CURR_OUT_MIN,
+                                             nearTarget ? 8.0f : 18.0f);
+
+                    float dutyStepLimit = nearTarget ? BOOST_CV_DUTY_STEP_NEAR : BOOST_CV_DUTY_STEP_FAR;
+                    if (dDuty > dutyStepLimit) dDuty = dutyStepLimit;
+                    if (dDuty < -dutyStepLimit) dDuty = -dutyStepLimit;
+
                     float dutyTarget = duty_accumulator + dDuty;
 
-                    // Do NOT force minimum duty near CV — that caused overshoot.
-                    // Only allow a soft floor while clearly below target and still charging.
-                    if (v_bat_filt < (BOOST_CV_TARGET_VOLTAGE - 0.6f) &&
-                        i_bat_charge_filt > MIN_CURRENT_FOR_ACTIVE_CHARGE) {
-                        int softFloor = boostEstimateDutyRaw(v_solar, v_bat_filt + 1.0f, allowed_max_duty);
-                        softFloor = min(softFloor, 180);
-                        if (dutyTarget < (float)softFloor) dutyTarget = (float)softFloor;
+                    // Hold gently inside deadband.
+                    if (fabsf(BOOST_CV_TARGET_VOLTAGE - v_bat_filt) <= CV_DEADBAND_V) {
+                        dutyTarget = duty_accumulator;  // freeze duty
+                        boostNewCurrIntegrator *= 0.95f;
                     }
 
-                    // If already at/above CV, cut duty aggressively.
-                    if (v_bat_filt >= BOOST_CV_TARGET_VOLTAGE) {
+                    // Above target: bleed duty gently (not a hard chop).
+                    if (v_bat_filt > BOOST_CV_TARGET_VOLTAGE) {
                         float over = v_bat_filt - BOOST_CV_TARGET_VOLTAGE;
-                        dutyTarget -= (3.0f + over * 12.0f);
-                        boostNewCurrIntegrator = 0.0f;
-                        boostNewVoltIntegrator *= 0.7f;
+                        dutyTarget -= (0.8f + over * 4.0f);
+                        boostNewVoltIntegrator *= 0.85f;
                     }
                     if (v_bat > (v_bat_filt + 1.5f)) {
-                        // raw sample racing ahead of filter => cut now
-                        dutyTarget = min(dutyTarget, duty_accumulator - 8.0f);
+                        dutyTarget = min(dutyTarget, duty_accumulator - 6.0f);
                         dutyTarget = max(0.0f, dutyTarget);
                     }
 
                     dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
-                    duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, BOOST_DUTY_SLEW_UP, BOOST_DUTY_SLEW_DOWN);
+                    float cvSlewUp = nearTarget ? 1.2f : 2.5f;
+                    float cvSlewDown = nearTarget ? 2.0f : 4.0f;
+                    duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, cvSlewUp, cvSlewDown);
 
-                    if (v_bat_filt <= BOOST_CV_EXIT_VOLTAGE &&
-                        i_bat_charge_filt < (TARGET_CC_CURRENT - 0.6f)) {
+                    if (v_bat_filt <= BOOST_CV_EXIT_VOLTAGE) {
                         if (boostNewCvExitMs == 0) boostNewCvExitMs = now;
                         if (now - boostNewCvExitMs >= BOOST_CV_EXIT_CONFIRM_MS) {
                             boostNewMode = BOOST_NEW_CC_MPPT;
                             boostNewCurrIntegrator = 0.0f;
                             boostNewVoltIntegrator = 0.0f;
+                            boostNewIrefCvCmd = 0.5f;
                         }
                     } else {
                         boostNewCvExitMs = 0;
@@ -888,6 +911,7 @@ void TaskSampleData(void * pvParameters) {
                         boostNewMode = BOOST_NEW_CC_MPPT;
                         boostNewCurrIntegrator = 0.0f;
                         boostNewVoltIntegrator = 0.0f;
+                        boostNewIrefCvCmd = 0.5f;
                     }
                 }
 
@@ -903,12 +927,15 @@ void TaskSampleData(void * pvParameters) {
                 }
                 if (v_bat_filt > BOOST_CV_TARGET_VOLTAGE) {
                     float over_cv = v_bat_filt - BOOST_CV_TARGET_VOLTAGE;
-                    duty_accumulator -= (2.5f + over_cv * 10.0f);
-                    boostNewCurrIntegrator = 0.0f;
+                    // In CV mode the inner loop already bleeds duty; keep outer cut mild.
+                    float cut = (boostNewMode == BOOST_NEW_CV) ? (0.6f + over_cv * 3.0f)
+                                                              : (2.5f + over_cv * 10.0f);
+                    duty_accumulator -= cut;
+                    if (boostNewMode != BOOST_NEW_CV) boostNewCurrIntegrator = 0.0f;
                 }
                 if (v_bat > (BOOST_CV_TARGET_VOLTAGE + 0.4f)) {
-                    duty_accumulator -= 8.0f;
-                    boostNewCurrIntegrator = 0.0f;
+                    duty_accumulator -= (boostNewMode == BOOST_NEW_CV) ? 3.0f : 8.0f;
+                    if (boostNewMode != BOOST_NEW_CV) boostNewCurrIntegrator = 0.0f;
                 }
 
                 // Near BMS zone: hard-cap duty so open-FET fly-up has less energy.
