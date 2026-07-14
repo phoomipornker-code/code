@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-stability-v8-cv57-bms-test";
+const char* FW_VERSION_TAG = "cv58-stability-v9-cv57-hold";
 
 // =========================================================================
 // Hardware
@@ -26,7 +26,7 @@ Adafruit_ADS1115 ads_curr;
 // =========================================================================
 // Targets / safety thresholds
 // =========================================================================
-// CV target for BMS testing (user request: 57V).
+// CV 57V test: keep protection ABOVE CV so regulation has room.
 const float TARGET_CV_VOLTAGE = 57.0;
 const float TARGET_CC_CURRENT = 6.0;
 
@@ -40,11 +40,12 @@ const int MAX_DUTY_BOOST   = 760;
 const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
 const float CV_DEADBAND_V = 0.08;
-const float FULL_DETECT_VOLTAGE = 56.90;
+const float FULL_DETECT_VOLTAGE = 56.95;
 const float FULL_END_CURRENT = 0.45;
-const unsigned long FULL_CONFIRM_MS = 90000;
-const float HIGH_VOLTAGE_STOP_VOLTAGE = 57.40;
-const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 200;
+const unsigned long FULL_CONFIRM_MS = 120000;
+// Was 57.40/200ms — too close to CV 57V, killed CV before it could hold.
+const float HIGH_VOLTAGE_STOP_VOLTAGE = 58.80;
+const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 1500;
 const float RESTART_CHARGE_VOLTAGE = 54.0;
 
 // =========================================================================
@@ -127,8 +128,8 @@ const float BOOST_EST_DUTY_MARGIN = 0.03;
 
 const float BOOST_VBAT_SPIKE_PRECUT_DELTA_V = 0.7;
 const float BOOST_VBAT_SPIKE_PRECUT_RAW_ABOVE_FILT_V = 1.0;
-const float HARD_OVP_TRIP_VOLTAGE = 58.0;     // trip before runaway to 70V+
-const float HARD_OVP_RELEASE_VOLTAGE = 56.5;
+const float HARD_OVP_TRIP_VOLTAGE = 59.50;    // room above CV 57 for regulation
+const float HARD_OVP_RELEASE_VOLTAGE = 56.80;
 const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 
 const bool ENABLE_DEBUG_VERBOSE = true;
@@ -508,6 +509,8 @@ void TaskSampleData(void * pvParameters) {
                               ovp_trip_voltage, HARD_OVP_TRIP_VOLTAGE);
             }
 
+            // Near CV, current naturally falls — do soft duty cut, not hard latch
+            // (hard latch was killing CV 57V tests with OVP_LOCK).
             if (!ovp_latched &&
                 system_ON &&
                 currentState == STATE_BOOST &&
@@ -515,12 +518,23 @@ void TaskSampleData(void * pvParameters) {
                 v_bat_filt >= BOOST_CV_ENTRY_VOLTAGE &&
                 i_bat_charge_filt < MIN_CURRENT_FOR_ACTIVE_CHARGE &&
                 v_bat > (v_bat_filt + 3.0f)) {
-                ovp_latched = true;
-                ovp_trip_voltage = v_bat;
-                ovp_trip_ms = now;
-                forceSafeShutdown();
-                Serial.printf("[CRITICAL] RUNAWAY-CUT at %.2fV (filt=%.2fV, duty=%d).\n",
-                              v_bat, v_bat_filt, raw_duty);
+                if (v_bat >= HARD_OVP_TRIP_VOLTAGE) {
+                    ovp_latched = true;
+                    ovp_trip_voltage = v_bat;
+                    ovp_trip_ms = now;
+                    forceSafeShutdown();
+                    Serial.printf("[CRITICAL] RUNAWAY-CUT at %.2fV (filt=%.2fV, duty=%d).\n",
+                                  v_bat, v_bat_filt, raw_duty);
+                } else {
+                    duty_accumulator = max(0.0f, duty_accumulator - 15.0f);
+                    boostNewCurrIntegrator = 0.0f;
+                    if (boostNewMode != BOOST_NEW_CV) {
+                        boostNewMode = BOOST_NEW_CV;
+                        boostNewVoltIntegrator = 0.0f;
+                    }
+                    Serial.printf("[WARN] Runaway soft-cut duty at %.2fV (filt=%.2fV).\n",
+                                  v_bat, v_bat_filt);
+                }
             }
 
             if (!ovp_latched &&
@@ -531,12 +545,23 @@ void TaskSampleData(void * pvParameters) {
                 (vbat_step > BOOST_VBAT_SPIKE_PRECUT_DELTA_V ||
                  (vbat_step > 0.7f && vbat_filt_step > 0.25f)) &&
                 v_bat > (v_bat_filt + BOOST_VBAT_SPIKE_PRECUT_RAW_ABOVE_FILT_V)) {
-                ovp_latched = true;
-                ovp_trip_voltage = v_bat;
-                ovp_trip_ms = now;
-                forceSafeShutdown();
-                Serial.printf("[CRITICAL] SPIKE-PRECUT at %.2fV (step=%.2fV, filt=%.2fV, duty=%d).\n",
-                              v_bat, vbat_step, v_bat_filt, raw_duty);
+                if (v_bat >= HARD_OVP_TRIP_VOLTAGE) {
+                    ovp_latched = true;
+                    ovp_trip_voltage = v_bat;
+                    ovp_trip_ms = now;
+                    forceSafeShutdown();
+                    Serial.printf("[CRITICAL] SPIKE-PRECUT at %.2fV (step=%.2fV, filt=%.2fV, duty=%d).\n",
+                                  v_bat, vbat_step, v_bat_filt, raw_duty);
+                } else {
+                    duty_accumulator = max(0.0f, duty_accumulator - 12.0f);
+                    boostNewCurrIntegrator = 0.0f;
+                    if (boostNewMode != BOOST_NEW_CV) {
+                        boostNewMode = BOOST_NEW_CV;
+                        boostNewVoltIntegrator = 0.0f;
+                    }
+                    Serial.printf("[WARN] Spike soft-cut duty at %.2fV (step=%.2fV).\n",
+                                  v_bat, vbat_step);
+                }
             }
 
             if (ovp_latched &&

@@ -52,8 +52,8 @@ static const float ETA_EST = 0.90f;
 // --------------------------
 // Protection
 // --------------------------
-static const float HARD_OVP_V = 58.0f;
-static const float HARD_OVP_RELEASE_V = 56.5f;
+static const float HARD_OVP_V = 59.5f;
+static const float HARD_OVP_RELEASE_V = 56.8f;
 static const float OTP_C = 65.0f;
 static const float UVLO_BAT_V = 40.0f;
 

@@ -20,7 +20,7 @@ Target values currently set:
 - CV = `57.0V` (BMS test target)
 - 16S LiFePO4 thresholds (`CV enter 56.6V`, `force CV 56.8V`, `recharge 54.0V`)
 - PWM = `50kHz`
-- Hard OVP = `58.0V` (prevents boost runaway when BMS opens)
+- Hard OVP = `59.5V` (gives CV 57V room to regulate; pre-stop at 58.8V)
 
 Before deploying, verify calibration constants in the sketch:
 
