@@ -29,10 +29,10 @@ static const int BOOST_DUTY_RAW_MIN = 0;
 // Charger target (16S LFP)
 // --------------------------
 static const float CC_CURRENT_A = 6.0f;
-static const float CV_VOLTAGE_V = 58.0f;
-static const float CV_ENTER_V = 57.8f;
-static const float CV_EXIT_V = 57.4f;
-static const float RECHARGE_V = 54.0f;
+static const float CV_VOLTAGE_V = 56.0f;
+static const float CV_ENTER_V = 55.6f;
+static const float CV_EXIT_V = 55.2f;
+static const float RECHARGE_V = 53.5f;
 static const float CUTOFF_CURRENT_A = 0.45f;
 
 // --------------------------
@@ -52,8 +52,8 @@ static const float ETA_EST = 0.90f;
 // --------------------------
 // Protection
 // --------------------------
-static const float HARD_OVP_V = 58.4f;
-static const float HARD_OVP_RELEASE_V = 57.2f;
+static const float HARD_OVP_V = 57.0f;
+static const float HARD_OVP_RELEASE_V = 55.5f;
 static const float OTP_C = 65.0f;
 static const float UVLO_BAT_V = 40.0f;
 
@@ -63,9 +63,9 @@ static const float UVLO_BAT_V = 40.0f;
 static const uint32_t CONTROL_PERIOD_MS = 20;    // 50 Hz
 static const uint32_t MPPT_PERIOD_MS = 100;      // 10 Hz
 static const uint32_t SERIAL_PERIOD_MS = 500;
-static const uint32_t CV_ENTER_CONFIRM_MS = 8000;
+static const uint32_t CV_ENTER_CONFIRM_MS = 200;
 static const uint32_t CV_EXIT_CONFIRM_MS = 3000;
-static const uint32_t DONE_CONFIRM_MS = 120000;
+static const uint32_t DONE_CONFIRM_MS = 90000;
 static const uint32_t SOFTSTART_MS = 2500;
 static const uint32_t PV_LOW_SHUTDOWN_MS = 2000;
 
