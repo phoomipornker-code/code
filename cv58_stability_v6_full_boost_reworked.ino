@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-stability-v7-bms56cv";
+const char* FW_VERSION_TAG = "cv58-stability-v8-cv57-bms-test";
 
 // =========================================================================
 // Hardware
@@ -26,9 +26,8 @@ Adafruit_ADS1115 ads_curr;
 // =========================================================================
 // Targets / safety thresholds
 // =========================================================================
-// Align charger CV to BMS CV (~56V). Charger must regulate BELOW BMS open threshold
-// otherwise boost output can fly up when BMS charge FET opens.
-const float TARGET_CV_VOLTAGE = 56.0;
+// CV target for BMS testing (user request: 57V).
+const float TARGET_CV_VOLTAGE = 57.0;
 const float TARGET_CC_CURRENT = 6.0;
 
 const float MIN_PV_VOLTAGE = 42.0;
@@ -41,12 +40,12 @@ const int MAX_DUTY_BOOST   = 760;
 const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
 const float CV_DEADBAND_V = 0.08;
-const float FULL_DETECT_VOLTAGE = 55.90;
+const float FULL_DETECT_VOLTAGE = 56.90;
 const float FULL_END_CURRENT = 0.45;
 const unsigned long FULL_CONFIRM_MS = 90000;
-const float HIGH_VOLTAGE_STOP_VOLTAGE = 56.40;
+const float HIGH_VOLTAGE_STOP_VOLTAGE = 57.40;
 const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 200;
-const float RESTART_CHARGE_VOLTAGE = 53.5;
+const float RESTART_CHARGE_VOLTAGE = 54.0;
 
 // =========================================================================
 // Forward (AC) PID
@@ -93,11 +92,11 @@ const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 // BOOST control (new flow): SOFTSTART -> CC_MPPT -> CV -> DONE
 // =========================================================================
 const float BOOST_VOLTAGE_FLOOR = 42.0;
-const float BOOST_CV_TARGET_VOLTAGE = 56.0;
-const float BOOST_CV_ENTRY_VOLTAGE = 55.60;   // enter CV early, before BMS opens
-const float BOOST_CV_FORCE_VOLTAGE = 55.80;   // force CV immediately (no wait)
-const float BOOST_CV_EXIT_VOLTAGE  = 55.20;
-const float BOOST_CC_TAPER_START_V = 54.80;   // start reducing Iref while still in CC
+const float BOOST_CV_TARGET_VOLTAGE = 57.0;
+const float BOOST_CV_ENTRY_VOLTAGE = 56.60;   // enter CV early
+const float BOOST_CV_FORCE_VOLTAGE = 56.80;   // force CV immediately (no wait)
+const float BOOST_CV_EXIT_VOLTAGE  = 56.20;
+const float BOOST_CC_TAPER_START_V = 55.80;   // start reducing Iref while still in CC
 
 const float BOOST_PV_POWER_LIMIT_W = 650.0;
 const float BOOST_PV_CURRENT_HARD_A = 16.3;
@@ -128,8 +127,8 @@ const float BOOST_EST_DUTY_MARGIN = 0.03;
 
 const float BOOST_VBAT_SPIKE_PRECUT_DELTA_V = 0.7;
 const float BOOST_VBAT_SPIKE_PRECUT_RAW_ABOVE_FILT_V = 1.0;
-const float HARD_OVP_TRIP_VOLTAGE = 57.0;     // trip before runaway to 70V+
-const float HARD_OVP_RELEASE_VOLTAGE = 55.5;
+const float HARD_OVP_TRIP_VOLTAGE = 58.0;     // trip before runaway to 70V+
+const float HARD_OVP_RELEASE_VOLTAGE = 56.5;
 const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 
 const bool ENABLE_DEBUG_VERBOSE = true;

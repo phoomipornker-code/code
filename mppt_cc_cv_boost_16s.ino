@@ -29,10 +29,10 @@ static const int BOOST_DUTY_RAW_MIN = 0;
 // Charger target (16S LFP)
 // --------------------------
 static const float CC_CURRENT_A = 6.0f;
-static const float CV_VOLTAGE_V = 56.0f;
-static const float CV_ENTER_V = 55.6f;
-static const float CV_EXIT_V = 55.2f;
-static const float RECHARGE_V = 53.5f;
+static const float CV_VOLTAGE_V = 57.0f;
+static const float CV_ENTER_V = 56.6f;
+static const float CV_EXIT_V = 56.2f;
+static const float RECHARGE_V = 54.0f;
 static const float CUTOFF_CURRENT_A = 0.45f;
 
 // --------------------------
@@ -52,8 +52,8 @@ static const float ETA_EST = 0.90f;
 // --------------------------
 // Protection
 // --------------------------
-static const float HARD_OVP_V = 57.0f;
-static const float HARD_OVP_RELEASE_V = 55.5f;
+static const float HARD_OVP_V = 58.0f;
+static const float HARD_OVP_RELEASE_V = 56.5f;
 static const float OTP_C = 65.0f;
 static const float UVLO_BAT_V = 40.0f;
 

@@ -17,10 +17,10 @@ This sketch implements state-machine charging:
 Target values currently set:
 
 - CC = `6.0A`
-- CV = `56.0V` (aligned to BMS CV)
-- 16S LiFePO4 thresholds (`CV enter 55.6V`, `force CV 55.8V`, `recharge 53.5V`)
+- CV = `57.0V` (BMS test target)
+- 16S LiFePO4 thresholds (`CV enter 56.6V`, `force CV 56.8V`, `recharge 54.0V`)
 - PWM = `50kHz`
-- Hard OVP = `57.0V` (prevents boost runaway when BMS opens)
+- Hard OVP = `58.0V` (prevents boost runaway when BMS opens)
 
 Before deploying, verify calibration constants in the sketch:
 
