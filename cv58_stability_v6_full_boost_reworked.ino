@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-stability-v10-bms57-detect";
+const char* FW_VERSION_TAG = "cv58-stability-v11-bms-preempt";
 
 // =========================================================================
 // Hardware
@@ -26,8 +26,8 @@ Adafruit_ADS1115 ads_curr;
 // =========================================================================
 // Targets / safety thresholds
 // =========================================================================
-// BMS opens ~57.0V. Charger CV must sit BELOW that or boost output flies open-circuit.
-const float TARGET_CV_VOLTAGE = 56.60;
+// BMS observed opening near ~56.2–57.0V. Keep charger CV clearly below that.
+const float TARGET_CV_VOLTAGE = 56.00;
 const float TARGET_CC_CURRENT = 6.0;
 
 const float MIN_PV_VOLTAGE = 42.0;
@@ -40,11 +40,11 @@ const int MAX_DUTY_BOOST   = 760;
 const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
 const float CV_DEADBAND_V = 0.08;
-const float FULL_DETECT_VOLTAGE = 56.50;
-const float FULL_END_CURRENT = 0.45;
-const unsigned long FULL_CONFIRM_MS = 90000;
-const float HIGH_VOLTAGE_STOP_VOLTAGE = 57.80;
-const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 400;
+const float FULL_DETECT_VOLTAGE = 55.90;
+const float FULL_END_CURRENT = 0.50;
+const unsigned long FULL_CONFIRM_MS = 60000;
+const float HIGH_VOLTAGE_STOP_VOLTAGE = 56.80;
+const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 300;
 const float RESTART_CHARGE_VOLTAGE = 54.0;
 
 // =========================================================================
@@ -92,14 +92,16 @@ const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 // BOOST control (new flow): SOFTSTART -> CC_MPPT -> CV -> DONE
 // =========================================================================
 const float BOOST_VOLTAGE_FLOOR = 42.0;
-const float BOOST_CV_TARGET_VOLTAGE = 56.60;
-const float BOOST_CV_ENTRY_VOLTAGE = 56.20;
-const float BOOST_CV_FORCE_VOLTAGE = 56.40;
-const float BOOST_CV_EXIT_VOLTAGE  = 55.80;
-const float BOOST_CC_TAPER_START_V = 55.40;
-const float BMS_OPEN_DETECT_V = 57.00;          // observed BMS cutoff
-const float BMS_OPEN_JUMP_DELTA_V = 2.5;        // sudden open-circuit jump
-const float BMS_OPEN_CURRENT_MAX_A = 0.80;      // current collapses after BMS open
+const float BOOST_CV_TARGET_VOLTAGE = 56.00;
+const float BOOST_CV_ENTRY_VOLTAGE = 55.60;
+const float BOOST_CV_FORCE_VOLTAGE = 55.80;
+const float BOOST_CV_EXIT_VOLTAGE  = 55.20;
+const float BOOST_CC_TAPER_START_V = 54.80;
+const float BMS_OPEN_DETECT_V = 56.30;          // preempt before hard open spike
+const float BMS_OPEN_JUMP_DELTA_V = 1.2;        // faster jump detect
+const float BMS_OPEN_CURRENT_MAX_A = 1.20;
+const float BMS_PREEMPT_DUTY_CAP_RAW = 120.0;   // hard duty ceiling near BMS zone
+const float BMS_PREEMPT_ZONE_V = 55.90;
 
 const float BOOST_PV_POWER_LIMIT_W = 650.0;
 const float BOOST_PV_CURRENT_HARD_A = 16.3;
@@ -130,8 +132,8 @@ const float BOOST_EST_DUTY_MARGIN = 0.03;
 
 const float BOOST_VBAT_SPIKE_PRECUT_DELTA_V = 0.7;
 const float BOOST_VBAT_SPIKE_PRECUT_RAW_ABOVE_FILT_V = 1.0;
-const float HARD_OVP_TRIP_VOLTAGE = 58.50;
-const float HARD_OVP_RELEASE_VOLTAGE = 56.20;
+const float HARD_OVP_TRIP_VOLTAGE = 57.80;
+const float HARD_OVP_RELEASE_VOLTAGE = 55.80;
 const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 
 const bool ENABLE_DEBUG_VERBOSE = true;
@@ -501,6 +503,25 @@ void TaskSampleData(void * pvParameters) {
             float vbat_step = (last_vbat_sample > 0.0f) ? (v_bat - last_vbat_sample) : 0.0f;
             float vbat_filt_step = (last_vbat_filt_sample > 0.0f) ? (v_bat_filt - last_vbat_filt_sample) : 0.0f;
 
+            // BMS open / near-open: kill PWM ASAP (before waiting for HARD_OVP threshold).
+            if (!ovp_latched &&
+                system_ON &&
+                currentState == STATE_BOOST &&
+                raw_duty > 0 &&
+                (v_bat_filt >= BMS_PREEMPT_ZONE_V || v_bat >= BMS_PREEMPT_ZONE_V) &&
+                ((v_bat >= BMS_OPEN_DETECT_V) ||
+                 (vbat_step >= BMS_OPEN_JUMP_DELTA_V) ||
+                 (v_bat > (v_bat_filt + 1.8f)) ||
+                 (v_bat_filt >= BMS_OPEN_DETECT_V && i_bat_charge_filt <= BMS_OPEN_CURRENT_MAX_A))) {
+                ovp_latched = true;
+                ovp_trip_voltage = max(v_bat, v_bat_filt);
+                ovp_trip_ms = now;
+                forceSafeShutdown();
+                charge_full_hold = true;
+                Serial.printf("[CRITICAL] BMS-OPEN/preempt at raw=%.2f filt=%.2f I=%.2fA step=%.2f. PWM off.\n",
+                              v_bat, v_bat_filt, i_bat_charge_filt, vbat_step);
+            }
+
             if (!ovp_latched &&
                 (v_bat >= HARD_OVP_TRIP_VOLTAGE || v_bat_filt >= HARD_OVP_TRIP_VOLTAGE)) {
                 ovp_latched = true;
@@ -509,25 +530,6 @@ void TaskSampleData(void * pvParameters) {
                 forceSafeShutdown();
                 Serial.printf("[CRITICAL] HARD OVP TRIP at %.2fV (trip=%.2fV). Output disabled.\n",
                               ovp_trip_voltage, HARD_OVP_TRIP_VOLTAGE);
-            }
-
-            // BMS open-circuit detect: V jumps while current collapses near BMS cutoff.
-            // Must kill PWM immediately or boost flies to 70V+.
-            if (!ovp_latched &&
-                system_ON &&
-                currentState == STATE_BOOST &&
-                raw_duty > 0 &&
-                v_bat_filt >= (BMS_OPEN_DETECT_V - 1.0f) &&
-                ((v_bat >= BMS_OPEN_DETECT_V && i_bat_charge_filt <= BMS_OPEN_CURRENT_MAX_A) ||
-                 (vbat_step >= BMS_OPEN_JUMP_DELTA_V && i_bat_charge_filt <= BMS_OPEN_CURRENT_MAX_A) ||
-                 (v_bat > (v_bat_filt + 4.0f)))) {
-                ovp_latched = true;
-                ovp_trip_voltage = max(v_bat, v_bat_filt);
-                ovp_trip_ms = now;
-                forceSafeShutdown();
-                charge_full_hold = true;  // treat as charge complete / BMS stopped accepting
-                Serial.printf("[CRITICAL] BMS-OPEN detect at raw=%.2f filt=%.2f I=%.2fA. PWM off.\n",
-                              v_bat, v_bat_filt, i_bat_charge_filt);
             }
 
             // Near CV, current naturally falls — do soft duty cut, not hard latch
@@ -899,6 +901,16 @@ void TaskSampleData(void * pvParameters) {
                 if (v_bat > (BOOST_CV_TARGET_VOLTAGE + 0.4f)) {
                     duty_accumulator -= 8.0f;
                     boostNewCurrIntegrator = 0.0f;
+                }
+
+                // Near BMS zone: hard-cap duty so open-FET fly-up has less energy.
+                if (v_bat_filt >= BMS_PREEMPT_ZONE_V || v_bat >= BMS_PREEMPT_ZONE_V) {
+                    if (duty_accumulator > BMS_PREEMPT_DUTY_CAP_RAW) {
+                        duty_accumulator = BMS_PREEMPT_DUTY_CAP_RAW;
+                    }
+                    if (v_bat_filt >= BOOST_CV_TARGET_VOLTAGE) {
+                        duty_accumulator = min(duty_accumulator, 80.0f);
+                    }
                 }
 
                 duty_accumulator = boostClampf(duty_accumulator, 0.0f, (float)allowed_max_duty);
