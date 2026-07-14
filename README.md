@@ -17,13 +17,20 @@ This sketch implements state-machine charging:
 Target values currently set:
 
 - CC = `6.0A`
-- CV = `56.6V` (below observed BMS open at ~57.0V)
-- 16S LiFePO4 thresholds (`CV enter 56.2V`, `force CV 56.4V`, `recharge 54.0V`)
+- CV = `56.0V` (below BMS open observed ~56.2–57.0V)
+- 16S LiFePO4 thresholds (`CV enter 55.6V`, `force CV 55.8V`, `recharge 54.0V`)
 - PWM = `50kHz`
-- Hard OVP = `58.5V` + BMS-open detect (V jump / current collapse near 57V)
+- Hard OVP = `57.8V` + early BMS-open preempt and near-zone duty cap
+
+Before deploying, verify calibration constants in the sketch:
+
+- `CAL_SCALE_*`
+- `OFFSET_*`
+
+and confirm ADS1115 channel mapping matches your wiring.
 
 Recent control update:
 
 - fixed startup deadlock where very low sampled PV power could clamp current reference and keep boost duty too low to ramp into real charging.
 - added one-point PV voltage trim factor (`FIELD_TRIM_V_SOLAR`) to align ADC reading with multimeter measurements.
-- confirmed BMS opens near 57V; charger CV set below BMS and PWM killed immediately on open-circuit jump.
+- confirmed BMS opens near 56.2–57V; charger CV set below BMS, duty capped near zone, PWM killed on jump.
