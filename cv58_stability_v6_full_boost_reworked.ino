@@ -92,7 +92,7 @@ const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 // BOOST control (new flow): SOFTSTART -> CC_MPPT -> CV -> DONE
 // =========================================================================
 const float BOOST_VOLTAGE_FLOOR = 42.0;
-const float BOOST_CV_TARGET_VOLTAGE = 56.00;
+const float BOOST_CV_TARGET_VOLTAGE = 56.00;  // conserve pack: stop/hold at 56V
 const float BOOST_CV_ENTRY_VOLTAGE = 55.60;
 const float BOOST_CV_FORCE_VOLTAGE = 55.80;
 const float BOOST_CV_EXIT_VOLTAGE  = 55.20;
