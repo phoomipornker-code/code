@@ -34,3 +34,4 @@ Recent control update:
 - fixed startup deadlock where very low sampled PV power could clamp current reference and keep boost duty too low to ramp into real charging.
 - added one-point PV voltage trim factor (`FIELD_TRIM_V_SOLAR`) to align ADC reading with multimeter measurements.
 - confirmed BMS opens near 56.2–57V; charger CV set below BMS, duty capped near zone, PWM killed on jump.
+- fixed CC low-current lock: removed measured-Ppv Iref ceiling; CC now seeks 6A and backs off only on PV collapse.

@@ -74,15 +74,15 @@ static const uint32_t PV_LOW_SHUTDOWN_MS = 2000;
 // --------------------------
 static const float MPPT_STEP_V = 0.10f;
 static const float MPPT_TRACK_K = 0.08f;           // converts PV-V error to Iref adaptation
-static const float DUTY_SLEW_UP_RAW = 2.2f;
-static const float DUTY_SLEW_DOWN_RAW = 5.0f;
+static const float DUTY_SLEW_UP_RAW = 4.0f;
+static const float DUTY_SLEW_DOWN_RAW = 6.0f;
 static const float CV_MIN_DUTY_MARGIN = 0.03f;     // +3%
 
 // Current PI (controls Ibat via duty)
-static const float CURR_KP = 12.0f;
-static const float CURR_KI = 40.0f;
-static const float CURR_OUT_MIN = -30.0f;
-static const float CURR_OUT_MAX = 30.0f;
+static const float CURR_KP = 14.0f;
+static const float CURR_KI = 55.0f;
+static const float CURR_OUT_MIN = -35.0f;
+static const float CURR_OUT_MAX = 45.0f;
 
 // Voltage PI (in CV, outputs current reference)
 static const float VOLT_KP = 1.2f;
@@ -294,12 +294,14 @@ static int estimateBoostDutyRaw(float vin, float vout) {
 }
 
 static float mpptCurrentCapFromPower(const SensorSample& s) {
-  if (g_pAvailFilt < POWER_CAP_ENABLE_W || s.vBat < 5.0f) {
-    return CC_CURRENT_A;
+  // Do not clamp from measured power (locks CC at low current).
+  // Only back off when PV collapses.
+  if (s.vPv < 41.0f) {
+    float sag = 41.0f - s.vPv;
+    float scale = clampf(1.0f - (sag * 0.35f), 0.15f, 1.0f);
+    return CC_CURRENT_A * scale;
   }
-  float pAvail = min(g_pAvailFilt, PV_POWER_LIMIT_W);
-  float capFromPower = (pAvail * ETA_EST) / s.vBat;
-  return clampf(capFromPower, 0.0f, CC_CURRENT_A);
+  return CC_CURRENT_A;
 }
 
 static void enterState(ChargerState next, uint32_t nowMs) {
