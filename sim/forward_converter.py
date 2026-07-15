@@ -26,20 +26,23 @@ OUT_PNG_240 = OUT_DIR / "forward_240vac_58v_5a_nr_waveforms.png"
 
 
 def preset_240vac_nr() -> dict[str, float]:
-    """จุดทำงานปกติ: Vin≈340 V, n=0.44, Nr=Np, Vo≈58 V / 5 A."""
+    """จุดทำงานปกติบน ETD49: Np:Ns:Nr=32:14:32, Vin≈340 V, Vo=58 V / 5 A."""
     vin = 340.0
-    n = 0.44
-    d = (58.0 + 0.7) / (vin * n)  # ≈ 0.393
+    np_, ns, nr = 32.0, 14.0, 32.0
+    n = ns / np_
+    d = (58.0 + 0.7) / (vin * n)
+    # Lm ≈ AL * Np^2, AL~3500 nH/N² (ETD49 N87 ungapped)
+    lm = 3500e-9 * (np_ ** 2)
     return {
         "vin": vin,
-        "np_": 25.0,
-        "ns": 11.0,
-        "nr": 25.0,
+        "np_": np_,
+        "ns": ns,
+        "nr": nr,
         "d": d,
         "fs": 100e3,
         "l": 360e-6,
         "io": 5.0,
-        "lm": 2.0e-3,  # Lm ปฐมภูมิประมาณสำหรับออฟไลน์
+        "lm": lm,
         "vo_target": 58.0,
     }
 
@@ -200,7 +203,7 @@ def main() -> None:
         path = plot_waveforms(
             data,
             out_path=OUT_PNG_240,
-            title_prefix="AC240→DC58V/5A  Single-Switch + Nr",
+            title_prefix="AC240→DC58V/5A  ETD49  32:14:32 + Nr",
         )
     else:
         data = ideal_forward_waveforms()

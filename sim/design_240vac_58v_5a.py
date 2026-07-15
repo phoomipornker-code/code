@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ออกแบบ Single-Switch Forward + Nr: AC 240 V → DC 58 V / 5 A."""
+"""ออกแบบ Single-Switch Forward + Nr บนแกน ETD49: AC 240 V → DC 58 V / 5 A."""
 
 from __future__ import annotations
 
@@ -22,13 +22,48 @@ class Spec:
     di_l_ratio: float = 0.20
     line_freq: float = 50.0
     vin_delta: float = 20.0
+    # ETD49/25/16 (N87)
+    core_name: str = "ETD49/25/16"
+    ae_m2: float = 211e-6  # 211 mm²
+    ie_m: float = 114e-3  # 114 mm
+    ve_m3: float = 24100e-9  # 24100 mm³
+    b_max_t: float = 0.20  # T @ 100 kHz (N87)
+    j_a_per_mm2: float = 4.5  # ความหนาแน่นกระแสลวด
 
 
 def ac_to_vdc_peak(vac: float) -> float:
     return vac * math.sqrt(2.0)
 
 
-def design(spec: Spec = Spec()) -> dict[str, float]:
+def awg_from_area_mm2(area_mm2: float) -> str:
+    """เลือก AWG เล็กสุดที่พื้นที่ทองแดงยังพอ (แล้วแนะนำ Litz @ 100 kHz)."""
+    # AWG → mm² (หนา → บาง)
+    table = [
+        (15, 1.65),
+        (16, 1.31),
+        (17, 1.04),
+        (18, 0.823),
+        (19, 0.653),
+        (20, 0.518),
+        (21, 0.410),
+        (22, 0.326),
+        (23, 0.258),
+        (24, 0.205),
+        (26, 0.129),
+        (28, 0.081),
+    ]
+    choice = None
+    for awg, a in table:
+        if a >= area_mm2:
+            choice = awg
+        else:
+            break
+    if choice is None:
+        return f"Litz / หลายเส้น รวม ≥ {area_mm2:.2f} mm²"
+    return f"≥ AWG {choice} หรือ Litz รวม ≥ {area_mm2:.2f} mm²"
+
+
+def design(spec: Spec = Spec()) -> dict[str, float | str]:
     vac_min = spec.vac_nom * (1.0 - spec.vac_tol)
     vac_max = spec.vac_nom * (1.0 + spec.vac_tol)
     vin_min = ac_to_vdc_peak(vac_min) - spec.vin_ripple_margin
@@ -39,39 +74,71 @@ def design(spec: Spec = Spec()) -> dict[str, float]:
     pin = po / spec.eta
     v_out_need = spec.vo + spec.vf
 
-    # Dmax จาก Nr: D <= 1/(1+Nr/Np)
     d_max_theory = 1.0 / (1.0 + spec.nr_over_np)
     d_max_use = min(spec.d_max, 0.95 * d_max_theory)
 
     n_calc = v_out_need / (vin_min * d_max_use)
-    # ปัดขึ้น 2 ตำแหน่ง เพื่อให้ D ที่ Vin_min ไม่เกิน Dmax
     n_use = math.ceil(n_calc * 100.0 - 1e-12) / 100.0
 
-    d_at_vin_min = v_out_need / (vin_min * n_use)
-    d_at_vin_nom = v_out_need / (vin_nom * n_use)
-    d_at_vin_max = v_out_need / (vin_max * n_use)
+    # จำนวนรอบจาก ETD49: Np >= Vin*D / (Ae * Bmax * fs)
+    np_min = (vin_min * d_max_use) / (spec.ae_m2 * spec.b_max_t * spec.fs)
+    # ถ้าใกล้จำนวนเต็ม (เช่น 32.04) ให้ใช้ค่ากลม เพื่อได้ 32:14:32
+    if abs(np_min - round(np_min)) < 0.08:
+        np_turns = int(round(np_min))
+    else:
+        np_turns = int(math.ceil(np_min))
 
-    vs_nom = vin_nom * n_use
-    vs_max = vin_max * n_use
+    ns_turns = max(1, int(round(np_turns * n_use)))
+    n_actual = ns_turns / np_turns
+    d_at_vin_min = v_out_need / (vin_min * n_actual)
+    while d_at_vin_min > d_max_use:
+        ns_turns += 1
+        n_actual = ns_turns / np_turns
+        d_at_vin_min = v_out_need / (vin_min * n_actual)
+
+    nr_turns = int(round(np_turns * spec.nr_over_np))
+    n_actual = ns_turns / np_turns
+
+    d_at_vin_min = v_out_need / (vin_min * n_actual)
+    d_at_vin_nom = v_out_need / (vin_nom * n_actual)
+    d_at_vin_max = v_out_need / (vin_max * n_actual)
+
+    # B จริงที่ Vin_max, D_max_use (worst flux)
+    b_at_vin_min = (vin_min * d_at_vin_min) / (np_turns * spec.ae_m2 * spec.fs)
+    b_at_vin_nom = (vin_nom * d_at_vin_nom) / (np_turns * spec.ae_m2 * spec.fs)
+
+    vs_nom = vin_nom * n_actual
+    vs_max = vin_max * n_actual
     di_l = spec.io * spec.di_l_ratio
     l_out = spec.vo * (1.0 - d_at_vin_nom) / (spec.fs * di_l)
 
-    ip_sec_reflected = spec.io * n_use
+    ip_sec_reflected = spec.io * n_actual
     ip_peak = ip_sec_reflected / spec.eta + 0.15 * ip_sec_reflected
     ip_rms_approx = ip_peak * math.sqrt(d_at_vin_nom)
+    is_rms_approx = spec.io * math.sqrt(d_at_vin_nom)
 
-    # Single-switch: Vds ≈ Vin*(1 + Np/Nr) = Vin*(1 + 1/(Nr/Np))
     vds_ideal = vin_max * (1.0 + 1.0 / spec.nr_over_np)
-    vds_with_margin = vds_ideal * 1.15  # leakage / spike margin ~15%
+    vds_with_margin = vds_ideal * 1.15
 
     c_in = pin / (2.0 * math.pi * spec.line_freq * vin_nom * spec.vin_delta)
 
-    # ตัวอย่างจำนวนรอบ (Np อ้างอิง)
-    np_turns = 25.0
-    ns_turns = round(np_turns * n_use)
-    nr_turns = round(np_turns * spec.nr_over_np)
+    # พื้นที่ทองแดงจาก J
+    ap_cu = ip_rms_approx / spec.j_a_per_mm2
+    as_cu = is_rms_approx / spec.j_a_per_mm2
+    # ขดรีเซ็ตกระแสต่ำ — ใช้ลวดบางกว่าปฐมภูมิได้
+    ar_cu = max(0.1, ap_cu * 0.35)
+
+    # Lm ประมาณสำหรับ ungapped N87: AL ~ 3200–3800 nH/N² → ใช้ 3500
+    al_nh = 3500.0
+    lm_h = al_nh * 1e-9 * (np_turns**2)
+    im_peak = (vin_nom * d_at_vin_nom) / (lm_h * spec.fs)
 
     return {
+        "core_name": spec.core_name,
+        "ae_mm2": spec.ae_m2 * 1e6,
+        "ie_mm": spec.ie_m * 1e3,
+        "ve_mm3": spec.ve_m3 * 1e9,
+        "b_max_t": spec.b_max_t,
         "vac_min": vac_min,
         "vac_max": vac_max,
         "vin_min": vin_min,
@@ -84,9 +151,13 @@ def design(spec: Spec = Spec()) -> dict[str, float]:
         "d_max_use": d_max_use,
         "n_calc": n_calc,
         "n_use": n_use,
-        "np_turns": np_turns,
-        "ns_turns": ns_turns,
-        "nr_turns": nr_turns,
+        "n_actual": n_actual,
+        "np_min": np_min,
+        "np_turns": float(np_turns),
+        "ns_turns": float(ns_turns),
+        "nr_turns": float(nr_turns),
+        "b_at_vin_min": b_at_vin_min,
+        "b_at_vin_nom": b_at_vin_nom,
         "d_at_vin_min": d_at_vin_min,
         "d_at_vin_nom": d_at_vin_nom,
         "d_at_vin_max": d_at_vin_max,
@@ -96,6 +167,7 @@ def design(spec: Spec = Spec()) -> dict[str, float]:
         "l_out_h": l_out,
         "ip_peak": ip_peak,
         "ip_rms_approx": ip_rms_approx,
+        "is_rms_approx": is_rms_approx,
         "c_in_f": c_in,
         "vds_ideal": vds_ideal,
         "vds_with_margin": vds_with_margin,
@@ -105,12 +177,21 @@ def design(spec: Spec = Spec()) -> dict[str, float]:
         "fs": spec.fs,
         "vo": spec.vo,
         "io": spec.io,
+        "ap_cu_mm2": ap_cu,
+        "as_cu_mm2": as_cu,
+        "ar_cu_mm2": ar_cu,
+        "wire_p": awg_from_area_mm2(ap_cu),
+        "wire_s": awg_from_area_mm2(as_cu),
+        "wire_r": awg_from_area_mm2(ar_cu),
+        "lm_h": lm_h,
+        "im_peak": im_peak,
+        "al_nh": al_nh,
     }
 
 
-def print_report(d: dict[str, float]) -> None:
+def print_report(d: dict[str, float | str]) -> None:
     print("=" * 62)
-    print("Single-Switch Forward + Nr reset")
+    print("Single-Switch Forward + Nr reset  |  Core: ETD49")
     print("AC 240 V → DC 58 V / 5 A")
     print("=" * 62)
     print(f"Po / Pin (@η)          = {d['po']:.1f} W / {d['pin']:.1f} W")
@@ -123,23 +204,41 @@ def print_report(d: dict[str, float]) -> None:
     )
     print(f"Cin (ΔV=20V, 50Hz)     ≈ {d['c_in_f'] * 1e6:.0f} µF / 400–450 V")
     print()
-    print("--- Reset winding Nr ---")
+    print("--- ETD49 transformer ---")
+    print(f"Core                   = {d['core_name']} (N87 แนะนำ)")
+    print(
+        f"Ae / Ie / Ve           = "
+        f"{d['ae_mm2']:.0f} mm² / {d['ie_mm']:.0f} mm / {d['ve_mm3']:.0f} mm³"
+    )
+    print(f"Bmax design            = {d['b_max_t']:.2f} T")
+    print(f"Np min (from Ae,B,fs)  = {d['np_min']:.1f} turns → use {d['np_turns']:.0f}")
+    print(
+        f"Turns Np:Ns:Nr         = "
+        f"{d['np_turns']:.0f}:{d['ns_turns']:.0f}:{d['nr_turns']:.0f}"
+    )
+    print(f"n = Ns/Np actual       = {d['n_actual']:.4f}  (target ≥ {d['n_use']:.2f})")
+    print(
+        f"B @ Vin min/nom        = "
+        f"{d['b_at_vin_min']*1e3:.0f} / {d['b_at_vin_nom']*1e3:.0f} mT"
+    )
+    print(
+        f"D @ Vin min/nom/max    = "
+        f"{d['d_at_vin_min']:.3f} / {d['d_at_vin_nom']:.3f} / {d['d_at_vin_max']:.3f}"
+    )
+    print(f"Lm (AL≈{d['al_nh']:.0f} nH/N²)   ≈ {d['lm_h']*1e3:.2f} mH")
+    print(f"Im peak (@Vin nom)     ≈ {d['im_peak']:.3f} A")
+    print()
+    print("--- Wire (J≈4.5 A/mm², 100 kHz ใช้ Litz/หลายเส้น) ---")
+    print(f"Primary Cu             ≈ {d['ap_cu_mm2']:.2f} mm²  → {d['wire_p']}")
+    print(f"Secondary Cu           ≈ {d['as_cu_mm2']:.2f} mm²  → {d['wire_s']}")
+    print(f"Reset Nr Cu            ≈ {d['ar_cu_mm2']:.2f} mm²  → {d['wire_r']}")
+    print()
+    print("--- Reset / switch stress ---")
     print(f"Nr/Np                  = {d['nr_over_np']:.2f}")
     print(f"Dmax theory / use      = {d['d_max_theory']:.3f} / {d['d_max_use']:.3f}")
     print(
         f"Vds ideal / +15%       = "
         f"{d['vds_ideal']:.0f} / {d['vds_with_margin']:.0f} V  → MOSFET 900–1000 V"
-    )
-    print()
-    print("--- Transformer ---")
-    print(f"n=Ns/Np (calc→use)     = {d['n_calc']:.4f} → {d['n_use']:.2f}")
-    print(
-        f"Example turns Np:Ns:Nr = "
-        f"{d['np_turns']:.0f}:{d['ns_turns']:.0f}:{d['nr_turns']:.0f}"
-    )
-    print(
-        f"D @ Vin min/nom/max    = "
-        f"{d['d_at_vin_min']:.3f} / {d['d_at_vin_nom']:.3f} / {d['d_at_vin_max']:.3f}"
     )
     print(f"Vs nom / max           = {d['vs_nom']:.1f} / {d['vs_max']:.1f} V")
     print()
@@ -152,10 +251,9 @@ def print_report(d: dict[str, float]) -> None:
     print(f"Q1 Ipeak / Irms≈       = {d['ip_peak']:.2f} / {d['ip_rms_approx']:.2f} A")
     print(f"D1/D2 VRRM             ≥ {d['diode_vrrm']:.0f} V  → use 200–300 V")
     print(f"D1 / D2 Iavg           ≈ {d['d1_iavg']:.2f} / {d['d2_iavg']:.2f} A")
-    print(f"Dr                     = ultrafast, V >= Vin_max (~{d['vin_max']:.0f} V)")
     print(f"fs                     = {d['fs'] / 1e3:.0f} kHz")
     print("=" * 62)
-    print("หมายเหตุ: ต้องมี RCD/snubber ที่ drain ของ Q1 ตัด leakage spike")
+    print("พันแบบ interleaved (P/S/P หรือ P/S/R) ลด leakage — ต้องมี RCD ที่ Q1")
 
 
 def main() -> None:

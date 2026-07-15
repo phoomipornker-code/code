@@ -20,9 +20,9 @@ python sim/design_240vac_58v_5a.py
 python sim/forward_converter.py --design 240vac-nr
 ```
 
-จุดออกแบบหลักเมื่อ \(N_r = N_p\):
+จุดออกแบบหลักเมื่อ \(N_r = N_p\) บนแกน **ETD49/25/16 (N87)**:
 
-- \(n = N_s/N_p \approx 0.44\) (เช่น 25:11:25)
+- ขด \(N_p:N_s:N_r = \mathbf{32:14:32}\) (\(n=0.4375\), \(B_{\max}\approx 0.20\,\mathrm{T}\))
 - \(D_{\max} \approx 0.45\), ที่ \(V_{in}=340\,\mathrm{V}\) ได้ \(D\approx 0.39\)
 - \(V_{DS,max}\approx 2V_{in}\) → MOSFET **900–1000 V** + RCD snubber
 - \(L \approx 350\,\mu\mathrm{H}\), \(C_o = 470\text{–}1000\,\mu\mathrm{F}\)
