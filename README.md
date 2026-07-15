@@ -1,27 +1,34 @@
 # วงจรฟอร์เวิร์ดคอนเวอร์เตอร์ (Forward Converter)
 
-เอกสารและตัวอย่างจำลองวงจร **Forward Converter** — สวิตชิ่งเพาเวอร์ซัพพลายชนิดแยกกราวนด์ (isolated) ที่ส่งพลังงานไปยังโหลดขณะสวิตช์เปิด
+เอกสารและตัวอย่างจำลอง **Single-Switch Forward + ขดรีเซ็ต Nr**
 
 ## โครงสร้างไฟล์
 
 | ไฟล์ | คำอธิบาย |
 |------|----------|
-| [docs/forward-converter.md](docs/forward-converter.md) | หลักการทำงาน สมการออกแบบ และจุดสำคัญ |
-| [sim/forward_converter.py](sim/forward_converter.py) | สคริปต์ Python จำลอง waveform แบบอุดมคติ |
-| [requirements.txt](requirements.txt) | dependencies สำหรับการจำลอง |
+| [docs/forward-converter.md](docs/forward-converter.md) | หลักการทำงานทั่วไป |
+| [docs/design-240vac-58v-5a.md](docs/design-240vac-58v-5a.md) | ออกแบบ **AC 240 V → DC 58 V / 5 A** แบบสวิตช์เดียว + Nr |
+| [sim/design_240vac_58v_5a.py](sim/design_240vac_58v_5a.py) | เครื่องคิดเลขพารามิเตอร์ |
+| [sim/forward_converter.py](sim/forward_converter.py) | จำลอง waveform (รวมโหมด 240vac-nr) |
+| [requirements.txt](requirements.txt) | dependencies |
 
-## รันการจำลอง
+## ออกแบบสเปก AC 240 V → 58 V / 5 A (สวิตช์เดียว + Nr)
 
 ```bash
 pip install -r requirements.txt
-python sim/forward_converter.py
+python sim/design_240vac_58v_5a.py
+python sim/forward_converter.py --design 240vac-nr
 ```
 
-ผลลัพธ์จะบันทึกภาพคลื่นที่ `artifacts/forward_converter_waveforms.png`
+จุดออกแบบหลักเมื่อ \(N_r = N_p\):
 
-## สรุปสั้น ๆ
+- \(n = N_s/N_p \approx 0.44\) (เช่น 25:11:25)
+- \(D_{\max} \approx 0.45\), ที่ \(V_{in}=340\,\mathrm{V}\) ได้ \(D\approx 0.39\)
+- \(V_{DS,max}\approx 2V_{in}\) → MOSFET **900–1000 V** + RCD snubber
+- \(L \approx 350\,\mu\mathrm{H}\), \(C_o = 470\text{–}1000\,\mu\mathrm{F}\)
 
-- **โทโพโลยี:** Isolated buck-derived (ส่งพลังงานตอน ON)
-- **องค์ประกอบหลัก:** หม้อแปลง (มี reset winding), MOSFET, ไดโอดเรกติไฟเออร์ + ฟรีวีล, ตัวกรอง LC
-- **Duty cycle สูงสุด:** มักจำกัดที่ \(D < 0.5\) เพื่อรีเซ็ตฟลักซ์ในหม้อแปลง
-- **อัตราส่วนแรงดัน:** \(V_o = V_{in} \cdot (N_s/N_p) \cdot D\)
+## สรุปโทโพโลยี
+
+- ส่งพลังงานตอนสวิตช์เปิด: \(V_o = V_{in}\cdot(N_s/N_p)\cdot D\)
+- รีเซ็ตฟลักซ์ด้วยขด Nr: \(D_{\max}\le N_p/(N_p+N_r)\)
+- ความเครียดสวิตช์: \(V_{DS}\approx V_{in}(1+N_p/N_r)\)
