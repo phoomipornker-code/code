@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import argparse
 import math
 
 
@@ -384,7 +385,28 @@ def print_report(d: dict[str, float | str]) -> None:
 
 
 def main() -> None:
-    print_report(design())
+    parser = argparse.ArgumentParser(
+        description="ออกแบบ Forward + Nr บน ETD49 (รองรับ fs 50–100 kHz)"
+    )
+    parser.add_argument(
+        "--fs",
+        type=float,
+        default=65e3,
+        help="ความถี่สวิตช์ Hz (ค่าเริ่ม 65000; ช่วงที่ใช้ได้ 50e3–100e3)",
+    )
+    args = parser.parse_args()
+    fs = args.fs
+    if not 45e3 <= fs <= 120e3:
+        raise SystemExit("แนะนำ fs ในช่วงประมาณ 50–100 kHz")
+    # ที่ fs ต่ำกว่า 80 kHz ลด Bmax เล็กน้อยไม่จำเป็น — คง 0.20 T
+    spec = replace(Spec(), fs=fs)
+    # RCD กำลังลดตาม fs — Ll สมมติเดิม
+    print_report(design(spec))
+    if fs < 80e3:
+        print(
+            "หมายเหตุ: fs 50–67 kHz ใช้ได้ — ต้องเพิ่มจำนวนรอบและ L "
+            "(ห้ามใช้ขด 32:14:32 ของชุด 100 kHz)"
+        )
 
 
 if __name__ == "__main__":

@@ -10,28 +10,30 @@
 | [docs/design-240vac-58v-5a.md](docs/design-240vac-58v-5a.md) | ออกแบบ **AC 240 V → DC 58 V / 5 A** แบบสวิตช์เดียว + Nr |
 | [docs/bom-240vac-58v-5a.md](docs/bom-240vac-58v-5a.md) | **สรุปอุปกรณ์ (BOM)** |
 | [sim/design_240vac_58v_5a.py](sim/design_240vac_58v_5a.py) | เครื่องคิดเลขพารามิเตอร์ |
-| [sim/forward_converter.py](sim/forward_converter.py) | จำลอง waveform (รวมโหมด 240vac-nr) |
+| [sim/forward_converter.py](sim/forward_converter.py) | จำลอง waveform |
 | [requirements.txt](requirements.txt) | dependencies |
 
-## ออกแบบสเปก AC 240 V → 58 V / 5 A (สวิตช์เดียว + Nr)
+## ออกแบบสเปก AC 240 V → 58 V / 5 A
+
+**ความถี่ 50–67 kHz ใช้ได้** — แนะนำ **65 kHz**
 
 ```bash
 pip install -r requirements.txt
-python sim/design_240vac_58v_5a.py
+python sim/design_240vac_58v_5a.py --fs 65000
+python sim/design_240vac_58v_5a.py --fs 50000   # ขอบล่าง
 python sim/forward_converter.py --design 240vac-nr
 ```
 
-จุดออกแบบหลักเมื่อ \(N_r = N_p\) บนแกน **ETD49/25/16 (N87)**:
+จุดออกแบบหลัก (\(N_r = N_p\), แกน **ETD49**, **65 kHz**):
 
-- ขด \(N_p:N_s:N_r = \mathbf{32:14:32}\) (\(n=0.4375\), \(B_{\max}\approx 0.20\,\mathrm{T}\))
-- \(D_{\max} \approx 0.45\), ที่ \(V_{in}=340\,\mathrm{V}\) ได้ \(D\approx 0.39\)
-- \(V_{DS,max}\approx 2V_{in}\) → MOSFET **STW20N95K5** (950 V, TO-247)
-- RCD: **Cs = 1 nF / 1–2 kV**, **Rs = 100 Ω / 10 W**, **Ds = UF4007**
-- ไดโอดรีเซ็ต **Dr = UF4007** (1 A / 1000 V) หรือ STTH112A
-- \(L \approx 350\,\mu\mathrm{H}\), \(C_o = 470\text{–}1000\,\mu\mathrm{F}\)
+- ขด \(N_p:N_s:N_r = \mathbf{50:22:50}\) (\(B_{\max}\approx 0.20\,\mathrm{T}\))
+- MOSFET **STW20N95K5** + RCD (**1 nF**, **100 Ω / 5–10 W**, UF4007)
+- Dr **UF4007**
+- \(L \approx 540\,\mu\mathrm{H}\), \(C_o = 470\text{–}1000\,\mu\mathrm{F}\)
+- ห้ามใช้ขด 32:14:32 กับ fs 50–67 kHz (B จะสูงเกิน)
 
 ## สรุปโทโพโลยี
 
-- ส่งพลังงานตอนสวิตช์เปิด: \(V_o = V_{in}\cdot(N_s/N_p)\cdot D\)
-- รีเซ็ตฟลักซ์ด้วยขด Nr: \(D_{\max}\le N_p/(N_p+N_r)\)
-- ความเครียดสวิตช์: \(V_{DS}\approx V_{in}(1+N_p/N_r)\)
+- \(V_o = V_{in}\cdot(N_s/N_p)\cdot D\)
+- รีเซ็ตด้วย Nr: \(D_{\max}\le N_p/(N_p+N_r)\)
+- \(V_{DS}\approx V_{in}(1+N_p/N_r)\)
