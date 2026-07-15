@@ -356,8 +356,11 @@ def print_report(d: dict[str, float | str]) -> None:
         f"Cs / Rs / Ds (pick)    = "
         f"{d['cs_pick_f']*1e9:.1f} nF / {d['rs_pick']:.0f} Ω / {d['rcd_ds']}"
     )
-    print(f"Rs power (≈½Ll Ip² fs) ≈ {d['p_rcd']:.1f} W  → ใช้ต้านทาน 5–7 W")
-    print(f"Rs ballpark from ΔV    ≈ {d['rs_est']:.0f} Ω  (เริ่มจูนที่ 100 Ω)")
+    print(f"Rs power (≈½Ll Ip² fs) ≈ {d['p_rcd']:.1f} W  → ใช้ต้านทาน 10 W")
+    print(
+        f"Rs tune range         = 47–220 Ω (damping); "
+        f"clamp-style ≈ {d['rs_est']:.0f} Ω"
+    )
     print()
     print("--- Reset diode Dr ---")
     print(f"Recommend              = {d['dr_part']}  (alt: STTH112A)")
