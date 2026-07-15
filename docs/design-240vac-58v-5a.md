@@ -148,7 +148,61 @@ P_{cond}\approx I_{rms}^2 R_{DS(on)}
 | กระแส | เหลือมาร์จิ้นมาก |
 | Gate drive | ใช้ไดรเวอร์ \(+12\,\mathrm{V}\) / 0 V (หรือ −5/12 V ถ้าต้องการปิดเร็ว) |
 
-**RCD snubber ที่ drain จำเป็น** — ไม่เช่นนั้น spike จาก leakage ของ ETD49 อาจเกิน 950 V
+### RCD snubber ที่ drain ของ Q1 — ค่าที่ใช้
+
+ตัด leakage spike เหนือระดับรีเซ็ต \(V_{DS}\approx 2V_{in}\) ไม่ให้เกินเรตติ้ง STW20N95K5 (950 V)
+
+```text
+  drain Q1 ──┬── Ds ──┬── Rs ── Vin(+)   หรือแบบขนาน DS:
+             │        │
+             Cs      GND          drain ── Ds ──┬── Cs ── source
+             │                                 │
+            GND                               Rs
+                                               │
+                                             source
+```
+
+ใช้แบบ **RCD ขนาน drain–source** (นิยมกับ forward + Nr):
+
+| สมมติฐานออกแบบ | ค่า |
+|----------------|-----|
+| \(L_{\ell}\) (leakage ปฐมภูมิ) | **20 µH** เป้าหลัง interleaved (~0.5% ของ \(L_m\)) |
+| \(I_p\) | **3.0 A** (มาร์จิ้น) |
+| \(V_{off}=2V_{in,max}\) | **747 V** |
+| \(V_{clamp}\) เป้า | **880 V** (เหลือจาก 950 V) |
+| \(f_s\) | 100 kHz |
+
+\[
+C_s \ge \frac{L_{\ell} I_p^2}{V_{clamp}^2 - V_{off}^2}
+\approx \frac{20\times10^{-6}\times 9}{880^2-747^2}
+\approx 0.83\,\mathrm{nF}
+\]
+
+\[
+P_R \approx \tfrac12 L_{\ell} I_p^2 f_s
+\approx \tfrac12\times 20\,\mu\mathrm{H}\times 9\times 100\,\mathrm{kHz}
+\approx 9\,\mathrm{W}
+\]
+
+(ถ้า leakage ต่ำลงเป็น 10 µH → \(P_R\approx 4.5\,\mathrm{W}\))
+
+**ค่าเริ่มต้นที่แนะนำ**
+
+| ชิ้นส่วน | ค่า | หมายเหตุ |
+|----------|-----|----------|
+| **Cs** | **1 nF / 1–2 kV** | C0G/NP0 หรือฟิล์ม; ถ้า spike ยังสูง ลอง 1.5–2.2 nF |
+| **Rs** | **100 Ω / 5–7 W** | เริ่มที่ 100 Ω; ร้อนมาก → ลด \(L_{\ell}\) (พันใหม่) ก่อนลด R |
+| **Ds** | **UF4007** (1 A / 1000 V) | ultrafast เหมือน Dr; วางใกล้ drain |
+
+ช่วงจูนบนกระดานจริง:
+
+| อาการ | ปรับ |
+|-------|------|
+| spike ยัง > 900 V | เพิ่ม Cs → 1.5–2.2 nF และ/หรือลด leakage |
+| Rs ร้อนจัด (> 9–10 W) | interleaved ให้ \(L_{\ell}\) ต่ำลง; อย่าลด R จน Cs คายไม่ทัน |
+| ริงกิ้งช้า / EMI | ลอง Rs = 47–150 Ω |
+
+> พลังงานใน RCD ≈ พลังงาน leakage ทุกไซเคิล — **คุณภาพการพันหม้อแปลงสำคัญกว่าการเร่ง Cs/Rs**
 
 ### ไดโอด
 
@@ -219,7 +273,8 @@ N_p \ge \frac{300.5\times 0.45}{211\times 10^{-6}\times 0.20\times 10^5} \approx
 |------|-----|
 | บริดจ์ AC | 600 V / ≥ 4 A |
 | \(C_{in}\) | 150–220 µF / 400–450 V |
-| Q1 | **STW20N95K5** (950 V, TO-247) + RCD snubber + ฮีตซิงก์ |
+| Q1 | **STW20N95K5** (950 V, TO-247) + ฮีตซิงก์ |
+| RCD | **Cs 1 nF / 1–2 kV**, **Rs 100 Ω / 5–7 W**, **Ds UF4007** |
 | หม้อแปลง | **ETD49/25/16**, \(N_p:N_s:N_r = 32:14:32\) |
 | Dr | **UF4007** (1 A / 1000 V) หรือ STTH112A |
 | D1, D2 | ultrafast / SiC Schottky ≥ 200 V |

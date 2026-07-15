@@ -44,6 +44,12 @@ class Spec:
     dr_vrrm: float = 1000.0
     dr_if: float = 1.0
     dr_vf: float = 1.7  # V @ IF ประมาณ
+    # RCD snubber (สมมติ leakage หลัง interleaved)
+    ll_h: float = 20e-6  # H
+    v_clamp: float = 880.0  # V เป้า spike สูงสุด
+    rcd_cs_pick_f: float = 1.0e-9
+    rcd_rs_pick_ohm: float = 100.0
+    rcd_ds_part: str = "UF4007"
 
 
 def ac_to_vdc_peak(vac: float) -> float:
@@ -164,6 +170,17 @@ def design(spec: Spec = Spec()) -> dict[str, float | str]:
     dr_p_est = dr_i_avg * spec.dr_vf
     dr_v_margin = spec.dr_vrrm / dr_vr
 
+    # RCD: จำกัด spike เหนือ 2*Vin
+    v_off = vds_ideal  # ≈ 2*Vin เมื่อ Nr=Np
+    ip_rcd = max(ip_peak, 3.0)  # มาร์จิ้นออกแบบ
+    den_c = spec.v_clamp**2 - v_off**2
+    cs_min = (spec.ll_h * ip_rcd**2) / den_c if den_c > 0 else float("inf")
+    p_rcd = 0.5 * spec.ll_h * ip_rcd**2 * spec.fs
+    # R ให้ tau ≈ 0.2–0.5 ของคาบ; ค่าเริ่มจากกำลังและ ΔV
+    # R ≈ (Vclamp - Voff)^2 / P_rcd  (ประมาณการคายพลังงานต่อรอบ)
+    dv = spec.v_clamp - v_off
+    rs_est = (dv**2) / p_rcd if p_rcd > 0 else 0.0
+
     return {
         "core_name": spec.core_name,
         "ae_mm2": spec.ae_m2 * 1e6,
@@ -238,6 +255,16 @@ def design(spec: Spec = Spec()) -> dict[str, float | str]:
         "dr_i_avg": dr_i_avg,
         "dr_p_est": dr_p_est,
         "dr_v_margin": dr_v_margin,
+        "ll_uh": spec.ll_h * 1e6,
+        "v_off": v_off,
+        "v_clamp": spec.v_clamp,
+        "ip_rcd": ip_rcd,
+        "cs_min_f": cs_min,
+        "cs_pick_f": spec.rcd_cs_pick_f,
+        "rs_est": rs_est,
+        "rs_pick": spec.rcd_rs_pick_ohm,
+        "p_rcd": p_rcd,
+        "rcd_ds": spec.rcd_ds_part,
     }
 
 
@@ -320,6 +347,17 @@ def print_report(d: dict[str, float | str]) -> None:
     print(f"ΔI_L                   = {d['di_l']:.2f} A")
     print(f"L_out                  ≈ {d['l_out_h'] * 1e6:.0f} µH  (choose 330–390 µH)")
     print("C_out                  = 470–1000 µF / ≥80 V + MLCC")
+    print()
+    print("--- RCD snubber (drain–source) ---")
+    print(f"Assume Ll / Ip         = {d['ll_uh']:.0f} µH / {d['ip_rcd']:.1f} A")
+    print(f"Voff (2·Vin) / Vclamp  = {d['v_off']:.0f} / {d['v_clamp']:.0f} V")
+    print(f"Cs min (calc)          ≈ {d['cs_min_f']*1e12:.0f} pF")
+    print(
+        f"Cs / Rs / Ds (pick)    = "
+        f"{d['cs_pick_f']*1e9:.1f} nF / {d['rs_pick']:.0f} Ω / {d['rcd_ds']}"
+    )
+    print(f"Rs power (≈½Ll Ip² fs) ≈ {d['p_rcd']:.1f} W  → ใช้ต้านทาน 5–7 W")
+    print(f"Rs ballpark from ΔV    ≈ {d['rs_est']:.0f} Ω  (เริ่มจูนที่ 100 Ω)")
     print()
     print("--- Reset diode Dr ---")
     print(f"Recommend              = {d['dr_part']}  (alt: STTH112A)")
