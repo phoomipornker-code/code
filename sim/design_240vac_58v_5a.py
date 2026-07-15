@@ -57,32 +57,36 @@ def ac_to_vdc_peak(vac: float) -> float:
     return vac * math.sqrt(2.0)
 
 
-def awg_from_area_mm2(area_mm2: float) -> str:
-    """เลือก AWG เล็กสุดที่พื้นที่ทองแดงยังพอ (แล้วแนะนำ Litz @ 100 kHz)."""
-    # AWG → mm² (หนา → บาง)
-    table = [
-        (15, 1.65),
-        (16, 1.31),
-        (17, 1.04),
-        (18, 0.823),
-        (19, 0.653),
-        (20, 0.518),
-        (21, 0.410),
-        (22, 0.326),
-        (23, 0.258),
-        (24, 0.205),
-        (26, 0.129),
-        (28, 0.081),
-    ]
-    choice = None
-    for awg, a in table:
-        if a >= area_mm2:
-            choice = awg
+def swg_from_area_mm2(area_mm2: float) -> str:
+    """แนะนำเบอร์ SWG (เส้นเดียว + หลายเส้น) จากพื้นที่ทองแดง."""
+    # SWG → เส้นผ่านศูนย์กลาง mm (มาตรฐาน)
+    dia = {
+        19: 1.016,
+        20: 0.914,
+        21: 0.813,
+        22: 0.711,
+        23: 0.610,
+        24: 0.559,
+        25: 0.508,
+        26: 0.457,
+        27: 0.417,
+        28: 0.376,
+        30: 0.315,
+    }
+    area = {g: math.pi * (d / 2) ** 2 for g, d in dia.items()}
+    # เส้นตัน: เบอร์ SWG มากสุด (เส้นเล็กสุด) ที่พื้นที่ยังพอ
+    solid = None
+    for g in sorted(area):  # หนา (เบอร์น้อย) → บาง
+        if area[g] >= area_mm2:
+            solid = g
         else:
             break
-    if choice is None:
-        return f"Litz / หลายเส้น รวม ≥ {area_mm2:.2f} mm²"
-    return f"≥ AWG {choice} หรือ Litz รวม ≥ {area_mm2:.2f} mm²"
+    # หลายเส้น SWG 25
+    a25 = area[25]
+    n25 = max(1, int(math.ceil(area_mm2 / a25 - 1e-12)))
+    if solid is None:
+        return f"{n25}× SWG25 (รวม ≥ {area_mm2:.2f} mm²)"
+    return f"{n25}× SWG25 หรือตัน SWG {solid}"
 
 
 def design(spec: Spec = Spec()) -> dict[str, float | str]:
@@ -229,9 +233,9 @@ def design(spec: Spec = Spec()) -> dict[str, float | str]:
         "ap_cu_mm2": ap_cu,
         "as_cu_mm2": as_cu,
         "ar_cu_mm2": ar_cu,
-        "wire_p": awg_from_area_mm2(ap_cu),
-        "wire_s": awg_from_area_mm2(as_cu),
-        "wire_r": awg_from_area_mm2(ar_cu),
+        "wire_p": swg_from_area_mm2(ap_cu),
+        "wire_s": swg_from_area_mm2(as_cu),
+        "wire_r": swg_from_area_mm2(ar_cu),
         "lm_h": lm_h,
         "im_peak": im_peak,
         "al_nh": al_nh,
@@ -308,7 +312,7 @@ def print_report(d: dict[str, float | str]) -> None:
     print(f"Lm (AL≈{d['al_nh']:.0f} nH/N²)   ≈ {d['lm_h']*1e3:.2f} mH")
     print(f"Im peak (@Vin nom)     ≈ {d['im_peak']:.3f} A")
     print()
-    print("--- Wire (J≈4.5 A/mm², 100 kHz ใช้ Litz/หลายเส้น) ---")
+    print("--- Wire SWG (J≈4.5 A/mm², แนะนำหลายเส้น @ 50–67 kHz) ---")
     print(f"Primary Cu             ≈ {d['ap_cu_mm2']:.2f} mm²  → {d['wire_p']}")
     print(f"Secondary Cu           ≈ {d['as_cu_mm2']:.2f} mm²  → {d['wire_s']}")
     print(f"Reset Nr Cu            ≈ {d['ar_cu_mm2']:.2f} mm²  → {d['wire_r']}")

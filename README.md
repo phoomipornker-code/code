@@ -26,7 +26,8 @@ python sim/forward_converter.py --design 240vac-nr
 
 จุดออกแบบหลัก (\(N_r = N_p\), แกน **ETD49**, **65 kHz**):
 
-- ขด \(N_p:N_s:N_r = \mathbf{50:22:50}\) (\(B_{\max}\approx 0.20\,\mathrm{T}\))
+- ขด \(N_p:N_s:N_r = \mathbf{50:22:50}\) — ลวด **2×SWG25 / 4×SWG25 / SWG27**
+- \(B_{\max}\approx 0.20\,\mathrm{T}\)
 - MOSFET **STW20N95K5** + RCD (**1 nF**, **100 Ω / 5–10 W**, UF4007)
 - Dr **UF4007**
 - \(L \approx 540\,\mu\mathrm{H}\), \(C_o = 470\text{–}1000\,\mu\mathrm{F}\)
