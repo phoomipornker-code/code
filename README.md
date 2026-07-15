@@ -8,6 +8,7 @@
 |------|----------|
 | [docs/forward-converter.md](docs/forward-converter.md) | หลักการทำงานทั่วไป |
 | [docs/design-240vac-58v-5a.md](docs/design-240vac-58v-5a.md) | ออกแบบ **AC 240 V → DC 58 V / 5 A** แบบสวิตช์เดียว + Nr |
+| [docs/bom-240vac-58v-5a.md](docs/bom-240vac-58v-5a.md) | **สรุปอุปกรณ์ (BOM)** |
 | [sim/design_240vac_58v_5a.py](sim/design_240vac_58v_5a.py) | เครื่องคิดเลขพารามิเตอร์ |
 | [sim/forward_converter.py](sim/forward_converter.py) | จำลอง waveform (รวมโหมด 240vac-nr) |
 | [requirements.txt](requirements.txt) | dependencies |
