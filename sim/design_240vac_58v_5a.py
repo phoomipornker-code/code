@@ -346,7 +346,8 @@ def print_report(d: dict[str, float | str]) -> None:
     print()
     print("--- Output LC ---")
     print(f"ΔI_L                   = {d['di_l']:.2f} A")
-    print(f"L_out                  ≈ {d['l_out_h'] * 1e6:.0f} µH  (choose 330–390 µH)")
+    l_uh = d["l_out_h"] * 1e6
+    print(f"L_out                  ≈ {l_uh:.0f} µH  (choose ~{l_uh*0.95:.0f}–{l_uh*1.05:.0f} µH)")
     print("C_out                  = 470–1000 µF / ≥80 V + MLCC")
     print()
     print("--- RCD snubber (drain–source) ---")
