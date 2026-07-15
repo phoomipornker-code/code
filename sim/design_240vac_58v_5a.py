@@ -51,31 +51,43 @@ class Spec:
     rcd_cs_pick_f: float = 1.0e-9
     rcd_rs_pick_ohm: float = 100.0
     rcd_ds_part: str = "UF4007"
+    # ความยาวลวด ETD49 former
+    mlt_m: float = 0.085  # 85 mm average turn (datasheet)
+    wire_margin: float = 1.15
+    prefer_swg: int = 24
 
 
 def ac_to_vdc_peak(vac: float) -> float:
     return vac * math.sqrt(2.0)
 
 
-def swg_from_area_mm2(area_mm2: float, prefer_swg: int = 24) -> str:
-    """แนะนำจำนวนเส้นขนานจากเบอร์ SWG ที่มี (ค่าเริ่ม SWG 24)."""
-    dia = {
-        19: 1.016,
-        20: 0.914,
-        21: 0.813,
-        22: 0.711,
-        23: 0.610,
-        24: 0.559,
-        25: 0.508,
-        26: 0.457,
-        27: 0.417,
-        28: 0.376,
-        30: 0.315,
-    }
-    d = dia[prefer_swg]
+SWG_DIA_MM = {
+    19: 1.016,
+    20: 0.914,
+    21: 0.813,
+    22: 0.711,
+    23: 0.610,
+    24: 0.559,
+    25: 0.508,
+    26: 0.457,
+    27: 0.417,
+    28: 0.376,
+    30: 0.315,
+}
+
+
+def swg_parallels(area_mm2: float, prefer_swg: int = 24) -> tuple[int, float]:
+    """คืน (จำนวนเส้นขนาน, พื้นที่ต่อเส้น mm²)."""
+    d = SWG_DIA_MM[prefer_swg]
     a = math.pi * (d / 2) ** 2
     n = max(1, int(math.ceil(area_mm2 / a - 1e-12)))
-    return f"{n}× SWG{prefer_swg} (รวม {n*a:.2f} mm²)"
+    return n, a
+
+
+def swg_from_area_mm2(area_mm2: float, prefer_swg: int = 24) -> str:
+    """แนะนำจำนวนเส้นขนานจากเบอร์ SWG ที่มี (ค่าเริ่ม SWG 24)."""
+    n, a = swg_parallels(area_mm2, prefer_swg)
+    return f"{n}× SWG{prefer_swg} (รวม {n * a:.2f} mm²)"
 
 
 def design(spec: Spec = Spec()) -> dict[str, float | str]:
@@ -222,9 +234,26 @@ def design(spec: Spec = Spec()) -> dict[str, float | str]:
         "ap_cu_mm2": ap_cu,
         "as_cu_mm2": as_cu,
         "ar_cu_mm2": ar_cu,
-        "wire_p": swg_from_area_mm2(ap_cu),
-        "wire_s": swg_from_area_mm2(as_cu),
-        "wire_r": swg_from_area_mm2(ar_cu),
+        "wire_p": swg_from_area_mm2(ap_cu, spec.prefer_swg),
+        "wire_s": swg_from_area_mm2(as_cu, spec.prefer_swg),
+        "wire_r": swg_from_area_mm2(ar_cu, spec.prefer_swg),
+        "par_p": float(swg_parallels(ap_cu, spec.prefer_swg)[0]),
+        "par_s": float(swg_parallels(as_cu, spec.prefer_swg)[0]),
+        "par_r": float(swg_parallels(ar_cu, spec.prefer_swg)[0]),
+        "wire_len_p_m": np_turns
+        * spec.mlt_m
+        * spec.wire_margin
+        * swg_parallels(ap_cu, spec.prefer_swg)[0],
+        "wire_len_s_m": ns_turns
+        * spec.mlt_m
+        * spec.wire_margin
+        * swg_parallels(as_cu, spec.prefer_swg)[0],
+        "wire_len_r_m": nr_turns
+        * spec.mlt_m
+        * spec.wire_margin
+        * swg_parallels(ar_cu, spec.prefer_swg)[0],
+        "mlt_mm": spec.mlt_m * 1e3,
+        "prefer_swg": float(spec.prefer_swg),
         "lm_h": lm_h,
         "im_peak": im_peak,
         "al_nh": al_nh,
@@ -305,6 +334,20 @@ def print_report(d: dict[str, float | str]) -> None:
     print(f"Primary Cu             ≈ {d['ap_cu_mm2']:.2f} mm²  → {d['wire_p']}")
     print(f"Secondary Cu           ≈ {d['as_cu_mm2']:.2f} mm²  → {d['wire_s']}")
     print(f"Reset Nr Cu            ≈ {d['ar_cu_mm2']:.2f} mm²  → {d['wire_r']}")
+    len_tot = d["wire_len_p_m"] + d["wire_len_s_m"] + d["wire_len_r_m"]
+    print(
+        f"MLT ETD49 former       = {d['mlt_mm']:.0f} mm (+15% leads)"
+    )
+    print(
+        f"Wire length Np/Ns/Nr   ≈ "
+        f"{d['wire_len_p_m']:.1f} / {d['wire_len_s_m']:.1f} / "
+        f"{d['wire_len_r_m']:.1f} m"
+    )
+    print(
+        f"Total SWG{int(d['prefer_swg'])}            ≈ "
+        f"{len_tot:.1f} m  → เตรียม ≥ {math.ceil(len_tot * 1.1)} m "
+        f"(แนะนำซื้อ 25 m)"
+    )
     print()
     print("--- MOSFET Q1: STW20N95K5 ---")
     print(f"Part                   = {d['mosfet']} (TO-247, MDmesh K5)")
