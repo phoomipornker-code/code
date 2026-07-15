@@ -57,9 +57,8 @@ def ac_to_vdc_peak(vac: float) -> float:
     return vac * math.sqrt(2.0)
 
 
-def swg_from_area_mm2(area_mm2: float) -> str:
-    """แนะนำเบอร์ SWG (เส้นเดียว + หลายเส้น) จากพื้นที่ทองแดง."""
-    # SWG → เส้นผ่านศูนย์กลาง mm (มาตรฐาน)
+def swg_from_area_mm2(area_mm2: float, prefer_swg: int = 24) -> str:
+    """แนะนำจำนวนเส้นขนานจากเบอร์ SWG ที่มี (ค่าเริ่ม SWG 24)."""
     dia = {
         19: 1.016,
         20: 0.914,
@@ -73,20 +72,10 @@ def swg_from_area_mm2(area_mm2: float) -> str:
         28: 0.376,
         30: 0.315,
     }
-    area = {g: math.pi * (d / 2) ** 2 for g, d in dia.items()}
-    # เส้นตัน: เบอร์ SWG มากสุด (เส้นเล็กสุด) ที่พื้นที่ยังพอ
-    solid = None
-    for g in sorted(area):  # หนา (เบอร์น้อย) → บาง
-        if area[g] >= area_mm2:
-            solid = g
-        else:
-            break
-    # หลายเส้น SWG 25
-    a25 = area[25]
-    n25 = max(1, int(math.ceil(area_mm2 / a25 - 1e-12)))
-    if solid is None:
-        return f"{n25}× SWG25 (รวม ≥ {area_mm2:.2f} mm²)"
-    return f"{n25}× SWG25 หรือตัน SWG {solid}"
+    d = dia[prefer_swg]
+    a = math.pi * (d / 2) ** 2
+    n = max(1, int(math.ceil(area_mm2 / a - 1e-12)))
+    return f"{n}× SWG{prefer_swg} (รวม {n*a:.2f} mm²)"
 
 
 def design(spec: Spec = Spec()) -> dict[str, float | str]:
