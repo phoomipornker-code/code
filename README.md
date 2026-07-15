@@ -25,6 +25,7 @@ python sim/forward_converter.py --design 240vac-nr
 - ขด \(N_p:N_s:N_r = \mathbf{32:14:32}\) (\(n=0.4375\), \(B_{\max}\approx 0.20\,\mathrm{T}\))
 - \(D_{\max} \approx 0.45\), ที่ \(V_{in}=340\,\mathrm{V}\) ได้ \(D\approx 0.39\)
 - \(V_{DS,max}\approx 2V_{in}\) → MOSFET **STW20N95K5** (950 V, TO-247) + RCD snubber
+- ไดโอดรีเซ็ต **Dr = UF4007** (1 A / 1000 V) หรือ STTH112A
 - \(L \approx 350\,\mu\mathrm{H}\), \(C_o = 470\text{–}1000\,\mu\mathrm{F}\)
 
 ## สรุปโทโพโลยี

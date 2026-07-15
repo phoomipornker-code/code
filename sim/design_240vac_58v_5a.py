@@ -39,6 +39,11 @@ class Spec:
     mosfet_id_100c: float = 11.0
     mosfet_qg_nc: float = 40.0
     mosfet_vdrive: float = 10.0
+    # ไดโอดรีเซ็ต Dr
+    dr_part: str = "UF4007"
+    dr_vrrm: float = 1000.0
+    dr_if: float = 1.0
+    dr_vf: float = 1.7  # V @ IF ประมาณ
 
 
 def ac_to_vdc_peak(vac: float) -> float:
@@ -151,6 +156,14 @@ def design(spec: Spec = Spec()) -> dict[str, float | str]:
     p_fet_est = p_cond + p_sw_est + p_gate
     vds_margin = spec.mosfet_vdss / vds_ideal
 
+    # ไดโอดรีเซ็ต Dr: VR ≈ Vin*(Nr/Np), I ≈ Im*(Np/Nr)
+    dr_vr = vin_max * spec.nr_over_np
+    dr_i_peak = im_peak * (1.0 / spec.nr_over_np)
+    # avg ≈ (Im_peak/2) * (t_reset/Ts), t_reset/Ts = D*(Nr/Np)
+    dr_i_avg = 0.5 * dr_i_peak * d_at_vin_nom * spec.nr_over_np
+    dr_p_est = dr_i_avg * spec.dr_vf
+    dr_v_margin = spec.dr_vrrm / dr_vr
+
     return {
         "core_name": spec.core_name,
         "ae_mm2": spec.ae_m2 * 1e6,
@@ -217,6 +230,14 @@ def design(spec: Spec = Spec()) -> dict[str, float | str]:
         "p_gate": p_gate,
         "p_fet_est": p_fet_est,
         "vds_margin": vds_margin,
+        "dr_part": spec.dr_part,
+        "dr_vrrm": spec.dr_vrrm,
+        "dr_if": spec.dr_if,
+        "dr_vr": dr_vr,
+        "dr_i_peak": dr_i_peak,
+        "dr_i_avg": dr_i_avg,
+        "dr_p_est": dr_p_est,
+        "dr_v_margin": dr_v_margin,
     }
 
 
@@ -300,12 +321,25 @@ def print_report(d: dict[str, float | str]) -> None:
     print(f"L_out                  ≈ {d['l_out_h'] * 1e6:.0f} µH  (choose 330–390 µH)")
     print("C_out                  = 470–1000 µF / ≥80 V + MLCC")
     print()
-    print("--- Diodes ---")
+    print("--- Reset diode Dr ---")
+    print(f"Recommend              = {d['dr_part']}  (alt: STTH112A)")
+    print(f"VRRM / IF rating       = {d['dr_vrrm']:.0f} V / {d['dr_if']:.0f} A")
+    print(
+        f"VR stress / margin     = "
+        f"{d['dr_vr']:.0f} V / {d['dr_v_margin']:.1f}×"
+    )
+    print(
+        f"Ipeak / Iavg           ≈ "
+        f"{d['dr_i_peak']:.2f} / {d['dr_i_avg']:.3f} A"
+    )
+    print(f"P_Dr (est.)            ≈ {d['dr_p_est']:.2f} W  (ไม่ต้องฮีตซิงก์)")
+    print()
+    print("--- Output diodes D1/D2 ---")
     print(f"D1/D2 VRRM             ≥ {d['diode_vrrm']:.0f} V  → use 200–300 V")
     print(f"D1 / D2 Iavg           ≈ {d['d1_iavg']:.2f} / {d['d2_iavg']:.2f} A")
     print(f"fs                     = {d['fs'] / 1e3:.0f} kHz")
     print("=" * 62)
-    print("STW20N95K5: ต้องมี RCD snubber ที่ drain — interleaved winding ลด leakage")
+    print("STW20N95K5 + UF4007(Dr): ต้องมี RCD ที่ drain — interleaved ลด leakage")
 
 
 def main() -> None:
