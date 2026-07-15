@@ -29,6 +29,16 @@ class Spec:
     ve_m3: float = 24100e-9  # 24100 mm³
     b_max_t: float = 0.20  # T @ 100 kHz (N87)
     j_a_per_mm2: float = 4.5  # ความหนาแน่นกระแสลวด
+    # STW20N95K5 (MDmesh K5, TO-247)
+    mosfet: str = "STW20N95K5"
+    mosfet_vdss: float = 950.0
+    mosfet_rds_typ: float = 0.275
+    mosfet_rds_max: float = 0.330
+    mosfet_rds_hot: float = 0.45  # ประมาณที่ Tj สูง
+    mosfet_id_25c: float = 17.5
+    mosfet_id_100c: float = 11.0
+    mosfet_qg_nc: float = 40.0
+    mosfet_vdrive: float = 10.0
 
 
 def ac_to_vdc_peak(vac: float) -> float:
@@ -133,6 +143,14 @@ def design(spec: Spec = Spec()) -> dict[str, float | str]:
     lm_h = al_nh * 1e-9 * (np_turns**2)
     im_peak = (vin_nom * d_at_vin_nom) / (lm_h * spec.fs)
 
+    # สูญเสีย STW20N95K5 ประมาณ
+    p_cond = (ip_rms_approx**2) * spec.mosfet_rds_hot
+    p_gate = spec.mosfet_qg_nc * 1e-9 * spec.mosfet_vdrive * spec.fs
+    # สวิตชิ่งหยาบสมมติ tr+tf ≈ 40 ns
+    p_sw_est = 0.5 * vin_nom * ip_peak * 40e-9 * spec.fs
+    p_fet_est = p_cond + p_sw_est + p_gate
+    vds_margin = spec.mosfet_vdss / vds_ideal
+
     return {
         "core_name": spec.core_name,
         "ae_mm2": spec.ae_m2 * 1e6,
@@ -186,12 +204,25 @@ def design(spec: Spec = Spec()) -> dict[str, float | str]:
         "lm_h": lm_h,
         "im_peak": im_peak,
         "al_nh": al_nh,
+        "mosfet": spec.mosfet,
+        "mosfet_vdss": spec.mosfet_vdss,
+        "mosfet_rds_typ": spec.mosfet_rds_typ,
+        "mosfet_rds_max": spec.mosfet_rds_max,
+        "mosfet_rds_hot": spec.mosfet_rds_hot,
+        "mosfet_id_25c": spec.mosfet_id_25c,
+        "mosfet_id_100c": spec.mosfet_id_100c,
+        "mosfet_qg_nc": spec.mosfet_qg_nc,
+        "p_cond": p_cond,
+        "p_sw_est": p_sw_est,
+        "p_gate": p_gate,
+        "p_fet_est": p_fet_est,
+        "vds_margin": vds_margin,
     }
 
 
 def print_report(d: dict[str, float | str]) -> None:
     print("=" * 62)
-    print("Single-Switch Forward + Nr reset  |  Core: ETD49")
+    print("Single-Switch Forward + Nr  |  ETD49  |  STW20N95K5")
     print("AC 240 V → DC 58 V / 5 A")
     print("=" * 62)
     print(f"Po / Pin (@η)          = {d['po']:.1f} W / {d['pin']:.1f} W")
@@ -233,13 +264,35 @@ def print_report(d: dict[str, float | str]) -> None:
     print(f"Secondary Cu           ≈ {d['as_cu_mm2']:.2f} mm²  → {d['wire_s']}")
     print(f"Reset Nr Cu            ≈ {d['ar_cu_mm2']:.2f} mm²  → {d['wire_r']}")
     print()
-    print("--- Reset / switch stress ---")
+    print("--- MOSFET Q1: STW20N95K5 ---")
+    print(f"Part                   = {d['mosfet']} (TO-247, MDmesh K5)")
+    print(
+        f"VDSS / ID              = "
+        f"{d['mosfet_vdss']:.0f} V / {d['mosfet_id_25c']:.1f} A (25°C), "
+        f"{d['mosfet_id_100c']:.1f} A (100°C)"
+    )
+    print(
+        f"RDS(on) typ/max/hot    = "
+        f"{d['mosfet_rds_typ']:.3f} / {d['mosfet_rds_max']:.3f} / "
+        f"{d['mosfet_rds_hot']:.2f} Ω"
+    )
+    print(f"Qg                     ≈ {d['mosfet_qg_nc']:.0f} nC @ 10 V")
     print(f"Nr/Np                  = {d['nr_over_np']:.2f}")
     print(f"Dmax theory / use      = {d['d_max_theory']:.3f} / {d['d_max_use']:.3f}")
     print(
         f"Vds ideal / +15%       = "
-        f"{d['vds_ideal']:.0f} / {d['vds_with_margin']:.0f} V  → MOSFET 900–1000 V"
+        f"{d['vds_ideal']:.0f} / {d['vds_with_margin']:.0f} V"
     )
+    print(
+        f"Voltage margin         = "
+        f"{d['vds_margin']:.2f}×  (950/{d['vds_ideal']:.0f}) — ใช้ได้ถ้ามี RCD"
+    )
+    print(f"Q1 Ipeak / Irms≈       = {d['ip_peak']:.2f} / {d['ip_rms_approx']:.2f} A")
+    print(
+        f"Pcond / Psw≈ / Pgate   ≈ "
+        f"{d['p_cond']:.2f} / {d['p_sw_est']:.2f} / {d['p_gate']:.2f} W"
+    )
+    print(f"P_FET total (est.)     ≈ {d['p_fet_est']:.1f} W  → ติดฮีตซิงก์")
     print(f"Vs nom / max           = {d['vs_nom']:.1f} / {d['vs_max']:.1f} V")
     print()
     print("--- Output LC ---")
@@ -247,13 +300,12 @@ def print_report(d: dict[str, float | str]) -> None:
     print(f"L_out                  ≈ {d['l_out_h'] * 1e6:.0f} µH  (choose 330–390 µH)")
     print("C_out                  = 470–1000 µF / ≥80 V + MLCC")
     print()
-    print("--- Device stress ---")
-    print(f"Q1 Ipeak / Irms≈       = {d['ip_peak']:.2f} / {d['ip_rms_approx']:.2f} A")
+    print("--- Diodes ---")
     print(f"D1/D2 VRRM             ≥ {d['diode_vrrm']:.0f} V  → use 200–300 V")
     print(f"D1 / D2 Iavg           ≈ {d['d1_iavg']:.2f} / {d['d2_iavg']:.2f} A")
     print(f"fs                     = {d['fs'] / 1e3:.0f} kHz")
     print("=" * 62)
-    print("พันแบบ interleaved (P/S/P หรือ P/S/R) ลด leakage — ต้องมี RCD ที่ Q1")
+    print("STW20N95K5: ต้องมี RCD snubber ที่ drain — interleaved winding ลด leakage")
 
 
 def main() -> None:
