@@ -1,0 +1,25 @@
+flowchart TD
+    A(["① START / ปุ่ม START<br/>system_ON = true"]) --> B["② ตรวจอินพุต<br/>PV ≥ 42V หรือ AC ≥ 140V?"]
+    B -- ไม่มีไฟ --> Z["②b แจ้ง NO INPUT / กลับ Standby"]
+    B -- มีไฟ --> C{"③ เลือกโหมด<br/>PV ก่อน แล้วค่อย AC"}
+    C -- PV พอ --> BOOST["→ STATE_BOOST<br/>ดูโฟลว์บูสต์แยก"]
+    C -- AC พอ --> D["④ เข้า STATE_FORWARD<br/>รีเลย์ AC ON, PV OFF<br/>seed duty = 10, เคลียร์ PID"]
+    D --> E["⑤ อ่าน ADS1115<br/>V_ac, V_bat, I_bat + ฟิลเตอร์"]
+    E --> F{"⑥ Fault / กันพัง?<br/>OVP latch, ADC timeout,<br/>AC ต่ำกว่า 140V"}
+    F -- ใช่ --> G["⑦ ปิด PWM + ตัดรีเลย์<br/>forceSafeShutdown / OFF"]
+    G --> E
+    F -- ไม่ --> H{"⑧ FULL HOLD?<br/>charge_full_hold"}
+    H -- ใช่ --> I{"⑨ Vbat ≤ 54.0V<br/>และมีไฟเข้า?"}
+    I -- ใช่ --> J["⑩ ปลด HOLD แล้วชาร์จต่อ"]
+    I -- ไม่ --> K["⑩b คงหยุด PWM<br/>รอแรงดันตก"]
+    K --> E
+    J --> E
+    H -- ไม่ --> L["⑪ คำนวณ PID_CC<br/>e_cc = 6.0 − Ibat<br/>ออก pid_out_cc"]
+    L --> M["⑫ คำนวณ PID_CV<br/>e_cv = 56.0 − Vbat<br/>deadband 0.12V"]
+    M --> N["⑬ รวมคำสั่ง<br/>final = min(pid_out_cc, pid_out_cv)<br/>จำกัดประมาณ −4 … +1.5"]
+    N --> O["⑭ สะสม Duty<br/>duty_acc += final<br/>clamp ≤ MAX_DUTY_FORWARD=490"]
+    O --> P["⑮ เขียน PWM Forward<br/>quantize + dither → GPIO14<br/>Boost PWM = 0"]
+    P --> Q{"⑯ หยุดชาร์จสูงแรงดัน?<br/>Vbat ≥ 56.8V นาน 300ms"}
+    Q -- ใช่ --> R["⑰ FULL HOLD<br/>disablePowerStage"]
+    Q -- ไม่ --> E
+    R --> E
