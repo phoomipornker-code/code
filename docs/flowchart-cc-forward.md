@@ -1,206 +1,95 @@
-# โฟลว์ชาร์ต Current Mode Control (CC) — Forward Converter
+# โฟลว์ชาร์ต CC → CV — Forward Converter (มีหมายเลข + อธิบายไทย)
 
-Peak **Current Mode Control** สำหรับ Single-Switch Forward + Nr  
-สเปก: AC 240 V → DC 58 V / 5 A | \(f_s \approx 65\,\mathrm{kHz}\) | Q1 = STW20N95K5
+Single-Switch Forward + Nr | AC 240 V → ชาร์จแบต **58.4 V / 5 A** | \(f_s=65\,\mathrm{kHz}\) | Q1 = STW20N95K5
+
+ไฟล์ Mermaid: [`flowchart-cc-cv-forward.mmd`](flowchart-cc-cv-forward.mmd)
 
 ---
 
-## 0. โฟลว์ชาร์ตหลักแบบ CC → CV (สไตล์เดียวกับบูสต์ชาร์จเจอร์)
-
-โครงสร้างเหมือนวงจรบูสต์ (Soft-start → Fault → CC → CV → Charge done → Recharge)  
-แต่ฝั่งอินพุตเป็น **AC 240 V / Forward** ไม่มี MPPT/PV — ใช้ลิมิตกำลังและ Peak-CC แทน
+## แผนภาพรวม (หมายเลข ①–⑯)
 
 ```mermaid
 flowchart TD
-    A([START]) --> B["Init: fsw=65kHz, Vcv=58.4V, Vrecharge=53.6V,\nIcc_ref=5.0A, Ibat_hard=5.8A,\nIp_peak_max=3.5A, P_limit=290W, Dmax=0.45"]
-    B --> C[Soft-start PWM]
-    C --> D[Read Vin Vbat Ibat Temp / BMS]
-    D --> E{Fault? OVP/OCP/OTP/UVLO/BMS}
-    E -- Yes --> X[PWM OFF + Fault handling] --> D
-    E -- No --> F{Vbat >= 58.2V ต่อเนื่อง 5-10s ?}
+    A(["① START<br/>เริ่มทำงาน"]) --> B["② Init ตั้งค่า<br/>fsw=65kHz, Vcv=58.4V, Vrecharge=53.6V<br/>Icc_ref=5.0A, Ibat_hard=5.8A<br/>Ip_peak_max=3.5A, P_limit=290W, Dmax=0.45"]
+    B --> C["③ Soft-start PWM<br/>ค่อยๆ เพิ่ม duty/กระแส"]
+    C --> D["④ อ่านค่าเซนเซอร์<br/>Vin, Vbat, Ibat, Temp / BMS"]
+    D --> E{"⑤ มี Fault?<br/>OVP / OCP / OTP / UVLO / BMS"}
+    E -- ใช่ --> X["⑥ ปิด PWM + จัดการ Fault"] --> D
+    E -- ไม่ --> F{"⑦ Vbat ≥ 58.2V<br/>ต่อเนื่อง 5–10 วินาที?"}
 
-    F -- No --> G["CC Mode\nIref = min(Icc_ref, P_limit/(eta*Vbat), I_limit)\nPeak-CC: Vcomp จาก Iref"]
-    G --> H["Current PI / Peak-CC\n-> Duty or Ipeak clamp\n-> D <= 0.45 -> PWM update"]
+    F -- ไม่ --> G["⑧ โหมด CC<br/>Iref = min(Icc_ref, P_limit/(η·Vbat), I_limit)<br/>Peak-CC: สร้าง Vcomp จาก Iref"]
+    G --> H["⑨ ลูปกระแส / Peak-CC<br/>จำกัด Duty ≤ 0.45 แล้วอัปเดต PWM"]
     H --> D
 
-    F -- Yes --> I["CV Mode\nVref = 58.4V"]
-    I --> J[Voltage PI -> Iref_req]
-    J --> K["Iref = min(Iref_req, I_limit,\nP_limit/(eta*Vbat))"]
-    K --> L["Current PI / Peak-CC\n-> Duty or Ipeak clamp\n-> D <= 0.45 -> PWM update"]
-    L --> M{Ibat <= Icut ต่อเนื่อง T_end ?}
-    M -- No --> D
-    M -- Yes --> N[Charge done: stop PWM หรือ standby]
-    N --> O{Vbat <= Vrecharge ?}
-    O -- Yes --> G
-    O -- No --> N
-```
-
-ไฟล์ Mermaid ล้วน: [`flowchart-cc-cv-forward.mmd`](flowchart-cc-cv-forward.mmd)
-
-### เทียบกับโฟลว์บูสต์ (PV)
-
-| บูสต์ (ตัวอย่าง) | Forward (ดีไซน์นี้) |
-|------------------|---------------------|
-| MPPT คุมฝั่ง PV | ไม่มี — อินพุต AC + บัส DC |
-| `Ipv_soft/hard` | `Icc_ref=5A`, `Ibat_hard≈5.8A` |
-| `Ppv_limit=650W` | `P_limit≈290W` (58V×5A) |
-| Duty จากบูสต์ | Duty / Vcomp จาก Forward, **`Dmax=0.45`** |
-| `fsw=50kHz` | **`fsw=65kHz`** (ช่วง 50–67 kHz ได้) |
-
-### พารามิเตอร์แนะนำ
-
-| ตัวแปร | ค่า |
-|--------|-----|
-| `Icc_ref` | 5.0 A |
-| `Vcv` | 58.4 V |
-| `Vrecharge` | 53.6 V |
-| `Icut` | ≈ 0.25–0.5 A (5–10% ของ Icc) |
-| `T_end` | หลายสิบวินาทีถึงนาที ตามแบต |
-| `Dmax` | **0.45** (Nr = Np) |
-| `Ip_peak_max` | ≈ 3.5 A |
-| `P_limit` | 290 W |
-| `eta` | ≈ 0.88–0.90 |
-
-> Analog Peak-CC (UC384x): PI ฝั่งนอกออกเป็น **Vcomp / Ipeak_ref** ไม่บวก Duty โดยตรง — latch ตัดเกตเมื่อ `Vs ≥ Vcomp`
-
----
-
-## 1. บล็อกไดอะแกรมระบบ
-
-```text
-                    ┌─────────────────────────────────────────┐
-   AC 240V → Bridge → Cin → [Forward + Nr] → LC → Vo 58V/5A  │
-                    │         Q1 STW20N95K5                    │
-                    │              ▲ gate                      │
-                    │         Driver 10–12V                    │
-                    │              ▲                           │
-                    │         PWM latch (UC384x ฯลฯ)           │
-                    │         ▲           ▲                    │
-                    │    Vsense      Vcomp (จากออปโต)         │
-                    │    (Rsense)         ▲                    │
-                    │                     │                    │
-                    │              Opto ← TL431 ← Vo           │
-                    └─────────────────────────────────────────┘
-```
-
-| ลูป | หน้าที่ |
-|-----|---------|
-| **Current loop (เร็ว)** | เปรียบเทียบ \(v_{sense}=i_p R_s\) กับ \(v_c\) → ตัดเกตเมื่อถึงพีค |
-| **Voltage loop (ช้า)** | TL431 + ออปโต ปรับ \(v_c\) ให้ \(V_o=58\,\mathrm{V}\) |
-
----
-
-## 2. โฟลว์ชาร์ตต่อรอบสวิตช์ (Peak CC)
-
-```mermaid
-flowchart TD
-    A([เริ่มรอบ: Clock / Oscillator]) --> B[Set PWM latch<br/>เปิดเกต Q1]
-    B --> C[กระแสปฐมภูมิ ip เพิ่ม<br/>Vs = ip × Rsense]
-    C --> D{Vs ≥ Vcomp<br/>หรือ hit current limit?}
-    D -->|ยังไม่| C
-    D -->|ใช่| E[Reset PWM latch<br/>ปิดเกต Q1]
-    E --> F[รีเซ็ตฟลักซ์ผ่าน Nr + Dr<br/>D2 ฟรีวีลด้านทุติยภูมิ]
-    F --> G{หมดคาบ Ts?<br/>รอ clock ถัดไป}
-    G -->|ยัง| F
-    G -->|ใช่| A
-
-    H[Voltage loop<br/>TL431 เทียบ Vo กับ 2.5V ref] -.->|ปรับ Vcomp ผ่านออปโต| D
-```
-
-### คำอธิบายสั้น
-
-1. **Clock** เปิด MOSFET ทุกต้นรอบ  
-2. กระแส \(i_p\) ไหลผ่าน \(R_{sense}\) → \(V_s\)  
-3. เมื่อ \(V_s \ge V_{comp}\) → **ปิดเกตทันที** (cycle-by-cycle)  
-4. ช่วง OFF: Nr รีเซ็ตแกน, D2 ฟรีวีล  
-5. TL431 ดู \(V_o\) แล้วดึงออปโต → เปลี่ยน \(V_{comp}\) (ตั้งพีคกระแส)
-
----
-
-## 3. โฟลว์ชาร์ตลำดับทำงานทั้งระบบ
-
-```mermaid
-flowchart TD
-    S([จ่าย AC / Soft-start]) --> S1[ชาร์จ Cin ผ่าน NTC/ฟิวส์]
-    S1 --> S2[VCC คอนโทรลเลอร์ขึ้น<br/>UVLO ปล่อย]
-    S2 --> S3[Soft-start: Vcomp เพิ่มช้า ๆ]
-    S3 --> RUN{โหมดปกติ CC}
-
-    RUN --> CLK[Clock เปิด Q1]
-    CLK --> RAMP[ip เพิ่มขึ้น]
-    RAMP --> CMP{Vs ≥ Vcomp?}
-    CMP -->|No| RAMP
-    CMP -->|Yes| OFF[ปิด Q1]
-    OFF --> RST[Reset winding + freewheel]
-    RST --> FB[TL431 ปรับออปโต → Vcomp]
-    FB --> PROT{Fault?}
-
-    PROT -->|OVP / OCP / OTP / UVLO| FLT[Latch off / hiccup]
-    PROT -->|ปกติ| CLK
-    FLT --> WAIT[รอรีเซ็ต / soft-start ใหม่]
-    WAIT --> S2
+    F -- ใช่ --> I["⑩ โหมด CV<br/>Vref = 58.4V"]
+    I --> J["⑪ Voltage PI<br/>คำนวณ Iref_req จากความผิดพลาดแรงดัน"]
+    J --> K["⑫ จำกัด Iref<br/>Iref = min(Iref_req, I_limit, P_limit/(η·Vbat))"]
+    K --> L["⑬ ลูปกระแส / Peak-CC<br/>จำกัด Duty ≤ 0.45 แล้วอัปเดต PWM"]
+    L --> M{"⑭ Ibat ≤ Icut<br/>ต่อเนื่องครบ T_end ?"}
+    M -- ไม่ --> D
+    M -- ใช่ --> N["⑮ Charge done<br/>หยุด PWM หรือเข้า standby"]
+    N --> O{"⑯ Vbat ≤ Vrecharge<br/>53.6V ?"}
+    O -- ใช่ --> G
+    O -- ไม่ --> N
 ```
 
 ---
 
-## 4. โฟลว์ชาร์ตป้องกัน (Protection)
+## อธิบายแต่ละขั้น (ภาษาไทย)
 
-```mermaid
-flowchart LR
-    subgraph sense [ตรวจจับ]
-        A1[Vsense สูงเกิน<br/>OCP]
-        A2[Vo สูงเกิน<br/>OVP via TL431]
-        A3[VCC ต่ำ<br/>UVLO]
-        A4[อุณหภูมิ<br/>OTP ถ้ามี]
-    end
-
-    subgraph action [การตอบสนอง]
-        B1[ตัดเกตทันที<br/>cycle-by-cycle]
-        B2[ดึง COMP ลง / ปิด PWM]
-        B3[หยุดสวิตช์<br/>จน VCC กลับ]
-    end
-
-    A1 --> B1
-    A2 --> B2
-    A3 --> B3
-    A4 --> B2
-```
+| ขั้น | ชื่อ | คำอธิบาย |
+|------|------|----------|
+| **①** | START | เปิดเครื่อง / เริ่มเฟิร์มแวร์คอนโทรลเลอร์ |
+| **②** | Init ตั้งค่า | โหลดพารามิเตอร์: ความถี่ 65 kHz, เป้า CV 58.4 V, จุดรีชาร์จ 53.6 V, กระแส CC 5 A, ลิมิตกระแส/กำลัง, **Dmax=0.45** (เพื่อรีเซ็ตขด Nr) |
+| **③** | Soft-start PWM | ค่อยๆ เปิดสวิตช์ ไม่ให้กระแสพุ่งตอนสตาร์ท (เพิ่ม Vcomp หรือ Duty ช้าๆ) |
+| **④** | อ่านเซนเซอร์ | วัดแรงดันบัสอินพุต \(V_{in}\), แรงดันแบต \(V_{bat}\), กระแสชาร์จ \(I_{bat}\), อุณหภูมิ และสถานะ BMS |
+| **⑤** | ตรวจ Fault | เช็กผิดปกติ: แรงดันเกิน (OVP), กระแสเกิน (OCP), อุณหภูมิเกิน (OTP), แรงดันต่ำ (UVLO), BMS ตัด |
+| **⑥** | จัดการ Fault | ปิด PWM ทันที แล้ววนกลับไปอ่านค่าใหม่ / รอเคลียร์ฟอลต์ก่อนทำงานต่อ |
+| **⑦** | เงื่อนไขเข้า CV | ถ้า \(V_{bat}\) คงที่ ≥ 58.2 V นาน 5–10 วินาที → พร้อมเข้าโหมดแรงดันคงที่; ยังไม่ถึง → อยู่โหมด CC |
+| **⑧** | โหมด CC | ชาร์จกระแสคงที่: ตั้ง \(I_{ref}\) จากค่าที่น้อยที่สุดระหว่าง 5 A, ลิมิตกำลัง \(P/(ηV_{bat})\), และลิมิตฮาร์ดแวร์ แล้วแปลงเป็น Vcomp สำหรับ Peak-CC |
+| **⑨** | อัปเดต PWM (CC) | ลูปกระแส/Peak-CC ปรับ Duty หรือพีคกระแส แล้ว **คลัมป์ Duty ≤ 0.45** จากนั้นอัปเดตเกต MOSFET แล้วกลับไป ④ |
+| **⑩** | โหมด CV | เปลี่ยนเป้าเป็นแรงดันคงที่ \(V_{ref}=58.4\,\mathrm{V}\) (ดูดซับชาร์จช่วงท้าย) |
+| **⑪** | Voltage PI | คำนวณความผิดพลาด \(e=V_{ref}-V_{bat}\) ผ่าน PI ได้ \(I_{ref,req}\) (กระแสที่ต้องการเพื่อคุมแรงดัน) |
+| **⑫** | จำกัด Iref | กันกระแสเกิน: \(I_{ref}=\min(I_{ref,req},\,I_{limit},\,P_{limit}/(ηV_{bat}))\) |
+| **⑬** | อัปเดต PWM (CV) | เหมือนขั้น ⑨ แต่ใช้ \(I_{ref}\) จากลูปแรงดัน — ยังต้อง **D ≤ 0.45** |
+| **⑭** | จบชาร์จ? | ถ้ากระแสแบต \(I_{bat}\) ต่ำกว่า \(I_{cut}\) (เช่น 0.25–0.5 A) ต่อเนื่องครบเวลา \(T_{end}\) → ชาร์จเต็ม |
+| **⑮** | Charge done | หยุด PWM หรือเข้าโหมดพัก (standby) ไม่ฉีดกระแสเข้าแบต |
+| **⑯** | รีชาร์จ? | ถ้า \(V_{bat}\) ลดลง ≤ 53.6 V → กลับไปโหมด CC (⑧) เพื่อชาร์จใหม่; ยังสูงอยู่ → คงสถานะ done |
 
 ---
 
-## 5. สัญญาณสำคัญในหนึ่งคาบ
+## ค่าตัวเลขที่ใช้ในไดอะแกรม
 
-```text
-Clock   : ─┐                 ┌──────────────
-           └─────────────────┘
-Gate    : ─┐  ┌──┐           ┌──┐
-           └──┘  └───────────┘  └────  (ตันเมื่อ Vs=Vcomp)
-ip / Vs :    ／|                ／|
-           ／  |              ／  |
-          ／   └────────────／    └──
-               ↑
-            Vs = Vcomp  → ปิดเกต
-Vcomp   : ────────────────  (ช้า จากลูปแรงดัน)
-```
-
-ภาพรวม: `artifacts/flowchart_cc_forward.png`
-
-ข้อจำกัด Forward + Nr: **\(D < 0.5\)** (เมื่อ \(N_r=N_p\)) — ตั้ง max duty ที่คอนโทรลเลอร์ / ramp
+| สัญลักษณ์ | ค่า | ความหมาย |
+|-----------|-----|----------|
+| `fsw` | **65 kHz** | ความถี่สวิตช์ Forward |
+| `Vcv` | **58.4 V** | แรงดันเป้าโหมด CV |
+| เกณฑ์เข้า CV | **58.2 V / 5–10 s** | กันสลับโหมดรัวจากริปเปิล |
+| `Vrecharge` | **53.6 V** | จุดเริ่มชาร์จรอบใหม่ |
+| `Icc_ref` | **5.0 A** | กระแสเป้าโหมด CC |
+| `Ibat_hard` | **5.8 A** | ลิมิตกระแสเอาต์พุตฉุกเฉิน |
+| `Ip_peak_max` | **3.5 A** | ลิมิตพีคกระแสปฐมภูมิ |
+| `P_limit` | **290 W** | ลิมิตกำลัง (≈ 58×5) |
+| `Dmax` | **0.45** | Duty สูงสุด (Nr = Np ต้องรีเซ็ตฟลักซ์ทัน) |
+| `Icut` | ≈ 0.25–0.5 A | กระแสตัดจบชาร์จ (5–10% ของ 5 A) |
+| `η` | ≈ 0.88–0.90 | ประสิทธิภาพโดยประมาณ |
 
 ---
 
-## 6. จุดเชื่อมกับฮาร์ดแวร์ดีไซน์นี้
+## ลำดับสั้นๆ ท่องจำ
 
-| จุด | ค่าแนวทาง |
-|-----|-----------|
-| \(R_{sense}\) | ให้ \(V_s\) พีค ≈ 0.8–1.0 V ที่ \(I_{p}\approx 3\,\mathrm{A}\) → \(R_s \approx 0.27\text{–}0.33\,\Omega\) / ≥ 2 W |
-| Soft-start | คาปาซิเตอร์ที่ขา SS ของ UC3842/3/4/5 |
-| Slope compensation | แนะนำใส่เมื่อ \(D>0.4\) (ที่ Vin ต่ำ D≈0.44) |
-| Max duty | จำกัด < 0.45 |
-| Gate | 10–12 V ไป STW20N95K5 |
+1. **ตั้งค่า → Soft-start → อ่านเซนเซอร์**  
+2. **มีฟอลต์ → ปิด PWM**  
+3. **ยังไม่เต็ม → CC 5 A**  
+4. **ใกล้ 58.2 V นานพอ → CV 58.4 V**  
+5. **กระแสตกต่ำพอ → หยุดชาร์จ**  
+6. **แรงดันตกถึง 53.6 V → ชาร์จใหม่**
 
 ---
 
-## 7. สรุปหนึ่งประโยค
+## หมายเหตุฮาร์ดแวร์ Forward
 
-**Clock เปิด Q1 → กระแสขึ้นจน Vs ชน Vcomp แล้วปิด → Nr รีเซ็ต → TL431 ปรับ Vcomp ให้ Vo = 58 V**
+- อินพุตเป็น **AC 240 V** ไม่มี MPPT เหมือนบูสต์ PV  
+- ลูปในแนะนำ **Peak Current Mode** ที่ Q1 (STW20N95K5) + \(R_{sense}\)  
+- ต้องมี **RCD snubber** และรีเซ็ตขด **Nr**  
+- ถ้าใช้ UC384x: PI นอกออกเป็น **Vcomp** ไม่บวก Duty ตรงๆ

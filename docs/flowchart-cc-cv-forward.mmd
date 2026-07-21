@@ -1,22 +1,22 @@
 flowchart TD
-    A([START]) --> B["Init: fsw=65kHz, Vcv=58.4V, Vrecharge=53.6V,\nIcc_ref=5.0A, Ibat_hard=5.8A,\nIp_peak_max=3.5A, P_limit=290W, Dmax=0.45"]
-    B --> C[Soft-start PWM]
-    C --> D[Read Vin Vbat Ibat Temp / BMS]
-    D --> E{Fault? OVP/OCP/OTP/UVLO/BMS}
-    E -- Yes --> X[PWM OFF + Fault handling] --> D
-    E -- No --> F{Vbat >= 58.2V ต่อเนื่อง 5-10s ?}
+    A(["① START<br/>เริ่มทำงาน"]) --> B["② Init ตั้งค่า<br/>fsw=65kHz, Vcv=58.4V, Vrecharge=53.6V<br/>Icc_ref=5.0A, Ibat_hard=5.8A<br/>Ip_peak_max=3.5A, P_limit=290W, Dmax=0.45"]
+    B --> C["③ Soft-start PWM<br/>ค่อยๆ เพิ่ม duty/กระแส"]
+    C --> D["④ อ่านค่าเซนเซอร์<br/>Vin, Vbat, Ibat, Temp / BMS"]
+    D --> E{"⑤ มี Fault?<br/>OVP / OCP / OTP / UVLO / BMS"}
+    E -- ใช่ --> X["⑥ ปิด PWM + จัดการ Fault"] --> D
+    E -- ไม่ --> F{"⑦ Vbat ≥ 58.2V<br/>ต่อเนื่อง 5–10 วินาที?"}
 
-    F -- No --> G["CC Mode\nIref = min(Icc_ref, P_limit/(eta*Vbat), I_limit)\nPeak-CC: Vcomp จาก Iref"]
-    G --> H["Current PI / Peak-CC\n-> Duty or Ipeak clamp\n-> D <= 0.45 -> PWM update"]
+    F -- ไม่ --> G["⑧ โหมด CC<br/>Iref = min(Icc_ref, P_limit/(η·Vbat), I_limit)<br/>Peak-CC: สร้าง Vcomp จาก Iref"]
+    G --> H["⑨ ลูปกระแส / Peak-CC<br/>จำกัด Duty ≤ 0.45 แล้วอัปเดต PWM"]
     H --> D
 
-    F -- Yes --> I["CV Mode\nVref = 58.4V"]
-    I --> J[Voltage PI -> Iref_req]
-    J --> K["Iref = min(Iref_req, I_limit,\nP_limit/(eta*Vbat))"]
-    K --> L["Current PI / Peak-CC\n-> Duty or Ipeak clamp\n-> D <= 0.45 -> PWM update"]
-    L --> M{Ibat <= Icut ต่อเนื่อง T_end ?}
-    M -- No --> D
-    M -- Yes --> N[Charge done: stop PWM หรือ standby]
-    N --> O{Vbat <= Vrecharge ?}
-    O -- Yes --> G
-    O -- No --> N
+    F -- ใช่ --> I["⑩ โหมด CV<br/>Vref = 58.4V"]
+    I --> J["⑪ Voltage PI<br/>คำนวณ Iref_req จากความผิดพลาดแรงดัน"]
+    J --> K["⑫ จำกัด Iref<br/>Iref = min(Iref_req, I_limit, P_limit/(η·Vbat))"]
+    K --> L["⑬ ลูปกระแส / Peak-CC<br/>จำกัด Duty ≤ 0.45 แล้วอัปเดต PWM"]
+    L --> M{"⑭ Ibat ≤ Icut<br/>ต่อเนื่องครบ T_end ?"}
+    M -- ไม่ --> D
+    M -- ใช่ --> N["⑮ Charge done<br/>หยุด PWM หรือเข้า standby"]
+    N --> O{"⑯ Vbat ≤ Vrecharge<br/>53.6V ?"}
+    O -- ใช่ --> G
+    O -- ไม่ --> N
