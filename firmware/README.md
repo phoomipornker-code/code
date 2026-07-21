@@ -1,12 +1,13 @@
 # เฟิร์มแวร์ ESP32 — ชาร์จเจอร์ Boost PV + Forward AC
 
 ไฟล์หลัก: [`firmware.ino`](firmware.ino)  
-แท็ก: `cv58-boost-v14-forward-v17`
+แท็ก: `cv58-boost-v14-forward-v18`
 
 ## นโยบายเวอร์ชันนี้
 
 - **Boost (PV):** ยึดตามโค้ดที่ทดสอบจริง `cv58-stability-v14` — PWM **50 kHz**, CC **6 A**, SoftStart→CC_MPPT→CV→DONE
 - **Forward (AC):** SoftStart→CC→CV→DONE ที่ **67 kHz / 5 A**, พร้อม safety สำหรับใช้งานจริง
+- **เลือกโหมดก่อน START:** กด **STOP** ตอน STANDBY สลับ `BOOST` ↔ `FORWARD` แล้วค่อยกด **START** (ไม่สลับอัตโนมัติตามอินพุต)
 
 ## วิธีแฟลชลง ESP32 (Arduino IDE)
 
@@ -17,7 +18,17 @@
    - `LiquidCrystal I2C` (Frank de Brabander หรือเทียบเท่า)
 4. เปิดโฟลเดอร์ `firmware` (ไฟล์ `firmware.ino` ต้องอยู่ในโฟลเดอร์ชื่อเดียวกัน)
 5. Upload ลง ESP32
-6. เปิด Serial Monitor **115200 baud** — ควรเห็น `[BOOT] Firmware: cv58-boost-v14-forward-v17`
+6. เปิด Serial Monitor **115200 baud** — ควรเห็น `[BOOT] Firmware: cv58-boost-v14-forward-v18`
+
+## ปุ่มใช้งาน
+
+| ปุ่ม | ตอน STANDBY | ตอนชาร์จ |
+|------|-------------|----------|
+| **STOP** (GPIO 26) | สลับโหมด **BOOST ↔ FORWARD** | หยุดชาร์จ / เคลียร์ OVP เมื่อแรงดันปลอดภัย |
+| **START** (GPIO 25) | เริ่มเฉพาะโหมดที่เลือก (ถ้าอินพุตพร้อม) | — |
+
+LCD บรรทัดแรกตอน STANDBY แสดงโหมด เช่น `STANDBY  BOOST` / `STANDBY  FORWD`  
+แถวล่าง: `STOP=mode START=go`
 
 ## พิน (GPIO)
 
@@ -47,4 +58,4 @@
 OVP latch เคลียร์ด้วย **STOP** เมื่อแรงดันลดลง
 
 สรุปลอจิก Forward: [`FORWARD_CONTROL_NOTES.md`](FORWARD_CONTROL_NOTES.md)  
-Changelog: [`CHANGELOG_v17.md`](CHANGELOG_v17.md)
+Changelog: [`CHANGELOG_v18.md`](CHANGELOG_v18.md) · [`CHANGELOG_v17.md`](CHANGELOG_v17.md)
