@@ -1,0 +1,19 @@
+flowchart TD
+    A(["① START"]) --> B{"② มี AC ≥ 140V?"}
+    B -- ไม่มี --> Z["Standby / NO INPUT"]
+    B -- มี --> C["③ STATE_FORWARD SoftStart<br/>duty=0, รีเลย์ AC ON"]
+    C --> D["④ อ่านเซนเซอร์ + กรอง"]
+    D --> E{"⑤ Fault?"}
+    E -- ใช่ --> F["⑥ ปิด PWM/รีเลย์"] --> D
+    E -- ไม่ --> G{"⑦ FULL HOLD?"}
+    G -- ใช่ --> H{"⑧ Vbat ≤ 54V?"}
+    H -- ใช่ --> I["⑨ ปลด HOLD"] --> D
+    H -- ไม่ --> D
+    G -- ไม่ --> S{"⑩ Soft / CC / CV / DONE"}
+    S -- Soft --> SS["⑪ ramp duty"] --> D
+    S -- CC --> CC["⑫ Iref=5A + taper"] --> CVIN{"⑬ ≥55.5/55.7 → CV"}
+    CVIN -- ยัง --> D
+    CVIN -- ใช่ --> CV
+    S -- CV --> CV["⑭ V→Iref→duty"] --> FULL{"⑮ เต็ม? / ≥56.8V?"}
+    FULL -- ใช่ --> Q["⑯ FULL HOLD"] --> D
+    FULL -- ไม่ --> D
