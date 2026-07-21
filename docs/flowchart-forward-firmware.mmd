@@ -14,8 +14,8 @@ flowchart TD
     I -- ไม่ --> K["⑩b คงหยุด PWM<br/>รอแรงดันตก"]
     K --> E
     J --> E
-    H -- ไม่ --> L["⑪ คำนวณ PID_CC<br/>e_cc = 6.0 − Ibat<br/>ออก pid_out_cc"]
-    L --> M["⑫ คำนวณ PID_CV<br/>e_cv = 56.0 − Vbat<br/>deadband 0.12V"]
+    H -- ไม่ --> L["⑪ คำนวณ PID_CC<br/>e_cc = 5.0 − Ibat<br/>ออก pid_out_cc"]
+    L --> M["⑫ คำนวณ PID_CV<br/>e_cv = 55.0 − Vbat<br/>deadband 0.12V"]
     M --> N["⑬ รวมคำสั่ง<br/>final = min(pid_out_cc, pid_out_cv)<br/>จำกัดประมาณ −4 … +1.5"]
     N --> O["⑭ สะสม Duty<br/>duty_acc += final<br/>clamp ≤ MAX_DUTY_FORWARD=490"]
     O --> P["⑮ เขียน PWM Forward<br/>quantize + dither → GPIO14<br/>Boost PWM = 0"]

@@ -9,7 +9,7 @@
 | รายการ | ค่าในโค้ด |
 |--------|-----------|
 | `PWM_FREQ` | **50 kHz** |
-| `TARGET_CC_CURRENT` | **6.0 A** |
+| `TARGET_CC_CURRENT` | **5.0 A** |
 | `TARGET_CV_VOLTAGE` | **56.00 V** |
 | `MAX_DUTY_FORWARD` | **490 / 1023 ≈ 47.9%** |
 | `RESTART_CHARGE_VOLTAGE` | **54.0 V** |
@@ -41,8 +41,8 @@ flowchart TD
     I -- ไม่ --> K["⑩b คงหยุด PWM<br/>รอแรงดันตก"]
     K --> E
     J --> E
-    H -- ไม่ --> L["⑪ คำนวณ PID_CC<br/>e_cc = 6.0 − Ibat<br/>ออก pid_out_cc"]
-    L --> M["⑫ คำนวณ PID_CV<br/>e_cv = 56.0 − Vbat<br/>deadband 0.12V"]
+    H -- ไม่ --> L["⑪ คำนวณ PID_CC<br/>e_cc = 5.0 − Ibat<br/>ออก pid_out_cc"]
+    L --> M["⑫ คำนวณ PID_CV<br/>e_cv = 55.0 − Vbat<br/>deadband 0.12V"]
     M --> N["⑬ รวมคำสั่ง<br/>final = min(pid_out_cc, pid_out_cv)<br/>จำกัดประมาณ −4 … +1.5"]
     N --> O["⑭ สะสม Duty<br/>duty_acc += final<br/>clamp ≤ MAX_DUTY_FORWARD=490"]
     O --> P["⑮ เขียน PWM Forward<br/>quantize + dither → GPIO14<br/>Boost PWM = 0"]
@@ -67,7 +67,7 @@ flowchart TD
 | **⑦** | `forceSafeShutdown` / `disablePowerStage` | ปิด PWM ทั้ง Forward/Boost และรีเลย์ |
 | **⑧** | `charge_full_hold` | โหมดพักหลังชาร์จเต็ม/หยุดแรงดันสูง |
 | **⑨–⑩** | `RESTART_CHARGE_VOLTAGE = 54V` | แบตตกถึง 54 V และยังมีไฟ → ปลด HOLD แล้วชาร์จต่อ |
-| **⑪** | PID CC | เป้ากระแส 6 A: ผิดพลาด `6 − Ibat` → `pid_out_cc` |
+| **⑪** | PID CC | เป้ากระแส 5 A: ผิดพลาด `5 − Ibat` → `pid_out_cc` |
 | **⑫** | PID CV | เป้าแรงดัน 56 V: ผิดพลาด `56 − Vbat` (ในแถบ ±0.12 V ถือว่า 0) → `pid_out_cv` |
 | **⑬** | `min(CC, CV)` | ใช้คำสั่งที่**น้อยกว่า** → ใกล้เต็ม CV จะบีบกระแสเองโดยไม่ต้องสลับสเตตชัดๆ |
 | **⑭** | `duty_accumulator` | รวมคำสั่ง PID แล้วคลัมป์ไม่เกิน 490 (≈47.9% ที่ความละเอียด 10 บิต) |
@@ -79,8 +79,8 @@ flowchart TD
 ## สูตรสำคัญในโหมด Forward (ตรงโค้ด)
 
 ```text
-e_cc = TARGET_CC_CURRENT - i_bat_charge_filt          // 6.0 - Ibat
-e_cv = TARGET_CV_VOLTAGE - v_bat_filt                 // 56.0 - Vbat
+e_cc = TARGET_CC_CURRENT - i_bat_charge_filt          // 5.0 - Ibat
+e_cv = TARGET_CV_VOLTAGE - v_bat_filt                 // 55.0 - Vbat
        (ถ้า |e_cv| ≤ 0.12 → e_cv = 0, ลดอินทิกรัล)
 
 pid_out_cc = Kp_cc*e_cc + Ki_cc*∫e_cc + Kd_cc*Δe_cc
@@ -100,7 +100,7 @@ PWM_FORWARD ← raw_duty @ 50 kHz
 
 1. **กด START → มี AC → เข้า Forward**  
 2. **อ่านเซนเซอร์ / กันฟอลต์**  
-3. **PID กระแส 6 A และ PID แรงดัน 56 V**  
+3. **PID กระแส 5 A และ PID แรงดัน 56 V**  
 4. **ใช้ค่าที่น้อยกว่า → ปรับ Duty ≤ 490**  
 5. **แรงดันสูงมาก / เต็ม → HOLD; ตกถึง 54 V → ชาร์จใหม่**
 

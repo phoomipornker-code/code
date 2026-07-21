@@ -17,7 +17,7 @@
 | `PWM_FREQ` | **67 kHz**, 10-bit |
 | Forward PWM | GPIO **14**, `MAX_DUTY_FORWARD = 460` (แนะนำ) |
 | Boost PWM | GPIO **27**, `MAX_DUTY_BOOST = 760` |
-| CC / CV | **6.0 A** / **56.0 V** |
+| CC / CV | **5.0 A** / **56.0 V** |
 | ควบคุม Forward | PID คู่ แล้ว `min(pid_cc, pid_cv)` |
 
 ## จุดที่ควรจัดให้ตรงฮาร์ดแวร์ Forward + Nr
