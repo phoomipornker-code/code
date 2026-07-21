@@ -5,53 +5,63 @@ Peak **Current Mode Control** สำหรับ Single-Switch Forward + Nr
 
 ---
 
-## 0. โฟลว์ชาร์ตหลักแบบ CC → CV (ดิจิทัล / MCU)
+## 0. โฟลว์ชาร์ตหลักแบบ CC → CV (สไตล์เดียวกับบูสต์ชาร์จเจอร์)
 
-สไตล์เดียวกับลูป PI + Soft-start + Fault + สลับโหมด CV (เช่น ชาร์จแบตถึง 58 V)
+โครงสร้างเหมือนวงจรบูสต์ (Soft-start → Fault → CC → CV → Charge done → Recharge)  
+แต่ฝั่งอินพุตเป็น **AC 240 V / Forward** ไม่มี MPPT/PV — ใช้ลิมิตกำลังและ Peak-CC แทน
 
 ```mermaid
 flowchart TD
-    A([เริ่มต้น]) --> B["ตั้งค่าเริ่มต้น:<br/>I_ref=5A, V_CV=58V<br/>Kp, Ki, Ts<br/>D_min, D_max=0.45"]
-    B --> C[เริ่ม PWM และ Soft-start]
-    C --> D[วัดค่า I_out, V_out, V_in]
-    D --> E{"มี Fault ไหม?<br/>(OV / OC / OTP / UV)"}
-    E -- มี --> F[ปิด PWM + แจ้ง Fault]
-    F --> D
-    E -- ไม่มี --> G{"โหมดปัจจุบัน?"}
-    G -- CC --> H["error: e = I_ref - I_out"]
-    G -- CV --> I["error: e = V_CV - V_out"]
-    H --> J["PI Controller:<br/>u = u_prev + Kp(e-e_prev) + Ki·e·Ts"]
-    I --> J
-    J --> K["ปรับ Duty: D = D + u<br/>(หรือปรับ Ipeak_ref ถ้าวงจร Peak-CC)"]
-    K --> L["จำกัด Duty:<br/>D_min ≤ D ≤ D_max=0.45"]
-    L --> M{"I_out > I_limit_hard<br/>หรือ ip_peak > I_peak_max ?"}
-    M -- ใช่ --> N[ลด D แบบฉุกเฉิน / ปิด PWM ชั่วคราว]
-    M -- ไม่ --> O[อัปเดต PWM ด้วยค่า D ใหม่]
-    N --> O
-    O --> P[บันทึกค่าเดิม: e_prev, u_prev]
-    P --> Q{"ถึงเงื่อนไข CV หรือยัง?<br/>(V_out ≥ V_CV และโหมด CC)"}
-    Q -- ยัง --> D
-    Q -- ใช่ --> R[สลับไปโหมด CV]
-    R --> D
-    P --> S{"ถึงเงื่อนไขกลับ CC?<br/>(I_out < I_ref·0.9 และโหมด CV)"}
-    S -- ใช่ --> T[สลับกลับโหมด CC]
-    S -- ไม่ --> D
-    T --> D
+    A([START]) --> B["Init: fsw=65kHz, Vcv=58.4V, Vrecharge=53.6V,\nIcc_ref=5.0A, Ibat_hard=5.8A,\nIp_peak_max=3.5A, P_limit=290W, Dmax=0.45"]
+    B --> C[Soft-start PWM]
+    C --> D[Read Vin Vbat Ibat Temp / BMS]
+    D --> E{Fault? OVP/OCP/OTP/UVLO/BMS}
+    E -- Yes --> X[PWM OFF + Fault handling] --> D
+    E -- No --> F{Vbat >= 58.2V ต่อเนื่อง 5-10s ?}
+
+    F -- No --> G["CC Mode\nIref = min(Icc_ref, P_limit/(eta*Vbat), I_limit)\nPeak-CC: Vcomp จาก Iref"]
+    G --> H["Current PI / Peak-CC\n-> Duty or Ipeak clamp\n-> D <= 0.45 -> PWM update"]
+    H --> D
+
+    F -- Yes --> I["CV Mode\nVref = 58.4V"]
+    I --> J[Voltage PI -> Iref_req]
+    J --> K["Iref = min(Iref_req, I_limit,\nP_limit/(eta*Vbat))"]
+    K --> L["Current PI / Peak-CC\n-> Duty or Ipeak clamp\n-> D <= 0.45 -> PWM update"]
+    L --> M{Ibat <= Icut ต่อเนื่อง T_end ?}
+    M -- No --> D
+    M -- Yes --> N[Charge done: stop PWM หรือ standby]
+    N --> O{Vbat <= Vrecharge ?}
+    O -- Yes --> G
+    O -- No --> N
 ```
 
-### พารามิเตอร์แนะนำสำหรับดีไซน์นี้
+ไฟล์ Mermaid ล้วน: [`flowchart-cc-cv-forward.mmd`](flowchart-cc-cv-forward.mmd)
+
+### เทียบกับโฟลว์บูสต์ (PV)
+
+| บูสต์ (ตัวอย่าง) | Forward (ดีไซน์นี้) |
+|------------------|---------------------|
+| MPPT คุมฝั่ง PV | ไม่มี — อินพุต AC + บัส DC |
+| `Ipv_soft/hard` | `Icc_ref=5A`, `Ibat_hard≈5.8A` |
+| `Ppv_limit=650W` | `P_limit≈290W` (58V×5A) |
+| Duty จากบูสต์ | Duty / Vcomp จาก Forward, **`Dmax=0.45`** |
+| `fsw=50kHz` | **`fsw=65kHz`** (ช่วง 50–67 kHz ได้) |
+
+### พารามิเตอร์แนะนำ
 
 | ตัวแปร | ค่า |
 |--------|-----|
-| `I_ref` | 5 A (โหมด CC) |
-| `V_CV` | 58 V |
-| `D_max` | **0.45** (รีเซ็ต Nr = Np) |
-| `D_min` | ≈ 0.05–0.10 |
-| `Ts` | คาบลูปนอก เช่น 50–200 µs (ช้ากว่า \(f_s\)) |
-| `I_limit_hard` | ≈ 5.5–6 A |
-| `I_peak_max` (ปฐมภูมิ) | ≈ 3.2–3.5 A |
+| `Icc_ref` | 5.0 A |
+| `Vcv` | 58.4 V |
+| `Vrecharge` | 53.6 V |
+| `Icut` | ≈ 0.25–0.5 A (5–10% ของ Icc) |
+| `T_end` | หลายสิบวินาทีถึงนาที ตามแบต |
+| `Dmax` | **0.45** (Nr = Np) |
+| `Ip_peak_max` | ≈ 3.5 A |
+| `P_limit` | 290 W |
+| `eta` | ≈ 0.88–0.90 |
 
-> ถ้ายังใช้ **analog Peak-CC (UC384x)** แทนการปรับ Duty โดยตรง: ให้ PI ออกเป็น **`Ipeak_ref` / Vcomp** แล้วให้ latch ตัดเกตเมื่อ `Vs ≥ Vcomp`
+> Analog Peak-CC (UC384x): PI ฝั่งนอกออกเป็น **Vcomp / Ipeak_ref** ไม่บวก Duty โดยตรง — latch ตัดเกตเมื่อ `Vs ≥ Vcomp`
 
 ---
 
