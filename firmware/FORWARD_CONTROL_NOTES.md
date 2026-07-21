@@ -47,6 +47,6 @@ const int PWM_FREQ = 67000;
 const int MAX_DUTY_FORWARD = 460;  // ~45%
 ```
 
-วางไฟล์สเก็ตช์เต็มชื่อ `charger_main.ino` ในโฟลเดอร์นี้ (Arduino IDE: เปิดโฟลเดอร์ `firmware` เป็น sketch)
+วางไฟล์สเก็ตช์เต็มชื่อ `firmware.ino` ในโฟลเดอร์นี้ (Arduino IDE: เปิดโฟลเดอร์ `firmware` เป็น sketch)
 
 โฟลว์ชาร์ต: [`../docs/flowchart-forward-only.md`](../docs/flowchart-forward-only.md)

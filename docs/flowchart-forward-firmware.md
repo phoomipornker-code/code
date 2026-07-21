@@ -1,6 +1,6 @@
 # โฟลว์ชาร์ต Forward (จากโค้ดหลัก) — มีหมายเลข + อธิบายไทย
 
-อ้างอิงเฟิร์มแวร์: `firmware/charger_main.ino`  
+อ้างอิงเฟิร์มแวร์: `firmware/firmware.ino`  
 แท็ก: `cv58-forward-67khz-5a-v16`  
 โหมด **STATE_FORWARD** (AC → ชาร์จแบต) ใช้ **SoftStart → CC → CV → DONE**
 
