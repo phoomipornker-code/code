@@ -9,8 +9,8 @@
 | [docs/forward-converter.md](docs/forward-converter.md) | หลักการทำงานทั่วไป |
 | [docs/design-240vac-58v-5a.md](docs/design-240vac-58v-5a.md) | ออกแบบ **AC 240 V → DC 58 V / 5 A** แบบสวิตช์เดียว + Nr |
 | [docs/bom-240vac-58v-5a.md](docs/bom-240vac-58v-5a.md) | **สรุปอุปกรณ์ (BOM)** |
-| [docs/flowchart-forward-firmware.md](docs/flowchart-forward-firmware.md) | **โฟลว์ชาร์ต Forward จากโค้ดหลัก** (หมายเลข + อธิบายไทย) |
-| [docs/flowchart-forward-firmware.mmd](docs/flowchart-forward-firmware.mmd) | Mermaid ล้วนของโฟลว์ Forward |
+| [docs/flowchart-forward-only.md](docs/flowchart-forward-only.md) | **โฟลว์ชาร์ตเฉพาะ Forward** (หมายเลข + อธิบายไทย) |
+| [docs/flowchart-forward-only.mmd](docs/flowchart-forward-only.mmd) | Mermaid ล้วนเฉพาะ Forward |
 | [firmware/](firmware/) | เฟิร์มแวร์ ESP32 Boost+Forward |
 | [sim/design_240vac_58v_5a.py](sim/design_240vac_58v_5a.py) | เครื่องคิดเลขพารามิเตอร์ |
 | [sim/forward_converter.py](sim/forward_converter.py) | จำลอง waveform |
