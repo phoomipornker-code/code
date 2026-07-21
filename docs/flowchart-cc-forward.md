@@ -5,6 +5,56 @@ Peak **Current Mode Control** สำหรับ Single-Switch Forward + Nr
 
 ---
 
+## 0. โฟลว์ชาร์ตหลักแบบ CC → CV (ดิจิทัล / MCU)
+
+สไตล์เดียวกับลูป PI + Soft-start + Fault + สลับโหมด CV (เช่น ชาร์จแบตถึง 58 V)
+
+```mermaid
+flowchart TD
+    A([เริ่มต้น]) --> B["ตั้งค่าเริ่มต้น:<br/>I_ref=5A, V_CV=58V<br/>Kp, Ki, Ts<br/>D_min, D_max=0.45"]
+    B --> C[เริ่ม PWM และ Soft-start]
+    C --> D[วัดค่า I_out, V_out, V_in]
+    D --> E{"มี Fault ไหม?<br/>(OV / OC / OTP / UV)"}
+    E -- มี --> F[ปิด PWM + แจ้ง Fault]
+    F --> D
+    E -- ไม่มี --> G{"โหมดปัจจุบัน?"}
+    G -- CC --> H["error: e = I_ref - I_out"]
+    G -- CV --> I["error: e = V_CV - V_out"]
+    H --> J["PI Controller:<br/>u = u_prev + Kp(e-e_prev) + Ki·e·Ts"]
+    I --> J
+    J --> K["ปรับ Duty: D = D + u<br/>(หรือปรับ Ipeak_ref ถ้าวงจร Peak-CC)"]
+    K --> L["จำกัด Duty:<br/>D_min ≤ D ≤ D_max=0.45"]
+    L --> M{"I_out > I_limit_hard<br/>หรือ ip_peak > I_peak_max ?"}
+    M -- ใช่ --> N[ลด D แบบฉุกเฉิน / ปิด PWM ชั่วคราว]
+    M -- ไม่ --> O[อัปเดต PWM ด้วยค่า D ใหม่]
+    N --> O
+    O --> P[บันทึกค่าเดิม: e_prev, u_prev]
+    P --> Q{"ถึงเงื่อนไข CV หรือยัง?<br/>(V_out ≥ V_CV และโหมด CC)"}
+    Q -- ยัง --> D
+    Q -- ใช่ --> R[สลับไปโหมด CV]
+    R --> D
+    P --> S{"ถึงเงื่อนไขกลับ CC?<br/>(I_out < I_ref·0.9 และโหมด CV)"}
+    S -- ใช่ --> T[สลับกลับโหมด CC]
+    S -- ไม่ --> D
+    T --> D
+```
+
+### พารามิเตอร์แนะนำสำหรับดีไซน์นี้
+
+| ตัวแปร | ค่า |
+|--------|-----|
+| `I_ref` | 5 A (โหมด CC) |
+| `V_CV` | 58 V |
+| `D_max` | **0.45** (รีเซ็ต Nr = Np) |
+| `D_min` | ≈ 0.05–0.10 |
+| `Ts` | คาบลูปนอก เช่น 50–200 µs (ช้ากว่า \(f_s\)) |
+| `I_limit_hard` | ≈ 5.5–6 A |
+| `I_peak_max` (ปฐมภูมิ) | ≈ 3.2–3.5 A |
+
+> ถ้ายังใช้ **analog Peak-CC (UC384x)** แทนการปรับ Duty โดยตรง: ให้ PI ออกเป็น **`Ipeak_ref` / Vcomp** แล้วให้ latch ตัดเกตเมื่อ `Vs ≥ Vcomp`
+
+---
+
 ## 1. บล็อกไดอะแกรมระบบ
 
 ```text
