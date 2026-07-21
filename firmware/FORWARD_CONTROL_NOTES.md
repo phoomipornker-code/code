@@ -1,6 +1,6 @@
 # โน้ตส่วน STATE_FORWARD จากโค้ดหลัก
 
-แท็กเฟิร์มแวร์: `cv58-stability-v14-cv-stable`
+แท็กเฟิร์มแวร์: `cv58-forward-67khz-5a-v16`
 
 ## ค่าคงที่สำคัญ
 
@@ -8,7 +8,7 @@
 PWM_FREQ              = 67000;      // 67 kHz  (Forward)
 PWM_FORWARD_PIN       = 14;
 MAX_DUTY_FORWARD      = 460;        // ~45% ของ 1023 (Nr=Np)
-TARGET_CC_CURRENT     = 5.0;        // A  (ลดจาก 6.0)
+TARGET_CC_CURRENT     = 5.0;        // A
 TARGET_CV_VOLTAGE     = 56.00;      // V
 CV_DEADBAND_V         = 0.12;
 RESTART_CHARGE_VOLTAGE = 54.0;
@@ -17,42 +17,36 @@ HIGH_VOLTAGE_STOP_CONFIRM_MS = 300;
 MIN_AC_VOLTAGE        = 140.0;
 ```
 
-PID Forward:
+Forward modes:
 
 ```cpp
-Kp_cc=0.15, Ki_cc=0.01, Kd_cc=0.005;
-Kp_cv=0.5,  Ki_cv=0.015, Kd_cv=0.005;
+enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 ```
 
 ## แกนควบคุม (ตรงโค้ด)
 
-```cpp
-// เมื่อ currentState == STATE_FORWARD
-pid_error_cc = TARGET_CC_CURRENT - i_bat_charge_filt;
-// ... PID CC → pid_out_cc
-
-pid_error_cv = TARGET_CV_VOLTAGE - v_bat_filt;
-if (fabs(pid_error_cv) <= CV_DEADBAND_V) { pid_error_cv = 0; pid_integral_cv *= 0.90; }
-// ... PID CV → pid_out_cv
-
-float final_battery_pid = min(pid_out_cc, pid_out_cv);
-final_battery_pid = constrain-ish to [-4.0, +1.5];
-duty_accumulator += final_battery_pid;
-duty_accumulator = constrain(duty_accumulator, 0, MAX_DUTY_FORWARD);
-
-raw_duty = quantizeDutyWithDither(duty_accumulator, &forward_dither_phase, MAX_DUTY_FORWARD);
-ledcWrite(PWM_FORWARD_PIN, raw_duty);
-ledcWrite(PWM_BOOST_PIN, 0);
+```text
+เข้า STATE_FORWARD
+  → duty=0, forwardNewResetOnEntry()
+  → FWD_SOFTSTART : ramp duty ไป seed (~80), พร้อมเมื่อ Ibat≥0.35A หรือครบ 2s
+  → FWD_CC        : current PI → Iref=5A (taper ใกล้ 56V)
+                    เข้า CV เมื่อ Vbat≥55.5 (confirm) หรือ ≥55.7 (force)
+  → FWD_CV        : voltage PI → Iref, current PI → duty
+                    deadband แช่ duty; over-V ลด duty เบาๆ
+                    FULL เมื่อ V≥55.9 และ I≤0.5A นาน 60s
+  → FWD_DONE / FULL HOLD → รีชาร์จเมื่อ Vbat≤54V
 ```
 
-## แนะนำจูนกับฮาร์ดแวร์ Forward + Nr
+Duty จำกัดเสมอที่ `MAX_DUTY_FORWARD` (460) พร้อม slew up/down  
+PWM ออก GPIO 14 @ 67 kHz, Boost PWM = 0
+
+## จูนกับฮาร์ดแวร์ Forward + Nr
 
 ```cpp
-// แนะนำเปลี่ยนเพื่อรีเซ็ตฟลักซ์ทัน (Nr = Np)
 const int PWM_FREQ = 67000;
 const int MAX_DUTY_FORWARD = 460;  // ~45%
 ```
 
 วางไฟล์สเก็ตช์เต็มชื่อ `charger_main.ino` ในโฟลเดอร์นี้ (Arduino IDE: เปิดโฟลเดอร์ `firmware` เป็น sketch)
 
-โฟลว์ชาร์ตหมายเลข + อธิบายไทย: [`../docs/flowchart-forward-firmware.md`](../docs/flowchart-forward-firmware.md)
+โฟลว์ชาร์ต: [`../docs/flowchart-forward-only.md`](../docs/flowchart-forward-only.md)

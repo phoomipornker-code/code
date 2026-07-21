@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-forward-67khz-5a-v15";
+const char* FW_VERSION_TAG = "cv58-forward-67khz-5a-v16";
 // =========================================================================
 // Hardware
 // =========================================================================
@@ -38,16 +38,33 @@ const float HIGH_VOLTAGE_STOP_VOLTAGE = 56.80;
 const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 300;
 const float RESTART_CHARGE_VOLTAGE = 54.0;
 // =========================================================================
-// Forward (AC) PID
+// Forward (AC) control: SOFTSTART -> CC -> CV -> DONE
+// Dual-PID min(CC,CV) replaced — that path fought and overshot near CV.
 // =========================================================================
-const float Kp_cc = 0.15;
-const float Ki_cc = 0.01;
-const float Kd_cc = 0.005;
-const float Kp_cv = 0.5;
-const float Ki_cv = 0.015;
-const float Kd_cv = 0.005;
-float pid_error_cc = 0.0, pid_last_error_cc = 0.0, pid_integral_cc = 0.0;
-float pid_error_cv = 0.0, pid_last_error_cv = 0.0, pid_integral_cv = 0.0;
+const float FWD_CV_ENTRY_VOLTAGE = 55.50;
+const float FWD_CV_FORCE_VOLTAGE = 55.70;
+const float FWD_CV_EXIT_VOLTAGE  = 54.80;
+const float FWD_CC_TAPER_START_V = 54.80;
+const float FWD_CV_IREF_SLEW_A = 0.06;       // A per 20ms tick
+const float FWD_CV_NEAR_BAND_V = 0.35;
+const float FWD_CV_DUTY_STEP_NEAR = 0.6;
+const float FWD_CV_DUTY_STEP_FAR = 2.0;
+const unsigned long FWD_SOFTSTART_MS = 2000;
+const unsigned long FWD_CV_ENTER_CONFIRM_MS = 200;
+const unsigned long FWD_CV_EXIT_CONFIRM_MS = 5000;
+const float FWD_CURR_KP = 8.0;
+const float FWD_CURR_KI = 35.0;
+const float FWD_CURR_OUT_MIN = -20.0;
+const float FWD_CURR_OUT_MAX = 25.0;
+const float FWD_VOLT_KP = 0.70;
+const float FWD_VOLT_KI = 0.35;
+const float FWD_VOLT_OUT_MIN = 0.0;
+const float FWD_VOLT_OUT_MAX = 3.0;
+const float FWD_DUTY_SLEW_UP = 3.0;
+const float FWD_DUTY_SLEW_DOWN = 5.0;
+const float FWD_SOFTSTART_DUTY_SLEW = 1.5;
+const float FWD_SOFTSTART_SEED_DUTY = 80.0;  // gentle seed (~8% of 1023)
+const float FWD_AC_CURRENT_HARD_A = 2.5;     // primary-side soft limit
 // =========================================================================
 // Calibration
 // =========================================================================
@@ -162,6 +179,14 @@ unsigned long boostNewLastMpptMs = 0;
 unsigned long boostNewCvEnterMs = 0;
 unsigned long boostNewCvExitMs = 0;
 unsigned long boost_mode_enter_ms = 0;
+enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
+volatile ForwardMode forwardMode = FWD_SOFTSTART;
+float fwdCurrIntegrator = 0.0f;
+float fwdVoltIntegrator = 0.0f;
+float fwdIrefCvCmd = 0.5f;
+unsigned long fwdCvEnterMs = 0;
+unsigned long fwdCvExitMs = 0;
+unsigned long forward_mode_enter_ms = 0;
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 SemaphoreHandle_t i2c_Mutex;
 float raw_mv_v0 = 0, raw_mv_v1 = 0, raw_mv_v2 = 0;
@@ -227,6 +252,14 @@ static inline void boostNewResetOnEntry(float vpvNow) {
     boostNewLastMpptMs = 0;
     boostNewCvEnterMs = 0;
     boostNewCvExitMs = 0;
+}
+static inline void forwardNewResetOnEntry() {
+    forwardMode = FWD_SOFTSTART;
+    fwdCurrIntegrator = 0.0f;
+    fwdVoltIntegrator = 0.0f;
+    fwdIrefCvCmd = 0.5f;
+    fwdCvEnterMs = 0;
+    fwdCvExitMs = 0;
 }
 int quantizeDutyWithDither(float duty_cmd, float *phase, int max_duty) {
     duty_cmd = constrain(duty_cmd, 0.0f, (float)max_duty);
@@ -313,8 +346,9 @@ void calibrateCurrentOffsetsAtBoot() {
 void setup() {
     Serial.begin(115200);
     Serial.printf("[BOOT] Firmware: %s\n", FW_VERSION_TAG);
-    Serial.printf("[BOOT] CFG CC=%.2fA CV=%.2fV CVentry=%.2fV CVexit=%.2fV\n",
-                  TARGET_CC_CURRENT, BOOST_CV_TARGET_VOLTAGE, BOOST_CV_ENTRY_VOLTAGE, BOOST_CV_EXIT_VOLTAGE);
+    Serial.printf("[BOOT] CFG CC=%.2fA CV=%.2fV FWD_CVentry=%.2fV FWD_CVexit=%.2fV Dmax=%d fsw=%dHz\n",
+                  TARGET_CC_CURRENT, TARGET_CV_VOLTAGE, FWD_CV_ENTRY_VOLTAGE, FWD_CV_EXIT_VOLTAGE,
+                  MAX_DUTY_FORWARD, PWM_FREQ);
     Wire.begin(21, 22);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(25);
@@ -564,11 +598,12 @@ void TaskSampleData(void * pvParameters) {
                     vTaskDelay(500 / portTICK_PERIOD_MS);
                     digitalWrite(RELAY_AC_PIN, HIGH);
                     currentState = STATE_FORWARD;
-                    pid_integral_cc = 0; pid_last_error_cc = 0;
-                    pid_integral_cv = 0; pid_last_error_cv = 0;
-                    raw_duty = 10;
-                    duty_accumulator = 10.0;
-                    forward_dither_phase = 0.0;
+                    forward_mode_enter_ms = now;
+                    raw_duty = 0;
+                    duty_accumulator = 0.0f;
+                    forward_dither_phase = 0.0f;
+                    forwardNewResetOnEntry();
+                    Serial.println("[INFO] Enter FORWARD SoftStart->CC->CV control.");
                 }
                 else {
                     system_ON = false;
@@ -602,30 +637,169 @@ void TaskSampleData(void * pvParameters) {
             forward_dither_phase = 0.0;
             pv_is_collapsing = false;
             boostNewMode = BOOST_NEW_SOFTSTART;
+            forwardMode = FWD_SOFTSTART;
         }
         if (system_ON && currentState != STATE_OFF) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
             if (currentState == STATE_FORWARD) {
-                pid_error_cc = TARGET_CC_CURRENT - i_bat_charge_filt;
-                pid_integral_cc += pid_error_cc;
-                pid_integral_cc = constrain(pid_integral_cc, -100, 100);
-                float delta_error_cc = pid_error_cc - pid_last_error_cc;
-                float pid_out_cc = (Kp_cc * pid_error_cc) + (Ki_cc * pid_integral_cc) + (Kd_cc * delta_error_cc);
-                pid_last_error_cc = pid_error_cc;
-                pid_error_cv = TARGET_CV_VOLTAGE - v_bat_filt;
-                if (fabs(pid_error_cv) <= CV_DEADBAND_V) {
-                    pid_error_cv = 0.0;
-                    pid_integral_cv *= 0.90;
+                const float dt = 0.02f;
+                if (v_ac_in < MIN_AC_VOLTAGE) {
+                    duty_accumulator = 0.0f;
+                    fwdCurrIntegrator = 0.0f;
+                    fwdVoltIntegrator = 0.0f;
+                } else if (forwardMode == FWD_SOFTSTART) {
+                    duty_accumulator = boostApplySlew(FWD_SOFTSTART_SEED_DUTY, duty_accumulator,
+                                                      FWD_SOFTSTART_DUTY_SLEW, 4.0f);
+                    bool ready = (i_bat_charge_filt >= 0.35f) ||
+                                 (now - forward_mode_enter_ms >= FWD_SOFTSTART_MS);
+                    if (ready) {
+                        forwardMode = FWD_CC;
+                        fwdCurrIntegrator = 0.0f;
+                        Serial.printf("[INFO] FORWARD SoftStart done -> CC (I=%.2fA duty=%.0f)\n",
+                                      i_bat_charge_filt, duty_accumulator);
+                    }
+                } else if (forwardMode == FWD_CC) {
+                    float iRef = TARGET_CC_CURRENT;
+                    // Pre-CV taper: ease current as battery approaches CV target
+                    if (v_bat_filt >= FWD_CC_TAPER_START_V) {
+                        float span = max(0.20f, TARGET_CV_VOLTAGE - FWD_CC_TAPER_START_V);
+                        float rem = TARGET_CV_VOLTAGE - v_bat_filt;
+                        float taper = boostClampf(rem / span, 0.10f, 1.0f);
+                        iRef *= taper;
+                    }
+                    iRef = boostClampf(iRef, 0.0f, TARGET_CC_CURRENT);
+                    float iErr = iRef - i_bat_charge_filt;
+                    float dDuty = boostRunPI(iErr, FWD_CURR_KP, FWD_CURR_KI, dt,
+                                             &fwdCurrIntegrator, FWD_CURR_OUT_MIN, FWD_CURR_OUT_MAX);
+                    // Help climb out of low-duty when far below CC target
+                    if (iErr > 0.8f && duty_accumulator < 200.0f && v_ac_in >= MIN_AC_VOLTAGE) {
+                        dDuty = max(dDuty, 2.0f);
+                    }
+                    float dutyTarget = duty_accumulator + dDuty;
+                    dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
+                    duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator,
+                                                      FWD_DUTY_SLEW_UP, FWD_DUTY_SLEW_DOWN);
+                    // Enter CV: force near BMS zone, or soft confirm at entry voltage
+                    if (v_bat_filt >= FWD_CV_FORCE_VOLTAGE || max(v_bat, v_bat_filt) >= FWD_CV_FORCE_VOLTAGE) {
+                        forwardMode = FWD_CV;
+                        fwdCurrIntegrator = 0.0f;
+                        fwdVoltIntegrator = 0.0f;
+                        fwdIrefCvCmd = boostClampf(i_bat_charge_filt, 0.3f, 2.0f);
+                        fwdCvEnterMs = 0;
+                        Serial.printf("[INFO] Force FORWARD CV at Vbat=%.2f / filt=%.2f\n",
+                                      v_bat, v_bat_filt);
+                    } else if (v_bat_filt >= FWD_CV_ENTRY_VOLTAGE) {
+                        if (fwdCvEnterMs == 0) fwdCvEnterMs = now;
+                        if (now - fwdCvEnterMs >= FWD_CV_ENTER_CONFIRM_MS) {
+                            forwardMode = FWD_CV;
+                            fwdCurrIntegrator = 0.0f;
+                            fwdVoltIntegrator = 0.0f;
+                            fwdIrefCvCmd = boostClampf(i_bat_charge_filt, 0.3f, 2.0f);
+                        }
+                    } else {
+                        fwdCvEnterMs = 0;
+                    }
+                } else if (forwardMode == FWD_CV) {
+                    float vErr = TARGET_CV_VOLTAGE - v_bat_filt;
+                    bool nearTarget = (fabsf(vErr) <= FWD_CV_NEAR_BAND_V);
+                    if (fabs(vErr) <= CV_DEADBAND_V) {
+                        vErr = 0.0f;
+                        fwdVoltIntegrator *= 0.92f;
+                    }
+                    float iReq = boostRunPI(vErr, FWD_VOLT_KP, FWD_VOLT_KI, dt,
+                                            &fwdVoltIntegrator, FWD_VOLT_OUT_MIN, FWD_VOLT_OUT_MAX);
+                    if (nearTarget) {
+                        float nearCap = 1.0f + boostClampf(vErr / FWD_CV_NEAR_BAND_V, 0.0f, 1.0f) * 1.0f;
+                        if (iReq > nearCap) iReq = nearCap;
+                    }
+                    iReq = boostClampf(iReq, 0.0f, FWD_VOLT_OUT_MAX);
+                    fwdIrefCvCmd = boostApplySlew(iReq, fwdIrefCvCmd,
+                                                  FWD_CV_IREF_SLEW_A, FWD_CV_IREF_SLEW_A);
+                    float iRef = fwdIrefCvCmd;
+                    float iErr = iRef - i_bat_charge_filt;
+                    float dDuty = boostRunPI(iErr, FWD_CURR_KP * (nearTarget ? 0.50f : 0.80f),
+                                             FWD_CURR_KI * (nearTarget ? 0.40f : 0.65f),
+                                             dt, &fwdCurrIntegrator,
+                                             nearTarget ? -6.0f : FWD_CURR_OUT_MIN,
+                                             nearTarget ? 6.0f : 15.0f);
+                    float dutyStepLimit = nearTarget ? FWD_CV_DUTY_STEP_NEAR : FWD_CV_DUTY_STEP_FAR;
+                    if (dDuty > dutyStepLimit) dDuty = dutyStepLimit;
+                    if (dDuty < -dutyStepLimit) dDuty = -dutyStepLimit;
+                    float dutyTarget = duty_accumulator + dDuty;
+                    if (fabsf(TARGET_CV_VOLTAGE - v_bat_filt) <= CV_DEADBAND_V) {
+                        dutyTarget = duty_accumulator;
+                        fwdCurrIntegrator *= 0.95f;
+                    }
+                    if (v_bat_filt > TARGET_CV_VOLTAGE) {
+                        float over = v_bat_filt - TARGET_CV_VOLTAGE;
+                        dutyTarget -= (0.6f + over * 3.5f);
+                        fwdVoltIntegrator *= 0.85f;
+                    }
+                    if (v_bat > (v_bat_filt + 1.5f)) {
+                        dutyTarget = min(dutyTarget, duty_accumulator - 5.0f);
+                        dutyTarget = max(0.0f, dutyTarget);
+                    }
+                    dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
+                    float cvSlewUp = nearTarget ? 1.0f : 2.0f;
+                    float cvSlewDown = nearTarget ? 1.8f : 3.5f;
+                    duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, cvSlewUp, cvSlewDown);
+                    if (v_bat_filt <= FWD_CV_EXIT_VOLTAGE) {
+                        if (fwdCvExitMs == 0) fwdCvExitMs = now;
+                        if (now - fwdCvExitMs >= FWD_CV_EXIT_CONFIRM_MS) {
+                            forwardMode = FWD_CC;
+                            fwdCurrIntegrator = 0.0f;
+                            fwdVoltIntegrator = 0.0f;
+                            fwdIrefCvCmd = 0.5f;
+                            full_condition_start_ms = 0;
+                        }
+                    } else {
+                        fwdCvExitMs = 0;
+                    }
+                    bool doneCond = (v_bat_filt >= FULL_DETECT_VOLTAGE) &&
+                                    (i_bat_charge_filt <= FULL_END_CURRENT);
+                    if (doneCond) {
+                        if (full_condition_start_ms == 0) full_condition_start_ms = now;
+                        if (now - full_condition_start_ms >= FULL_CONFIRM_MS) {
+                            forwardMode = FWD_DONE;
+                            charge_full_hold = true;
+                            disablePowerStage();
+                            Serial.println("[INFO] Battery FULL detected in FORWARD_CV.");
+                        }
+                    } else {
+                        full_condition_start_ms = 0;
+                    }
+                } else { // FWD_DONE
+                    duty_accumulator = 0.0f;
+                    if (v_bat_filt <= RESTART_CHARGE_VOLTAGE && v_ac_in >= MIN_AC_VOLTAGE) {
+                        charge_full_hold = false;
+                        forwardMode = FWD_CC;
+                        fwdCurrIntegrator = 0.0f;
+                        fwdVoltIntegrator = 0.0f;
+                        fwdIrefCvCmd = 0.5f;
+                        Serial.println("[INFO] FORWARD resume from DONE -> CC.");
+                    }
                 }
-                pid_integral_cv += pid_error_cv;
-                pid_integral_cv = constrain(pid_integral_cv, -100, 100);
-                float delta_error_cv = pid_error_cv - pid_last_error_cv;
-                float pid_out_cv = (Kp_cv * pid_error_cv) + (Ki_cv * pid_integral_cv) + (Kd_cv * delta_error_cv);
-                pid_last_error_cv = pid_error_cv;
-                float final_battery_pid = min(pid_out_cc, pid_out_cv);
-                if (final_battery_pid > 1.5) final_battery_pid = 1.5;
-                if (final_battery_pid < -4.0) final_battery_pid = -4.0;
-                duty_accumulator += final_battery_pid;
+                // Outer safety clamps (Forward only)
+                if (i_bat_charge_abs > (TARGET_CC_CURRENT + 0.25f)) {
+                    duty_accumulator -= (2.0f + (i_bat_charge_abs - TARGET_CC_CURRENT) * 3.0f);
+                    fwdCurrIntegrator *= 0.8f;
+                }
+                if (fabs(i_ac_in) > FWD_AC_CURRENT_HARD_A) {
+                    duty_accumulator -= 4.0f;
+                    fwdCurrIntegrator *= 0.85f;
+                }
+                if (v_bat_filt > TARGET_CV_VOLTAGE) {
+                    float over_cv = v_bat_filt - TARGET_CV_VOLTAGE;
+                    float cut = (forwardMode == FWD_CV) ? (0.5f + over_cv * 2.5f)
+                                                        : (2.0f + over_cv * 8.0f);
+                    duty_accumulator -= cut;
+                    if (forwardMode != FWD_CV) fwdCurrIntegrator = 0.0f;
+                }
+                if (v_bat > (TARGET_CV_VOLTAGE + 0.4f)) {
+                    duty_accumulator -= (forwardMode == FWD_CV) ? 2.5f : 6.0f;
+                    if (forwardMode != FWD_CV) fwdCurrIntegrator = 0.0f;
+                }
+                duty_accumulator = boostClampf(duty_accumulator, 0.0f, (float)allowed_max_duty);
             }
             else if (currentState == STATE_BOOST) {
                 const float dt = 0.02f;
@@ -875,7 +1049,10 @@ void TaskSampleData(void * pvParameters) {
                 else if (boostNewMode == BOOST_NEW_CV) state_label = "BOOST_CV";
                 else state_label = "BOOST_DONE";
             } else if (currentState == STATE_FORWARD) {
-                state_label = "FORWARD";
+                if (forwardMode == FWD_SOFTSTART) state_label = "FWD_SOFT";
+                else if (forwardMode == FWD_CC) state_label = "FWD_CC";
+                else if (forwardMode == FWD_CV) state_label = "FWD_CV";
+                else state_label = "FWD_DONE";
             }
             Serial.println("=========================================================================================");
             Serial.printf("[DEBUG] System: %s | State: %s | Duty: %d%%\n",
