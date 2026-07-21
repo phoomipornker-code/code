@@ -30,7 +30,7 @@ python sim/forward_converter.py --design 240vac-nr
 - MOSFET **STW20N95K5** + RCD (**1 nF**, **100 Ω**, UF4007)
 - Dr **UF4007**
 - \(L \approx 520\,\mu\mathrm{H}\), \(C_o = 470\text{–}1000\,\mu\mathrm{F}\)
-- เฟิร์มแวร์: `PWM_FREQ = 67000`, `MAX_DUTY_FORWARD ≤ 460` (~45%)
+- เฟิร์มแวร์: Boost `50 kHz` / Forward `67 kHz`, `MAX_DUTY_FORWARD ≤ 460` (~45%) — แท็ก `cv58-boost-v14-forward-v17`
 
 ## สรุปโทโพโลยี
 
