@@ -5,9 +5,9 @@
 ## ค่าคงที่สำคัญ
 
 ```cpp
-PWM_FREQ              = 50000;      // 50 kHz
+PWM_FREQ              = 67000;      // 67 kHz  (Forward)
 PWM_FORWARD_PIN       = 14;
-MAX_DUTY_FORWARD      = 490;        // ~47.9% ของ 1023
+MAX_DUTY_FORWARD      = 460;        // ~45% ของ 1023 (Nr=Np)
 TARGET_CC_CURRENT     = 6.0;        // A
 TARGET_CV_VOLTAGE     = 56.00;      // V
 CV_DEADBAND_V         = 0.12;
@@ -49,8 +49,8 @@ ledcWrite(PWM_BOOST_PIN, 0);
 
 ```cpp
 // แนะนำเปลี่ยนเพื่อรีเซ็ตฟลักซ์ทัน (Nr = Np)
+const int PWM_FREQ = 67000;
 const int MAX_DUTY_FORWARD = 460;  // ~45%
-// PWM_FREQ 50000–67000 ใช้ได้กับดีไซน์ ETD49
 ```
 
 วางไฟล์สเก็ตช์เต็มชื่อ `charger_main.ino` ในโฟลเดอร์นี้ (Arduino IDE: เปิดโฟลเดอร์ `firmware` เป็น sketch)

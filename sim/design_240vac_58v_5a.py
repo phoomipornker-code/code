@@ -16,7 +16,7 @@ class Spec:
     io: float = 5.0
     vf: float = 0.7
     eta: float = 0.90
-    fs: float = 100e3
+    fs: float = 67e3  # Forward ใช้ 67 kHz
     d_max: float = 0.45
     nr_over_np: float = 1.0  # Nr/Np = 1 → reset 1:1
     vin_ripple_margin: float = 5.0
@@ -428,20 +428,20 @@ def main() -> None:
     parser.add_argument(
         "--fs",
         type=float,
-        default=65e3,
-        help="ความถี่สวิตช์ Hz (ค่าเริ่ม 65000; ช่วงที่ใช้ได้ 50e3–100e3)",
+        default=67e3,
+        help="ความถี่สวิตช์ Hz (ค่าเริ่ม 67000 สำหรับ Forward)",
     )
     args = parser.parse_args()
     fs = args.fs
     if not 45e3 <= fs <= 120e3:
         raise SystemExit("แนะนำ fs ในช่วงประมาณ 50–100 kHz")
-    # ที่ fs ต่ำกว่า 80 kHz ลด Bmax เล็กน้อยไม่จำเป็น — คง 0.20 T
     spec = replace(Spec(), fs=fs)
-    # RCD กำลังลดตาม fs — Ll สมมติเดิม
     print_report(design(spec))
-    if fs < 80e3:
+    if abs(fs - 67e3) < 1:
+        print("Forward @ 67 kHz: ขดแนะนำ 48:21:48, L≈520 µH, Dmax≤0.45 (duty raw ≤460)")
+    elif fs < 80e3:
         print(
-            "หมายเหตุ: fs 50–67 kHz ใช้ได้ — ต้องเพิ่มจำนวนรอบและ L "
+            "หมายเหตุ: fs ต่ำกว่า 100 kHz ต้องเพิ่มจำนวนรอบและ L "
             "(ห้ามใช้ขด 32:14:32 ของชุด 100 kHz)"
         )
 

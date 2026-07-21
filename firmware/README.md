@@ -14,8 +14,8 @@
 | รายการ | ค่า |
 |--------|-----|
 | บอร์ด | ESP32 |
-| `PWM_FREQ` | **50 kHz**, 10-bit |
-| Forward PWM | GPIO **14**, `MAX_DUTY_FORWARD = 490` |
+| `PWM_FREQ` | **67 kHz**, 10-bit |
+| Forward PWM | GPIO **14**, `MAX_DUTY_FORWARD = 460` (แนะนำ) |
 | Boost PWM | GPIO **27**, `MAX_DUTY_BOOST = 760` |
 | CC / CV | **6.0 A** / **56.0 V** |
 | ควบคุม Forward | PID คู่ แล้ว `min(pid_cc, pid_cv)` |
@@ -24,7 +24,7 @@
 
 | รายการ | ในโค้ดตอนนี้ | แนะนำกับหม้อแปลง Nr=Np |
 |--------|--------------|-------------------------|
-| `PWM_FREQ` | 50000 | 50000–67000 ได้ |
-| `MAX_DUTY_FORWARD` | 490 (~47.9%) | **≤ 460 (~45%)** |
+| `PWM_FREQ` | **67000** | ค่าใช้งาน Forward |
+| `MAX_DUTY_FORWARD` | 490 (เดิม) | **ใช้ 460 (~45%)** |
 | MOSFET | — | STW20N95K5 |
-| หม้อแปลง | — | ETD49 ตาม fs (เช่น 50:22:50 @ 65 kHz) |
+| หม้อแปลง | — | ETD49 **48:21:48 @ 67 kHz** |
