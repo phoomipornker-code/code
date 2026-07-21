@@ -8,7 +8,7 @@
 PWM_FREQ              = 67000;      // 67 kHz  (Forward)
 PWM_FORWARD_PIN       = 14;
 MAX_DUTY_FORWARD      = 460;        // ~45% ของ 1023 (Nr=Np)
-TARGET_CC_CURRENT     = 5.0;        // A
+TARGET_CC_CURRENT     = 5.0;        // A  (ลดจาก 6.0)
 TARGET_CV_VOLTAGE     = 56.00;      // V
 CV_DEADBAND_V         = 0.12;
 RESTART_CHARGE_VOLTAGE = 54.0;

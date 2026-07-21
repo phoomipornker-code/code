@@ -1,3 +1,5 @@
+ไฟล์หลัก: [`charger_main.ino`](charger_main.ino) — แท็ก `cv58-forward-67khz-5a-v15`
+
 # เฟิร์มแวร์ชาร์จเจอร์ (Boost PV + Forward AC)
 
 แท็กที่อ้างอิง: `cv58-stability-v14-cv-stable`
