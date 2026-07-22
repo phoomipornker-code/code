@@ -1,6 +1,6 @@
 # โน้ตส่วน STATE_FORWARD
 
-แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v45`
+แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v46`
 
 ## ค่าคงที่สำคัญ
 
@@ -48,6 +48,7 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 - ADC mutex / bus-glitch / ACblip / **BATspike** (V พุ่งขณะ I ยังไหล → ไม่ตัด BMS-OPEN)
 - BMS-OPEN จริง: V สูง + กระแสยุบ + confirm ~120 ms
 - Soft over-current / OVP ตามเดิม (CV ใช้ขั้นละเอียด ไม่ตัดแรง)
+- ตอนชาร์จ: **กด STOP ค้าง ~350 ms** เพื่อหยุด (กัน EMI ปลอม) — จะมี log `STOP held`
 
 Duty จำกัดที่ `MAX_DUTY_FORWARD` (460)  
 PWM GPIO 14 @ 67 kHz

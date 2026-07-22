@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v45";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v46";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -116,6 +116,8 @@ const unsigned long ADC_GLITCH_LOG_MS = 1000;
 const float ADC_BAT_HIGH_SPIKE_MV = 80.0f;
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 const unsigned long BMS_OPEN_CONFIRM_MS = 120;  // ignore single-sample V spikes
+// While charging, require sustained STOP to end (EMI on GPIO can false-edge).
+const unsigned long STOP_HOLD_END_MS = 350;
 // =========================================================================
 // BOOST control (new flow): SOFTSTART -> CC_MPPT -> CV -> DONE
 // =========================================================================
@@ -397,7 +399,7 @@ void setup() {
     Serial.printf("[BOOT] CFG BOOST_CC=%.2fA FWD_CC=%.2fA CV=%.2fV FWD_CVentry=%.2fV DmaxF=%d fBoost=%dHz fFwd=%dHz\n",
                   TARGET_CC_CURRENT, FWD_TARGET_CC_CURRENT, TARGET_CV_VOLTAGE, FWD_CV_ENTRY_VOLTAGE,
                   MAX_DUTY_FORWARD, PWM_FREQ_BOOST, PWM_FREQ_FORWARD);
-    Serial.println("[BOOT] UI: STOP toggles BOOST/FORWARD in STANDBY, then press START.");
+    Serial.println("[BOOT] UI: STOP toggles BOOST/FORWARD in STANDBY; hold STOP ~350ms to end charge.");
     Serial.println("[BOOT] Forward AC sense: diode-bridge DC, AC110V (MIN_AC post-bridge).");
     Wire.begin(21, 22);
     Wire.setClock(I2C_CLOCK_HZ);
@@ -500,6 +502,7 @@ void TaskSampleData(void * pvParameters) {
                 (ac_sudden_alone &&
                  (now - ac_brief_low_since_ms < FWD_AC_BRIEF_GLITCH_MS));
             bool solar_raw_glitch = !forward_active &&
+                                    (selectedChargeMode != USER_MODE_FORWARD) &&
                                     (raw_mv_v0 < ADC_RAW_MIN_VALID_MV) &&
                                     (power_stage_active ||
                                      i_solar_mag > ADC_GLITCH_CURRENT_GATE_A ||
@@ -1304,6 +1307,8 @@ void TaskLCDLoop(void * pvParameters) {
     int lcd_mutex_fail_count = 0;
     bool start_raw_last = HIGH, stop_raw_last = HIGH;
     unsigned long start_change_ms = 0, stop_change_ms = 0;
+    unsigned long stop_held_since_ms = 0;
+    bool stop_end_armed = false;
     const unsigned long DEBOUNCE_MS = 80;
     for(;;) {
         unsigned long now = millis();
@@ -1325,16 +1330,33 @@ void TaskLCDLoop(void * pvParameters) {
         bool stop_pressed  = (current_stop == LOW);
         bool start_edge = (start_pressed && last_start_state == HIGH);
         bool stop_edge  = (stop_pressed && last_stop_state == HIGH);
-        if (stop_edge) {
+        if (system_ON || charge_full_hold) {
+            // Running: require sustained STOP (EMI/false edges were ending charge with no log).
+            if (stop_pressed) {
+                if (stop_held_since_ms == 0) stop_held_since_ms = now;
+                if (!stop_end_armed && (now - stop_held_since_ms >= STOP_HOLD_END_MS)) {
+                    stop_end_armed = true;
+                    show_no_power_alert = false;
+                    show_ovp_alert = false;
+                    system_ON = false;
+                    charge_full_hold = false;
+                    Serial.printf("[INFO] STOP held %lums — charge ended (was %s).\n",
+                                  (unsigned long)STOP_HOLD_END_MS,
+                                  (currentState == STATE_FORWARD) ? "FORWARD" :
+                                  (currentState == STATE_BOOST) ? "BOOST" : "ON");
+                }
+            } else {
+                stop_held_since_ms = 0;
+                stop_end_armed = false;
+            }
+        } else if (stop_edge) {
+            stop_held_since_ms = 0;
+            stop_end_armed = false;
             show_no_power_alert = false;
             show_ovp_alert = false;
-            if (system_ON || charge_full_hold) {
-                // Running / FULL HOLD: STOP ends charge.
-                system_ON = false;
-                charge_full_hold = false;
-            } else if (ovp_latched &&
-                       v_bat_filt <= HARD_OVP_RELEASE_VOLTAGE &&
-                       v_bat <= (HARD_OVP_RELEASE_VOLTAGE + 0.8f)) {
+            if (ovp_latched &&
+                v_bat_filt <= HARD_OVP_RELEASE_VOLTAGE &&
+                v_bat <= (HARD_OVP_RELEASE_VOLTAGE + 0.8f)) {
                 // Standby + OVP: STOP clears latch when voltage is safe.
                 ovp_latched = false;
                 Serial.printf("[INFO] OVP latch cleared by STOP at %.2fV (release=%.2fV).\n",
@@ -1348,7 +1370,11 @@ void TaskLCDLoop(void * pvParameters) {
                               (selectedChargeMode == USER_MODE_BOOST) ? "BOOST PV" : "FORWARD AC");
                 last_lcd_refresh = 0;  // force LCD refresh to show new mode
             }
-        } else if (start_edge) {
+        } else if (!stop_pressed) {
+            stop_held_since_ms = 0;
+            stop_end_armed = false;
+        }
+        if (start_edge) {
             bool bat_ok = (v_bat_filt >= BAT_PRESENT_MIN_V) && (v_bat_filt <= BAT_START_MAX_V);
             bool selected_input_ok =
                 (selectedChargeMode == USER_MODE_BOOST) ? (v_solar >= MIN_PV_VOLTAGE)
