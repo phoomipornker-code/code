@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v43";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v44";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -25,8 +25,9 @@ Adafruit_ADS1115 ads_curr;
 // =========================================================================
 // Targets / safety thresholds
 // =========================================================================
-// CV=56.0V (~3.50V/cell for 16S LFP) — longevity / BMS-friendly cutoff.
-const float TARGET_CV_VOLTAGE = 56.00;
+// Forward CV target (Boost keeps BOOST_CV_TARGET_VOLTAGE=56.00 separately).
+// 55.8 V ≈ 3.49 V/cell — slightly under 56 to stay clear of BMS preempt / sense spikes.
+const float TARGET_CV_VOLTAGE = 55.80;
 const float TARGET_CC_CURRENT = 6.0;       // Boost CC (proven v14)
 const float FWD_TARGET_CC_CURRENT = 3.0;   // Forward CC setpoint
 const float MIN_PV_VOLTAGE = 42.0;
@@ -46,7 +47,8 @@ const unsigned long ADC_STALE_TIMEOUT_MS = 2500;  // was 700 — avoid LCD I2C c
 const unsigned long ADC_STALE_WARN_MS = 800;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
 const float CV_DEADBAND_V = 0.12;
-const float FULL_DETECT_VOLTAGE = 55.90;
+const float FULL_DETECT_VOLTAGE = 55.90;   // Boost FULL (CV 56.0)
+const float FWD_FULL_DETECT_VOLTAGE = 55.70; // Forward FULL near CV 55.8
 const float FULL_END_CURRENT = 0.50;
 const unsigned long FULL_CONFIRM_MS = 60000;
 const float HIGH_VOLTAGE_STOP_VOLTAGE = 56.80;
@@ -56,11 +58,11 @@ const float RESTART_CHARGE_VOLTAGE = 54.0;
 // Forward (AC) control: SoftStart → CC → CV → DONE  (NO PID — step/hysteresis)
 // Slow duty steps protect Cin; freeze duty-up on AC sag / bus dip.
 // =========================================================================
-const float FWD_CV_ENTRY_VOLTAGE = 55.10;  // was 55.50 — field ~55.2 already tapering in CC
-const float FWD_CV_FORCE_VOLTAGE = 55.35;  // was 55.70
-const float FWD_CV_EXIT_VOLTAGE  = 54.60;  // hysteresis below entry
-const float FWD_CC_TAPER_START_V = 54.80;
-const float FWD_CV_NEAR_BAND_V = 0.35;
+const float FWD_CV_ENTRY_VOLTAGE = 54.90;  // enter CV approaching 55.8
+const float FWD_CV_FORCE_VOLTAGE = 55.20;
+const float FWD_CV_EXIT_VOLTAGE  = 54.40;  // hysteresis below entry
+const float FWD_CC_TAPER_START_V = 54.60;
+const float FWD_CV_NEAR_BAND_V = 0.30;
 const unsigned long FWD_SOFTSTART_MS = 5000;
 const unsigned long FWD_CV_ENTER_CONFIRM_MS = 200;
 const unsigned long FWD_CV_EXIT_CONFIRM_MS = 5000;
@@ -75,7 +77,7 @@ const float FWD_STEP_UP_CV_NEAR = 0.20f;
 const float FWD_STEP_DOWN_CV = 0.80f;
 const float FWD_STEP_DOWN_CV_FINE = 0.35f;
 const float FWD_STEP_DOWN_CV_OVER = 1.50f;
-const float FWD_CV_HOLD_BAND_V = 0.05f;    // tighter hold around 56 V
+const float FWD_CV_HOLD_BAND_V = 0.05f;    // tighter hold around 55.8 V
 const float FWD_CC_HOLD_BAND_A = 0.10f;
 const float FWD_CC_FAR_BAND_A = 0.60f;
 const float FWD_AC_HOLD_CLIMB_V = 115.0f; // freeze duty-up if bus dips (Cin stress)
@@ -918,7 +920,7 @@ void TaskSampleData(void * pvParameters) {
                     } else {
                         fwdCvExitMs = 0;
                     }
-                    bool doneCond = (v_bat_filt >= FULL_DETECT_VOLTAGE) &&
+                    bool doneCond = (v_bat_filt >= FWD_FULL_DETECT_VOLTAGE) &&
                                     (i_bat_charge_filt <= FULL_END_CURRENT);
                     if (doneCond) {
                         if (fwd_full_condition_start_ms == 0) fwd_full_condition_start_ms = now;
