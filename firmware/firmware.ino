@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v42";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v43";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -110,7 +110,10 @@ const float NOISE_I_THRESHOLD = 0.08;
 const float ADC_RAW_MIN_VALID_MV = 80.0;
 const float ADC_GLITCH_CURRENT_GATE_A = 0.35;
 const unsigned long ADC_GLITCH_LOG_MS = 1000;
+// Sudden BAT sense jump up (~3.3 V) while still charging ⇒ ADS glitch, not BMS open.
+const float ADC_BAT_HIGH_SPIKE_MV = 80.0f;
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
+const unsigned long BMS_OPEN_CONFIRM_MS = 120;  // ignore single-sample V spikes
 // =========================================================================
 // BOOST control (new flow): SOFTSTART -> CC_MPPT -> CV -> DONE
 // =========================================================================
@@ -440,6 +443,7 @@ void TaskSampleData(void * pvParameters) {
     float last_valid_raw_mv_v2 = NAN;
     unsigned long ac_brief_low_since_ms = 0;
     unsigned long last_adc_glitch_log = 0;
+    unsigned long bms_open_suspect_ms = 0;
     for(;;) {
         unsigned long now = millis();
         if (!sensor_init_ok) {
@@ -499,10 +503,20 @@ void TaskSampleData(void * pvParameters) {
                                      i_solar_mag > ADC_GLITCH_CURRENT_GATE_A ||
                                      i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A);
             bool ac_raw_glitch = multi_ch_bus_glitch || ac_brief_glitch;
-            bool bat_raw_glitch = (raw_mv_v2 < ADC_RAW_MIN_VALID_MV) &&
-                                  (power_stage_active ||
-                                   i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
-                                   multi_ch_bus_glitch);
+            bool bat_raw_low_glitch = (raw_mv_v2 < ADC_RAW_MIN_VALID_MV) &&
+                                      (power_stage_active ||
+                                       i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
+                                       multi_ch_bus_glitch);
+            // Field: BAT raw jumped ~1338→1520+ mV → Vbat≈63 V / step≈7.8 V while I≈1.1 A
+            // still flowing → false BMS-OPEN trip. Hold last valid while charge current present.
+            bool bat_raw_high_spike =
+                power_stage_active &&
+                !isnan(last_valid_raw_mv_v2) &&
+                (last_valid_raw_mv_v2 >= ADC_RAW_MIN_VALID_MV) &&
+                (raw_mv_v2 > (last_valid_raw_mv_v2 + ADC_BAT_HIGH_SPIKE_MV)) &&
+                (i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
+                 i_bat_charge_abs > ADC_GLITCH_CURRENT_GATE_A);
+            bool bat_raw_glitch = bat_raw_low_glitch || bat_raw_high_spike;
             if (solar_raw_glitch && !isnan(last_valid_raw_mv_v0)) {
                 raw_mv_v0 = last_valid_raw_mv_v0;
             } else if (!solar_raw_glitch) {
@@ -521,10 +535,11 @@ void TaskSampleData(void * pvParameters) {
             if ((solar_raw_glitch || ac_raw_glitch || bat_raw_glitch) &&
                 (now - last_adc_glitch_log >= ADC_GLITCH_LOG_MS)) {
                 last_adc_glitch_log = now;
-                Serial.printf("[WARN] ADC glitch filtered: PVraw=%.1f ACraw=%.1f BATraw=%.1fmV duty=%d Ib=%.2fA%s%s\n",
+                Serial.printf("[WARN] ADC glitch filtered: PVraw=%.1f ACraw=%.1f BATraw=%.1fmV duty=%d Ib=%.2fA%s%s%s\n",
                               pv_raw_before, ac_raw_before, bat_raw_before, raw_duty, i_bat_charge_filt,
                               multi_ch_bus_glitch ? " BUS!" : "",
-                              ac_brief_glitch ? " ACblip!" : "");
+                              ac_brief_glitch ? " ACblip!" : "",
+                              bat_raw_high_spike ? " BATspike!" : "");
             }
             float mv_pure_v0 = raw_mv_v0 - OFFSET_V_SOLAR; if (mv_pure_v0 < 0.0) mv_pure_v0 = 0.0;
             float mv_pure_v1 = raw_mv_v1 - OFFSET_V_AC;    if (mv_pure_v1 < 0.0) mv_pure_v1 = 0.0;
@@ -559,23 +574,36 @@ void TaskSampleData(void * pvParameters) {
             i_bat_charge_abs = fabs(i_bat);
             float vbat_step = (last_vbat_sample > 0.0f) ? (v_bat - last_vbat_sample) : 0.0f;
             float vbat_filt_step = (last_vbat_filt_sample > 0.0f) ? (v_bat_filt - last_vbat_filt_sample) : 0.0f;
-            // BMS open / near-open: same proven logic for Boost and Forward.
-            if (!ovp_latched &&
-                system_ON &&
-                (currentState == STATE_BOOST || currentState == STATE_FORWARD) &&
-                raw_duty > 0 &&
-                (v_bat_filt >= BMS_PREEMPT_ZONE_V || v_bat >= BMS_PREEMPT_ZONE_V) &&
-                ((v_bat >= BMS_OPEN_DETECT_V) ||
-                 (vbat_step >= BMS_OPEN_JUMP_DELTA_V) ||
-                 (v_bat > (v_bat_filt + 1.8f)) ||
-                 (v_bat_filt >= BMS_OPEN_DETECT_V && i_bat_charge_filt <= BMS_OPEN_CURRENT_MAX_A))) {
-                ovp_latched = true;
-                ovp_trip_voltage = max(v_bat, v_bat_filt);
-                ovp_trip_ms = now;
-                forceSafeShutdown();
-                charge_full_hold = true;
-                Serial.printf("[CRITICAL] BMS-OPEN/preempt at raw=%.2f filt=%.2f I=%.2fA step=%.2f. PWM off.\n",
-                              v_bat, v_bat_filt, i_bat_charge_filt, vbat_step);
+            // BMS open: real open raises V and collapses I. Single ADC V-spike with I still
+            // flowing (field: raw=63.76 step=7.76 I=1.10) must not latch OVP.
+            bool bms_zone = (v_bat_filt >= BMS_PREEMPT_ZONE_V || v_bat >= BMS_PREEMPT_ZONE_V);
+            bool i_collapsed = (i_bat_charge_filt <= BMS_OPEN_CURRENT_MAX_A) &&
+                               (i_bat_charge_abs <= (BMS_OPEN_CURRENT_MAX_A + 0.25f));
+            bool bms_v_event =
+                (v_bat >= BMS_OPEN_DETECT_V) ||
+                (vbat_step >= BMS_OPEN_JUMP_DELTA_V) ||
+                (v_bat > (v_bat_filt + 1.8f)) ||
+                (v_bat_filt >= BMS_OPEN_DETECT_V);
+            bool bms_suspect = !ovp_latched &&
+                               system_ON &&
+                               (currentState == STATE_BOOST || currentState == STATE_FORWARD) &&
+                               raw_duty > 0 &&
+                               bms_zone &&
+                               bms_v_event;
+            if (bms_suspect && i_collapsed) {
+                if (bms_open_suspect_ms == 0) bms_open_suspect_ms = now;
+                if (now - bms_open_suspect_ms >= BMS_OPEN_CONFIRM_MS) {
+                    ovp_latched = true;
+                    ovp_trip_voltage = max(v_bat, v_bat_filt);
+                    ovp_trip_ms = now;
+                    forceSafeShutdown();
+                    charge_full_hold = true;
+                    bms_open_suspect_ms = 0;
+                    Serial.printf("[CRITICAL] BMS-OPEN/preempt at raw=%.2f filt=%.2f I=%.2fA step=%.2f. PWM off.\n",
+                                  v_bat, v_bat_filt, i_bat_charge_filt, vbat_step);
+                }
+            } else {
+                bms_open_suspect_ms = 0;
             }
             if (!ovp_latched &&
                 (v_bat >= HARD_OVP_TRIP_VOLTAGE || v_bat_filt >= HARD_OVP_TRIP_VOLTAGE)) {
