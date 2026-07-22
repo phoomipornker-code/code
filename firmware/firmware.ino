@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v29";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v30";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward mirrors that same SoftStart→CC→CV→DONE + BMS/spike safety style.
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -42,7 +42,8 @@ const float FWD_DESIGN_DUTY_FRAC = 0.45f;
 // Battery must be present and in a safe start window before enabling a power stage.
 const float BAT_PRESENT_MIN_V = 40.0;
 const float BAT_START_MAX_V = 56.40;
-const unsigned long ADC_STALE_TIMEOUT_MS = 700;
+const unsigned long ADC_STALE_TIMEOUT_MS = 2500;  // was 700 — avoid LCD I2C contention trips
+const unsigned long ADC_STALE_WARN_MS = 800;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
 const float CV_DEADBAND_V = 0.12;
 const float FULL_DETECT_VOLTAGE = 55.90;
@@ -466,15 +467,23 @@ void TaskSampleData(void * pvParameters) {
             continue;
         }
         bool sample_ok = false;
-        if (xSemaphoreTake(i2c_Mutex, 50)) {
+        // Hold I2C mutex only for ADS reads — not through Serial/BMS (false ADC timeouts).
+        if (xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(200))) {
             raw_mv_v0 = readADCStable(ads_volt, 0, true) * 0.1875;
             raw_mv_v1 = readADCStable(ads_volt, 2, true) * 0.1875;
             raw_mv_v2 = readADCStable(ads_volt, 1, true) * 0.1875;
             raw_mv_i0 = readADCStable(ads_curr, 0) * 0.1875;
             raw_mv_i1 = readADCStable(ads_curr, 1) * 0.1875;
             raw_mv_i2 = readADCStable(ads_curr, 2) * 0.1875;
+            xSemaphoreGive(i2c_Mutex);
+
             bool power_stage_active = (raw_duty > 0);
-            bool solar_raw_glitch = (raw_mv_v0 < ADC_RAW_MIN_VALID_MV) &&
+            // FORWARD leaves PV sense open/zero — not an ADC glitch.
+            bool forward_active = (currentState == STATE_FORWARD);
+            float pv_raw_before = raw_mv_v0;
+            float bat_raw_before = raw_mv_v2;
+            bool solar_raw_glitch = !forward_active &&
+                                    (raw_mv_v0 < ADC_RAW_MIN_VALID_MV) &&
                                     (power_stage_active ||
                                      i_solar_mag > ADC_GLITCH_CURRENT_GATE_A ||
                                      i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A);
@@ -495,7 +504,7 @@ void TaskSampleData(void * pvParameters) {
                 (now - last_adc_glitch_log >= ADC_GLITCH_LOG_MS)) {
                 last_adc_glitch_log = now;
                 Serial.printf("[WARN] ADC glitch filtered: PVraw=%.1fmV BATraw=%.1fmV duty=%d Is=%.2fA Ib=%.2fA\n",
-                              raw_mv_v0, raw_mv_v2, raw_duty, i_solar_mag, i_bat_charge_filt);
+                              pv_raw_before, bat_raw_before, raw_duty, i_solar_mag, i_bat_charge_filt);
             }
             float mv_pure_v0 = raw_mv_v0 - OFFSET_V_SOLAR; if (mv_pure_v0 < 0.0) mv_pure_v0 = 0.0;
             float mv_pure_v1 = raw_mv_v1 - OFFSET_V_AC;    if (mv_pure_v1 < 0.0) mv_pure_v1 = 0.0;
@@ -637,11 +646,18 @@ void TaskSampleData(void * pvParameters) {
             last_vbat_filt_sample = v_bat_filt;
             last_adc_sample_ms = now;
             sample_ok = true;
-            xSemaphoreGive(i2c_Mutex);
         }
-        if (!sample_ok && system_ON && (now - last_adc_sample_ms > ADC_STALE_TIMEOUT_MS)) {
-            forceSafeShutdown();
-            Serial.println("[CRITICAL] ADC sample timeout. Auto-shutdown for safety.");
+        if (!sample_ok && system_ON) {
+            unsigned long stale_ms = now - last_adc_sample_ms;
+            if (stale_ms > ADC_STALE_WARN_MS &&
+                (now - last_sensor_error_log >= SENSOR_ERROR_LOG_MS)) {
+                last_sensor_error_log = now;
+                Serial.printf("[WARN] ADC bus busy/stale %lums (LCD contention?).\n", stale_ms);
+            }
+            if (stale_ms > ADC_STALE_TIMEOUT_MS) {
+                forceSafeShutdown();
+                Serial.println("[CRITICAL] ADC sample timeout. Auto-shutdown for safety.");
+            }
         }
         if (system_ON) {
             if (charge_full_hold) {
