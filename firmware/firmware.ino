@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v21";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v22";
 // =========================================================================
 // Hardware
 // =========================================================================
@@ -1130,13 +1130,30 @@ void TaskSampleData(void * pvParameters) {
                 run_label = "STARTING";  // ON but still STATE_OFF, entering selected path
             }
             Serial.println("=========================================================================================");
-            Serial.printf("[DEBUG] System: %s | Mode: %s | Run: %s | Duty: %d%%\n",
-                          (system_ON ? "ON " : "OFF"), sel_label, run_label, active_duty_percent);
-            Serial.printf("  [PV ] V:%5.1fV I:%5.2fA P:%6.1fW | Vref:%.2fV Iref_mppt:%.2fA\n",
-                          v_solar, i_solar_mag, (v_solar * i_solar_mag), boostNewPvRef, boostNewIrefMppt);
-            Serial.printf("  [BAT] V:%5.2fV I:%5.2fA (abs:%5.2fA)\n",
-                          v_bat_filt, i_bat_filt, i_bat_charge_filt);
-            Serial.printf("  [AC ] V:%5.1fV I:%5.2fA\n", v_ac_in, i_ac_in);
+            Serial.printf("[DEBUG] System: %s | Mode: %s | Run: %s | Duty: %d%% (raw=%d)\n",
+                          (system_ON ? "ON " : "OFF"), sel_label, run_label, active_duty_percent, raw_duty);
+            // All calibrated sensors
+            Serial.printf("  [PV ] V:%6.2fV  I:%6.2fA  |P|:%6.1fW  (mag I:%5.2fA)\n",
+                          v_solar, i_solar, (v_solar * i_solar_mag), i_solar_mag);
+            Serial.printf("  [AC ] V:%6.2fV  I:%6.2fA  |P|:%6.1fW  (bridge DC)\n",
+                          v_ac_in, i_ac_in, fabsf(v_ac_in * i_ac_in));
+            Serial.printf("  [BAT] V:%6.2fV  I:%6.2fA  Vf:%6.2fV  If:%6.2fA  Iabs:%5.2fA\n",
+                          v_bat, i_bat, v_bat_filt, i_bat_filt, i_bat_charge_abs);
+            // ADS raw (mV) — volt ADS 0x48 / curr ADS 0x49
+            Serial.printf("  [RAW V mV] PV(ch0):%7.1f  AC(ch2):%7.1f  BAT(ch1):%7.1f\n",
+                          raw_mv_v0, raw_mv_v1, raw_mv_v2);
+            Serial.printf("  [RAW I mV] PV(ch0):%7.1f  AC(ch1):%7.1f  BAT(ch2):%7.1f\n",
+                          raw_mv_i0, raw_mv_i1, raw_mv_i2);
+            Serial.printf("  [I ZERO]   PV:%7.1f  AC:%7.1f  BAT:%7.1f  (boot offset mV)\n",
+                          current_offset_i0, current_offset_i1, current_offset_i2);
+            if (selectedChargeMode == USER_MODE_BOOST || currentState == STATE_BOOST) {
+                Serial.printf("  [BOOST] Vref:%.2fV Iref_mppt:%.2fA Iref_cv:%.2fA Pavail:%.1fW\n",
+                              boostNewPvRef, boostNewIrefMppt, boostNewIrefCvCmd, boostNewPAvailFilt);
+            }
+            if (selectedChargeMode == USER_MODE_FORWARD || currentState == STATE_FORWARD) {
+                Serial.printf("  [FWD ] Iref_cv:%.2fA duty_acc:%.1f\n",
+                              fwdIrefCvCmd, duty_accumulator);
+            }
             Serial.println("=========================================================================================");
         }
         vTaskDelay(20 / portTICK_PERIOD_MS);
