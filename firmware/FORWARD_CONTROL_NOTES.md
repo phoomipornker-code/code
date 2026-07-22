@@ -44,8 +44,9 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 
 ## Safety (Forward)
 
-- AC sag ชั่วคราว: **ไม่พัก PWM** — แค่ **freeze duty-up** (ห้ามเพิ่ม duty); ลดได้ตาม safety; shutdown ถ้าหาย ≥ **15 s**
-- ADC: ปล่อย I2C mutex ทันทีหลังอ่าน ADS; hold AC เฉพาะ multi-ch bus glitch (ไม่บัง sag จริง); stale trip 2.5 s
+- AC sag ชั่วคราว: **ไม่พัก PWM** — แค่ **freeze duty-up**; ลดได้ตาม safety; shutdown ถ้าหาย ≥ **15 s**
+- Duty open ช้า (Cin): SoftStart slew 1.5 / 5s; CC slew 1.5–2.5; freeze climb ถ้า AC&lt;115 V
+- ADC: ปล่อย I2C mutex ทันทีหลังอ่าน ADS; hold AC เฉพาะ multi-ch bus glitch; stale trip 2.5 s
 - ถ้า AC+BAT ยุบพร้อมกัน ~ค่าเดียวกัน = bus glitch — hold ค่าเดิม
 - BMS-open / spike preempt ใช้ร่วมกับ Boost
 - Duty preempt cap ใกล้ `BMS_PREEMPT_ZONE_V`
