@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v30";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v31";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward mirrors that same SoftStart→CC→CV→DONE + BMS/spike safety style.
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -453,6 +453,7 @@ void TaskSampleData(void * pvParameters) {
     unsigned long fwd_full_condition_start_ms = 0;
     unsigned long high_voltage_stop_start_ms = 0;
     float last_valid_raw_mv_v0 = NAN;
+    float last_valid_raw_mv_v1 = NAN;  // AC bridge
     float last_valid_raw_mv_v2 = NAN;
     unsigned long last_adc_glitch_log = 0;
     for(;;) {
@@ -481,30 +482,48 @@ void TaskSampleData(void * pvParameters) {
             // FORWARD leaves PV sense open/zero — not an ADC glitch.
             bool forward_active = (currentState == STATE_FORWARD);
             float pv_raw_before = raw_mv_v0;
+            float ac_raw_before = raw_mv_v1;
             float bat_raw_before = raw_mv_v2;
+            // Same ~40mV on BAT+AC while charging ⇒ ADS bus glitch (field: false AC 3V trip).
+            bool multi_ch_bus_glitch =
+                power_stage_active &&
+                (raw_mv_v2 < ADC_RAW_MIN_VALID_MV) &&
+                (raw_mv_v1 < ADC_RAW_MIN_VALID_MV) &&
+                (fabsf(raw_mv_v1 - raw_mv_v2) < 15.0f);
             bool solar_raw_glitch = !forward_active &&
                                     (raw_mv_v0 < ADC_RAW_MIN_VALID_MV) &&
                                     (power_stage_active ||
                                      i_solar_mag > ADC_GLITCH_CURRENT_GATE_A ||
                                      i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A);
+            bool ac_raw_glitch = (raw_mv_v1 < ADC_RAW_MIN_VALID_MV) &&
+                                 (power_stage_active ||
+                                  i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
+                                  multi_ch_bus_glitch);
             bool bat_raw_glitch = (raw_mv_v2 < ADC_RAW_MIN_VALID_MV) &&
                                   (power_stage_active ||
-                                   i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A);
+                                   i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
+                                   multi_ch_bus_glitch);
             if (solar_raw_glitch && !isnan(last_valid_raw_mv_v0)) {
                 raw_mv_v0 = last_valid_raw_mv_v0;
             } else if (!solar_raw_glitch) {
                 last_valid_raw_mv_v0 = raw_mv_v0;
+            }
+            if (ac_raw_glitch && !isnan(last_valid_raw_mv_v1)) {
+                raw_mv_v1 = last_valid_raw_mv_v1;
+            } else if (!ac_raw_glitch) {
+                last_valid_raw_mv_v1 = raw_mv_v1;
             }
             if (bat_raw_glitch && !isnan(last_valid_raw_mv_v2)) {
                 raw_mv_v2 = last_valid_raw_mv_v2;
             } else if (!bat_raw_glitch) {
                 last_valid_raw_mv_v2 = raw_mv_v2;
             }
-            if ((solar_raw_glitch || bat_raw_glitch) &&
+            if ((solar_raw_glitch || ac_raw_glitch || bat_raw_glitch) &&
                 (now - last_adc_glitch_log >= ADC_GLITCH_LOG_MS)) {
                 last_adc_glitch_log = now;
-                Serial.printf("[WARN] ADC glitch filtered: PVraw=%.1fmV BATraw=%.1fmV duty=%d Is=%.2fA Ib=%.2fA\n",
-                              pv_raw_before, bat_raw_before, raw_duty, i_solar_mag, i_bat_charge_filt);
+                Serial.printf("[WARN] ADC glitch filtered: PVraw=%.1f ACraw=%.1f BATraw=%.1fmV duty=%d Ib=%.2fA%s\n",
+                              pv_raw_before, ac_raw_before, bat_raw_before, raw_duty, i_bat_charge_filt,
+                              multi_ch_bus_glitch ? " BUS!" : "");
             }
             float mv_pure_v0 = raw_mv_v0 - OFFSET_V_SOLAR; if (mv_pure_v0 < 0.0) mv_pure_v0 = 0.0;
             float mv_pure_v1 = raw_mv_v1 - OFFSET_V_AC;    if (mv_pure_v1 < 0.0) mv_pure_v1 = 0.0;
