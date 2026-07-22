@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v20";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v21";
 // =========================================================================
 // Hardware
 // =========================================================================
@@ -1107,25 +1107,31 @@ void TaskSampleData(void * pvParameters) {
         active_duty_percent = round(((float)raw_duty * 100.0) / 1023.0);
         if (ENABLE_DEBUG_VERBOSE && (now - last_debug_time >= DEBUG_PRINT_INTERVAL_MS)) {
             last_debug_time = now;
-            const char* state_label = "OFF";
+            const char* sel_label =
+                (selectedChargeMode == USER_MODE_BOOST) ? "BOOST" : "FORWARD";
+            const char* run_label = "STANDBY";
             if (system_ON && charge_full_hold) {
-                state_label = "FULL_HOLD";
+                run_label = "FULL_HOLD";
             } else if (ovp_latched) {
-                state_label = "OVP_LOCK";
+                run_label = "OVP_LOCK";
+            } else if (!system_ON) {
+                run_label = "STANDBY";
             } else if (currentState == STATE_BOOST) {
-                if (boostNewMode == BOOST_NEW_SOFTSTART) state_label = "BOOST_SOFT";
-                else if (boostNewMode == BOOST_NEW_CC_MPPT) state_label = "BOOST_CCMP";
-                else if (boostNewMode == BOOST_NEW_CV) state_label = "BOOST_CV";
-                else state_label = "BOOST_DONE";
+                if (boostNewMode == BOOST_NEW_SOFTSTART) run_label = "BOOST_SOFT";
+                else if (boostNewMode == BOOST_NEW_CC_MPPT) run_label = "BOOST_CCMP";
+                else if (boostNewMode == BOOST_NEW_CV) run_label = "BOOST_CV";
+                else run_label = "BOOST_DONE";
             } else if (currentState == STATE_FORWARD) {
-                if (forwardMode == FWD_SOFTSTART) state_label = "FWD_SOFT";
-                else if (forwardMode == FWD_CC) state_label = "FWD_CC";
-                else if (forwardMode == FWD_CV) state_label = "FWD_CV";
-                else state_label = "FWD_DONE";
+                if (forwardMode == FWD_SOFTSTART) run_label = "FWD_SOFT";
+                else if (forwardMode == FWD_CC) run_label = "FWD_CC";
+                else if (forwardMode == FWD_CV) run_label = "FWD_CV";
+                else run_label = "FWD_DONE";
+            } else if (system_ON) {
+                run_label = "STARTING";  // ON but still STATE_OFF, entering selected path
             }
             Serial.println("=========================================================================================");
-            Serial.printf("[DEBUG] System: %s | State: %s | Duty: %d%%\n",
-                          (system_ON ? "ON " : "OFF"), state_label, active_duty_percent);
+            Serial.printf("[DEBUG] System: %s | Mode: %s | Run: %s | Duty: %d%%\n",
+                          (system_ON ? "ON " : "OFF"), sel_label, run_label, active_duty_percent);
             Serial.printf("  [PV ] V:%5.1fV I:%5.2fA P:%6.1fW | Vref:%.2fV Iref_mppt:%.2fA\n",
                           v_solar, i_solar_mag, (v_solar * i_solar_mag), boostNewPvRef, boostNewIrefMppt);
             Serial.printf("  [BAT] V:%5.2fV I:%5.2fA (abs:%5.2fA)\n",
