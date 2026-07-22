@@ -6,7 +6,7 @@
 ## นโยบายเวอร์ชันนี้
 
 - **Boost (PV):** **แช่แข็ง** ตามโค้ดที่ชาร์จ PV สำเร็จ `cv58-stability-v14-cv-stable` — PWM **50 kHz**, CC **6 A**, SoftStart→CC_MPPT→CV→DONE
-- **Forward (AC):** SoftStart→CC→CV→DONE — **CC 3 A** (HW 5 A@D≈45% feedforward) @ **67 kHz**
+- **Forward (AC):** SoftStart→CC→CV→DONE — **step/hysteresis (ไม่ใช้ PID)**, CC **3 A** @ **67 kHz**
 - **เลือกโหมดก่อน START:** กด **STOP** ตอน STANDBY สลับ `BOOST` ↔ `FORWARD` แล้วค่อยกด **START** (ไม่สลับอัตโนมัติตามอินพุต)
 
 ## วิธีแฟลชลง ESP32 (Arduino IDE)
@@ -18,7 +18,7 @@
    - `LiquidCrystal I2C` (Frank de Brabander หรือเทียบเท่า)
 4. เปิดโฟลเดอร์ `firmware` (ไฟล์ `firmware.ino` ต้องอยู่ในโฟลเดอร์ชื่อเดียวกัน)
 5. Upload ลง ESP32
-6. เปิด Serial Monitor **115200 baud** — ควรเห็น `[BOOT] Firmware: cv58-boost-v14-forward-v34`
+6. เปิด Serial Monitor **115200 baud** — ควรเห็น `[BOOT] Firmware: cv58-boost-v14-forward-v35`
 
 ## ปุ่มใช้งาน
 
@@ -58,4 +58,4 @@ LCD บรรทัดแรกตอน STANDBY แสดงโหมด เช
 OVP latch เคลียร์ด้วย **STOP** เมื่อแรงดันลดลง
 
 สรุปลอจิก Forward: [`FORWARD_CONTROL_NOTES.md`](FORWARD_CONTROL_NOTES.md)  
-Changelog: [`CHANGELOG_v34.md`](CHANGELOG_v34.md) · [`CHANGELOG_v33.md`](CHANGELOG_v33.md) · [`CHANGELOG_v32.md`](CHANGELOG_v32.md) · [`CHANGELOG_v31.md`](CHANGELOG_v31.md) · [`CHANGELOG_v30.md`](CHANGELOG_v30.md) · [`CHANGELOG_v29.md`](CHANGELOG_v29.md) · [`CHANGELOG_v28.md`](CHANGELOG_v28.md) · [`CHANGELOG_v27.md`](CHANGELOG_v27.md) · [`CHANGELOG_v26.md`](CHANGELOG_v26.md) · [`CHANGELOG_v25.md`](CHANGELOG_v25.md) · [`CHANGELOG_v24.md`](CHANGELOG_v24.md) · [`CHANGELOG_v23.md`](CHANGELOG_v23.md) · [`CHANGELOG_v22.md`](CHANGELOG_v22.md) · [`CHANGELOG_v21.md`](CHANGELOG_v21.md) · [`CHANGELOG_v20.md`](CHANGELOG_v20.md) · [`CHANGELOG_v19.md`](CHANGELOG_v19.md) · [`CHANGELOG_v18.md`](CHANGELOG_v18.md) · [`CHANGELOG_v17.md`](CHANGELOG_v17.md)
+Changelog: [`CHANGELOG_v35.md`](CHANGELOG_v35.md) · [`CHANGELOG_v34.md`](CHANGELOG_v34.md) · [`CHANGELOG_v33.md`](CHANGELOG_v33.md) · [`CHANGELOG_v32.md`](CHANGELOG_v32.md) · [`CHANGELOG_v31.md`](CHANGELOG_v31.md) · [`CHANGELOG_v30.md`](CHANGELOG_v30.md) · [`CHANGELOG_v29.md`](CHANGELOG_v29.md) · [`CHANGELOG_v28.md`](CHANGELOG_v28.md) · [`CHANGELOG_v27.md`](CHANGELOG_v27.md) · [`CHANGELOG_v26.md`](CHANGELOG_v26.md) · [`CHANGELOG_v25.md`](CHANGELOG_v25.md) · [`CHANGELOG_v24.md`](CHANGELOG_v24.md) · [`CHANGELOG_v23.md`](CHANGELOG_v23.md) · [`CHANGELOG_v22.md`](CHANGELOG_v22.md) · [`CHANGELOG_v21.md`](CHANGELOG_v21.md) · [`CHANGELOG_v20.md`](CHANGELOG_v20.md) · [`CHANGELOG_v19.md`](CHANGELOG_v19.md) · [`CHANGELOG_v18.md`](CHANGELOG_v18.md) · [`CHANGELOG_v17.md`](CHANGELOG_v17.md)
