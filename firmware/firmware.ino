@@ -277,19 +277,6 @@ static inline int forwardEstimateDutyRaw(float vin, float vout, int maxDuty) {
     raw = constrain(raw, (int)FWD_SOFTSTART_SEED_DUTY, maxDuty);
     return raw;
 }
-// CC open-loop duty estimate from HW 5 A ↔ D=45% (optional ceiling hint).
-static inline float forwardDutyFfForIref(float iRef, float vin, float vbat, int maxDuty) {
-    float iScale = boostClampf(iRef / FWD_DESIGN_I_AT_D45, 0.05f, 1.0f);
-    float dI = FWD_DESIGN_DUTY_FRAC * iScale;
-    float vinUse = (vin > 80.0f) ? vin : 80.0f;
-    float vbatUse = (vbat > 40.0f) ? vbat : 40.0f;
-    float dV = vbatUse / (vinUse * FWD_NS_NP_EST);
-    dV = boostClampf(dV, 0.08f, FWD_DESIGN_DUTY_FRAC);
-    float d = max(dI, dV * iScale);
-    float dCap = forwardDutyFracForTargetI();
-    d = boostClampf(d, 0.08f, dCap);
-    return boostClampf(d * 1023.0f, 0.0f, (float)maxDuty);
-}
 static inline void boostNewResetOnEntry(float vpvNow) {
     boostNewMode = BOOST_NEW_SOFTSTART;
     boostNewCurrIntegrator = 0.0f;

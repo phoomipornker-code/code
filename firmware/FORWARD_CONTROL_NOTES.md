@@ -1,6 +1,6 @@
 # โน้ตส่วน STATE_FORWARD
 
-แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v35`
+แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v36`
 
 ## ค่าคงที่สำคัญ
 
@@ -29,7 +29,7 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 ```text
 เข้า STATE_FORWARD
   → FWD_SOFTSTART : เพิ่ม duty เป็นขั้นเล็กๆ ไปหา seed (~45% ของ duty เป้า CC)
-  → FWD_CC        : I < Iref−band → +duty; I > Iref+band → −duty; ในแบนด์ = hold
+  → FWD_CC        : I < Iref−band → +duty จนถึงแบนด์หรือ Dmax (ไม่มีเพดาน FF)
                     เข้า CV เมื่อ Vbat≥55.5 / force 55.7
   → FWD_CV        : V ต่ำ → +duty เล็ก; V สูง → −duty; deadband = hold
                     FULL เมื่อ V≥55.9 และ I≤0.5A นาน 60s
