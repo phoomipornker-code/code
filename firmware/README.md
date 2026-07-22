@@ -1,7 +1,7 @@
 # เฟิร์มแวร์ ESP32 — ชาร์จเจอร์ Boost PV + Forward AC
 
 ไฟล์หลัก: [`firmware.ino`](firmware.ino)  
-แท็ก: `cv58-boost-v14-forward-v19`
+แท็ก: `cv58-boost-v14-forward-v20`
 
 ## นโยบายเวอร์ชันนี้
 
@@ -18,7 +18,7 @@
    - `LiquidCrystal I2C` (Frank de Brabander หรือเทียบเท่า)
 4. เปิดโฟลเดอร์ `firmware` (ไฟล์ `firmware.ino` ต้องอยู่ในโฟลเดอร์ชื่อเดียวกัน)
 5. Upload ลง ESP32
-6. เปิด Serial Monitor **115200 baud** — ควรเห็น `[BOOT] Firmware: cv58-boost-v14-forward-v19`
+6. เปิด Serial Monitor **115200 baud** — ควรเห็น `[BOOT] Firmware: cv58-boost-v14-forward-v20`
 
 ## ปุ่มใช้งาน
 
@@ -51,11 +51,11 @@ LCD บรรทัดแรกตอน STANDBY แสดงโหมด เช
 | CC | **6.0 A** | **5.0 A** |
 | CV | 56.0 V | 56.0 V |
 | Duty max | 760 | 460 (~45%, Nr=Np) |
-| Input min | PV ≥ 42 V | บริดจ์ DC ≥ **120 V** (AC 110 V) |
+| Input min | PV ≥ 42 V | บริดจ์ DC ≥ **95 V** (AC 110 V) |
 | โหมด | SoftStart→CC_MPPT→CV→DONE | SoftStart→CC→CV→DONE |
 
 แบตต้องอยู่ในช่วง **40.0 … 56.4 V** ก่อน START  
 OVP latch เคลียร์ด้วย **STOP** เมื่อแรงดันลดลง
 
 สรุปลอจิก Forward: [`FORWARD_CONTROL_NOTES.md`](FORWARD_CONTROL_NOTES.md)  
-Changelog: [`CHANGELOG_v19.md`](CHANGELOG_v19.md) · [`CHANGELOG_v18.md`](CHANGELOG_v18.md) · [`CHANGELOG_v17.md`](CHANGELOG_v17.md)
+Changelog: [`CHANGELOG_v20.md`](CHANGELOG_v20.md) · [`CHANGELOG_v19.md`](CHANGELOG_v19.md) · [`CHANGELOG_v18.md`](CHANGELOG_v18.md) · [`CHANGELOG_v17.md`](CHANGELOG_v17.md)

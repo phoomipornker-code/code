@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v19";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v20";
 // =========================================================================
 // Hardware
 // =========================================================================
@@ -28,8 +28,9 @@ const float TARGET_CC_CURRENT = 6.0;       // Boost CC (proven v14)
 const float FWD_TARGET_CC_CURRENT = 5.0;   // Forward CC
 const float MIN_PV_VOLTAGE = 42.0;
 const float UNDER_PV_VOLTAGE_CRIT = 39.0;
-// v_ac_in = DC after diode bridge (not VAC RMS). AC 110 V → ~155 Vpeak unloaded.
-const float MIN_AC_VOLTAGE = 120.0;        // post-bridge DC low-line for AC 110 V
+// v_ac_in = DC after diode bridge (not VAC RMS). AC 110 V → ~155 Vpeak unloaded,
+// typically ~100–140 V under load / with ripple averaging on ADS sample.
+const float MIN_AC_VOLTAGE = 95.0;         // post-bridge DC low-line for AC 110 V
 const int MAX_DUTY_FORWARD = 460;  // ~45% for Nr=Np reset @ 67 kHz
 const int MAX_DUTY_BOOST   = 760;
 // Battery must be present and in a safe start window before enabling a power stage.
@@ -425,13 +426,10 @@ void TaskSampleData(void * pvParameters) {
             raw_mv_i1 = readADCStable(ads_curr, 1) * 0.1875;
             raw_mv_i2 = readADCStable(ads_curr, 2) * 0.1875;
             bool power_stage_active = (raw_duty > 0);
-            bool solar_raw_glitch = (raw_mv_v0 < ADC_RAW_MIN_VALID_MV) &&
-                                    (power_stage_active ||
-                                     i_solar_mag > ADC_GLITCH_CURRENT_GATE_A ||
-                                     i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A);
-            bool bat_raw_glitch = (raw_mv_v2 < ADC_RAW_MIN_VALID_MV) &&
-                                  (power_stage_active ||
-                                   i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A);
+            // Only hold last-good raw samples while the power stage is switching.
+            // Using residual Hall current alone caused false "glitch hold" and WARN spam when PV=0.
+            bool solar_raw_glitch = (raw_mv_v0 < ADC_RAW_MIN_VALID_MV) && power_stage_active;
+            bool bat_raw_glitch = (raw_mv_v2 < ADC_RAW_MIN_VALID_MV) && power_stage_active;
             if (solar_raw_glitch && !isnan(last_valid_raw_mv_v0)) {
                 raw_mv_v0 = last_valid_raw_mv_v0;
             } else if (!solar_raw_glitch) {
@@ -466,6 +464,9 @@ void TaskSampleData(void * pvParameters) {
             if (fabs(i_solar) < NOISE_I_THRESHOLD) i_solar = 0.0;
             if (fabs(i_ac_in) < NOISE_I_THRESHOLD) i_ac_in = 0.0;
             if (fabs(i_bat)   < NOISE_I_THRESHOLD) i_bat   = 0.0;
+            // No real input voltage ⇒ ignore residual Hall/offset current (ghost amps).
+            if (v_solar <= 0.0f) i_solar = 0.0f;
+            if (v_ac_in <= 0.0f) i_ac_in = 0.0f;
             vbat_filter_sum -= vbat_filter_buf[filter_index];
             ibat_filter_sum -= ibat_filter_buf[filter_index];
             vbat_filter_buf[filter_index] = v_bat;
@@ -495,7 +496,6 @@ void TaskSampleData(void * pvParameters) {
                 ovp_trip_voltage = max(v_bat, v_bat_filt);
                 ovp_trip_ms = now;
                 forceSafeShutdown();
-                charge_full_hold = true;
                 Serial.printf("[CRITICAL] BMS-OPEN/preempt at raw=%.2f filt=%.2f I=%.2fA step=%.2f. PWM off.\n",
                               v_bat, v_bat_filt, i_bat_charge_filt, vbat_step);
             }
@@ -674,6 +674,8 @@ void TaskSampleData(void * pvParameters) {
             pv_is_collapsing = false;
             boostNewMode = BOOST_NEW_SOFTSTART;
             forwardMode = FWD_SOFTSTART;
+            // FULL_HOLD is only valid while system_ON (resume path). Avoid stuck OFF+FULL_HOLD.
+            charge_full_hold = false;
         }
         if (system_ON && currentState != STATE_OFF) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
@@ -1106,7 +1108,7 @@ void TaskSampleData(void * pvParameters) {
         if (ENABLE_DEBUG_VERBOSE && (now - last_debug_time >= DEBUG_PRINT_INTERVAL_MS)) {
             last_debug_time = now;
             const char* state_label = "OFF";
-            if (charge_full_hold) {
+            if (system_ON && charge_full_hold) {
                 state_label = "FULL_HOLD";
             } else if (ovp_latched) {
                 state_label = "OVP_LOCK";

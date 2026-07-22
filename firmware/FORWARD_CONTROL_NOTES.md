@@ -1,6 +1,6 @@
 # โน้ตส่วน STATE_FORWARD
 
-แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v19`
+แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v20`
 
 ## ค่าคงที่สำคัญ
 
@@ -11,7 +11,7 @@ MAX_DUTY_FORWARD      = 460;        // ~45% ของ 1023 (Nr=Np)
 FWD_TARGET_CC_CURRENT = 5.0;        // A (Boost ใช้ TARGET_CC_CURRENT=6.0)
 TARGET_CV_VOLTAGE     = 56.00;      // V
 // v_ac_in = DC หลังไดโอดบริดจ์ จาก AC 110 V (~155 Vpeak)
-MIN_AC_VOLTAGE        = 120.0;
+MIN_AC_VOLTAGE        = 95.0;
 BAT_PRESENT_MIN_V     = 40.0;
 BAT_START_MAX_V       = 56.40;
 RESTART_CHARGE_VOLTAGE = 54.0;
@@ -27,7 +27,7 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 ## แกนควบคุม
 
 ```text
-เข้า STATE_FORWARD (หลังเช็กแบต 40..56.4 V และ บริดจ์ DC ≥ 120 V)
+เข้า STATE_FORWARD (หลังเช็กแบต 40..56.4 V และ บริดจ์ DC ≥ 95 V)
   → duty=0, forwardNewResetOnEntry()
   → FWD_SOFTSTART : ramp duty → seed ~80
                     Ibat≥0.35A → CC
