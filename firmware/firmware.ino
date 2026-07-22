@@ -3,10 +3,10 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v28";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v29";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward mirrors that same SoftStart→CC→CV→DONE + BMS/spike safety style.
-// Forward design point: ~5 A battery charge at D≈45% (MAX_DUTY_FORWARD).
+// Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
 // =========================================================================
 // Hardware
 // =========================================================================
@@ -28,16 +28,17 @@ Adafruit_ADS1115 ads_curr;
 // CV=56.0V (~3.50V/cell for 16S LFP) — longevity / BMS-friendly cutoff.
 const float TARGET_CV_VOLTAGE = 56.00;
 const float TARGET_CC_CURRENT = 6.0;       // Boost CC (proven v14)
-const float FWD_TARGET_CC_CURRENT = 5.0;   // Forward CC
+const float FWD_TARGET_CC_CURRENT = 3.0;   // Forward CC setpoint
 const float MIN_PV_VOLTAGE = 42.0;
 const float UNDER_PV_VOLTAGE_CRIT = 39.0;
 // v_ac_in = DC after diode bridge (not VAC RMS). AC 110 V → ~155 Vpeak unloaded,
 // typically ~100–140 V under load / with ripple averaging on ADS sample.
 const float MIN_AC_VOLTAGE = 95.0;         // post-bridge DC low-line for AC 110 V
-const int MAX_DUTY_FORWARD = 460;  // ~45% for Nr=Np reset @ 67 kHz — design point for ~5 A CC
+const int MAX_DUTY_FORWARD = 460;  // ~45% for Nr=Np reset @ 67 kHz — HW ~5 A at this D
 const int MAX_DUTY_BOOST   = 760;
-// Hardware design: FWD_TARGET_CC_CURRENT ≈ achieved near this duty fraction.
-const float FWD_DESIGN_DUTY_FRAC = 0.45f;  // 5 A @ D=45%
+// Hardware capability (for feedforward): ~5 A near D=45%. SoftStart/CC scale from this.
+const float FWD_DESIGN_I_AT_D45 = 5.0f;
+const float FWD_DESIGN_DUTY_FRAC = 0.45f;
 // Battery must be present and in a safe start window before enabling a power stage.
 const float BAT_PRESENT_MIN_V = 40.0;
 const float BAT_START_MAX_V = 56.40;
@@ -82,7 +83,7 @@ const float FWD_DUTY_SLEW_DOWN_SOFT = 5.0;
 const unsigned long FWD_AC_COLLAPSE_CONFIRM_MS = 2000;  // like Boost PV collapse (was instant OFF)
 const float FWD_SOFTSTART_SEED_DUTY = 120.0; // floor seed; design aims near MAX_DUTY_FORWARD
 const float FWD_AC_CURRENT_HARD_A = 2.5;     // soft outer cut (like Boost PV hard)
-const float FWD_BAT_CURRENT_HARD_A = 5.75f;  // soft outer cut only (like Boost)
+const float FWD_BAT_CURRENT_HARD_A = 3.75f;  // soft outer cut (~CC+0.75, like Boost)
 const float FWD_AC_COLLAPSE_BACKOFF_V = 100.0; // sag backoff like Boost PV collapse
 const float FWD_AC_VOLTAGE_FLOOR = 95.0;      // like BOOST_VOLTAGE_FLOOR
 // Approximate Ns/Np for SoftStart duty seed on 110 V-class forward (D=Vo/(Vin*n)).
@@ -266,29 +267,34 @@ static inline int boostEstimateDutyRaw(float vin, float vout, int maxDuty) {
     int raw = (int)roundf(d * 1023.0f);
     return constrain(raw, 20, maxDuty);
 }
-// Forward SoftStart seed: blend voltage match with design point (5 A @ D≈45%).
+// Duty fraction expected at FWD_TARGET_CC_CURRENT given HW 5 A @ D=45%.
+static inline float forwardDutyFracForTargetI() {
+    float frac = FWD_DESIGN_DUTY_FRAC * (FWD_TARGET_CC_CURRENT / FWD_DESIGN_I_AT_D45);
+    return boostClampf(frac, 0.08f, FWD_DESIGN_DUTY_FRAC);
+}
+// Forward SoftStart seed: blend voltage match with duty for CC setpoint (3 A → ~27%).
 static inline int forwardEstimateDutyRaw(float vin, float vout, int maxDuty) {
     float vinUse = (vin > 80.0f) ? vin : 80.0f;
+    float dTarget = forwardDutyFracForTargetI();
     float dV = vout / (vinUse * FWD_NS_NP_EST);
     dV = boostClampf(dV, 0.08f, FWD_DESIGN_DUTY_FRAC);
-    // Prefer design duty when voltage estimate is near it (hardware sized for 5A@45%).
-    float d = max(dV, FWD_DESIGN_DUTY_FRAC * 0.90f);
-    d = boostClampf(d, 0.08f, FWD_DESIGN_DUTY_FRAC);
+    float d = max(dV * (FWD_TARGET_CC_CURRENT / FWD_DESIGN_I_AT_D45), dTarget * 0.90f);
+    d = boostClampf(d, 0.08f, dTarget);
     int raw = (int)roundf(d * 1023.0f);
     raw = constrain(raw, (int)FWD_SOFTSTART_SEED_DUTY, maxDuty);
     return raw;
 }
-// CC open-loop assist: duty raw expected for iRef given design 5A ↔ D=45%.
+// CC open-loop assist: scale from HW design 5 A ↔ D=45% to current Iref.
 static inline float forwardDutyFfForIref(float iRef, float vin, float vbat, int maxDuty) {
-    float iScale = boostClampf(iRef / FWD_TARGET_CC_CURRENT, 0.05f, 1.0f);
+    float iScale = boostClampf(iRef / FWD_DESIGN_I_AT_D45, 0.05f, 1.0f);
     float dI = FWD_DESIGN_DUTY_FRAC * iScale;
     float vinUse = (vin > 80.0f) ? vin : 80.0f;
     float vbatUse = (vbat > 40.0f) ? vbat : 40.0f;
     float dV = vbatUse / (vinUse * FWD_NS_NP_EST);
     dV = boostClampf(dV, 0.08f, FWD_DESIGN_DUTY_FRAC);
-    // Current-scaled design duty, never below voltage-match floor when seeking current.
     float d = max(dI, dV * iScale);
-    d = boostClampf(d, 0.08f, FWD_DESIGN_DUTY_FRAC);
+    float dCap = forwardDutyFracForTargetI();
+    d = boostClampf(d, 0.08f, dCap);
     return boostClampf(d * 1023.0f, 0.0f, (float)maxDuty);
 }
 static inline void boostNewResetOnEntry(float vpvNow) {
@@ -749,7 +755,7 @@ void TaskSampleData(void * pvParameters) {
                     fwdCurrIntegrator = 0.0f;
                     fwdVoltIntegrator = 0.0f;
                 } else if (forwardMode == FWD_SOFTSTART) {
-                    // Ramp toward design region (~45% for 5 A), not exit early on tiny I alone.
+                    // Ramp toward duty for CC setpoint (3 A ≈ 27% from HW 5 A@45%).
                     int seedDuty = forwardEstimateDutyRaw(v_ac_in, TARGET_CV_VOLTAGE, allowed_max_duty);
                     duty_accumulator = boostApplySlew((float)seedDuty, duty_accumulator,
                                                       FWD_DUTY_SLEW_UP_SOFT, FWD_DUTY_SLEW_DOWN_SOFT);
@@ -782,13 +788,14 @@ void TaskSampleData(void * pvParameters) {
                     float iErr = iRef - i_bat_charge_filt;
                     float dDuty = boostRunPI(iErr, FWD_CURR_KP, FWD_CURR_KI, dt,
                                              &fwdCurrIntegrator, FWD_CURR_OUT_MIN, FWD_CURR_OUT_MAX);
-                    // Keep climb-help active until near Forward Dmax (was stuck ~280 with I<<5A).
-                    float climbCeil = (float)allowed_max_duty - 40.0f;
+                    // Keep climb-help active until near setpoint duty (not stuck mid-duty).
+                    float climbCeil = forwardDutyFfForIref(iRef, v_ac_in, v_bat_filt, allowed_max_duty) + 20.0f;
+                    climbCeil = min(climbCeil, (float)allowed_max_duty - 10.0f);
                     if (iErr > 0.5f && duty_accumulator < climbCeil && v_ac_in >= FWD_AC_VOLTAGE_FLOOR) {
-                        dDuty = max(dDuty, (iErr > 2.0f) ? 6.0f : 3.0f);
+                        dDuty = max(dDuty, (iErr > 1.5f) ? 6.0f : 3.0f);
                     }
                     float dutyTarget = duty_accumulator + dDuty;
-                    // Feedforward floor: design 5 A ↔ D=45% (scaled by Iref / Vin / Vbat).
+                    // Feedforward floor from HW 5 A ↔ D=45%, capped at CC setpoint duty.
                     if (iErr > 0.25f && v_ac_in >= FWD_AC_VOLTAGE_FLOOR) {
                         float dutyFf = forwardDutyFfForIref(iRef, v_ac_in, v_bat_filt, allowed_max_duty);
                         if (dutyTarget < dutyFf) dutyTarget = dutyFf;
@@ -1219,11 +1226,12 @@ void TaskSampleData(void * pvParameters) {
                               boostNewPvRef, boostNewIrefMppt, boostNewIrefCvCmd, boostNewPAvailFilt);
             }
             if (selectedChargeMode == USER_MODE_FORWARD || currentState == STATE_FORWARD) {
-                Serial.printf("  [FWD ] phase=%s Iref_cc:%.2fA Iref_cv:%.2fA duty_acc:%.1f Dmax=%d (5A@45%%)%s\n",
+                Serial.printf("  [FWD ] phase=%s Iref_cc:%.2fA Iref_cv:%.2fA duty_acc:%.1f Dmax=%d (CC=%.0fA HW5A@45%%)%s\n",
                               (forwardMode == FWD_SOFTSTART) ? "SOFT" :
                               (forwardMode == FWD_CC) ? "CC" :
                               (forwardMode == FWD_CV) ? "CV" : "DONE",
                               fwdIrefCcCmd, fwdIrefCvCmd, duty_accumulator, MAX_DUTY_FORWARD,
+                              FWD_TARGET_CC_CURRENT,
                               ac_is_collapsing ? " AC_LOW!" : "");
             }
             Serial.println("=========================================================================================");
