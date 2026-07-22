@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v18";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v19";
 // =========================================================================
 // Hardware
 // =========================================================================
@@ -28,7 +28,8 @@ const float TARGET_CC_CURRENT = 6.0;       // Boost CC (proven v14)
 const float FWD_TARGET_CC_CURRENT = 5.0;   // Forward CC
 const float MIN_PV_VOLTAGE = 42.0;
 const float UNDER_PV_VOLTAGE_CRIT = 39.0;
-const float MIN_AC_VOLTAGE = 200.0;        // Forward low-line for ~240 VAC design
+// v_ac_in = DC after diode bridge (not VAC RMS). AC 110 V → ~155 Vpeak unloaded.
+const float MIN_AC_VOLTAGE = 120.0;        // post-bridge DC low-line for AC 110 V
 const int MAX_DUTY_FORWARD = 460;  // ~45% for Nr=Np reset @ 67 kHz
 const int MAX_DUTY_BOOST   = 760;
 // Battery must be present and in a safe start window before enabling a power stage.
@@ -361,6 +362,7 @@ void setup() {
                   TARGET_CC_CURRENT, FWD_TARGET_CC_CURRENT, TARGET_CV_VOLTAGE, FWD_CV_ENTRY_VOLTAGE,
                   MAX_DUTY_FORWARD, PWM_FREQ_BOOST, PWM_FREQ_FORWARD);
     Serial.println("[BOOT] UI: STOP toggles BOOST/FORWARD in STANDBY, then press START.");
+    Serial.println("[BOOT] Forward AC sense: diode-bridge DC, AC110V (MIN_AC post-bridge).");
     Wire.begin(21, 22);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(25);

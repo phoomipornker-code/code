@@ -1,6 +1,6 @@
 # โน้ตส่วน STATE_FORWARD
 
-แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v17`
+แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v19`
 
 ## ค่าคงที่สำคัญ
 
@@ -10,7 +10,8 @@ PWM_FORWARD_PIN       = 14;
 MAX_DUTY_FORWARD      = 460;        // ~45% ของ 1023 (Nr=Np)
 FWD_TARGET_CC_CURRENT = 5.0;        // A (Boost ใช้ TARGET_CC_CURRENT=6.0)
 TARGET_CV_VOLTAGE     = 56.00;      // V
-MIN_AC_VOLTAGE        = 200.0;      // low-line สำหรับ ~240 VAC
+// v_ac_in = DC หลังไดโอดบริดจ์ จาก AC 110 V (~155 Vpeak)
+MIN_AC_VOLTAGE        = 120.0;
 BAT_PRESENT_MIN_V     = 40.0;
 BAT_START_MAX_V       = 56.40;
 RESTART_CHARGE_VOLTAGE = 54.0;
@@ -26,7 +27,7 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 ## แกนควบคุม
 
 ```text
-เข้า STATE_FORWARD (หลังเช็กแบต 40..56.4 V และ AC ≥ 200 V)
+เข้า STATE_FORWARD (หลังเช็กแบต 40..56.4 V และ บริดจ์ DC ≥ 120 V)
   → duty=0, forwardNewResetOnEntry()
   → FWD_SOFTSTART : ramp duty → seed ~80
                     Ibat≥0.35A → CC
@@ -47,3 +48,11 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 
 Duty จำกัดที่ `MAX_DUTY_FORWARD` (460)  
 PWM ออก GPIO 14 @ 67 kHz, Boost PWM = 0
+
+## จุดวัด AC
+
+`v_ac_in` = **แรงดัน DC ที่ขาออกไดโอดบริดจ์** จากไฟ AC 110 V  
+ไม่ใช่ค่า VAC RMS โดยตรง — คาลิเบรต `CAL_SCALE_V_AC` ให้ตรงกับมัลติมิเตอร์ที่จุดเดียวกัน
+
+หมายเหตุ: เอกสารออกแบบ 240 V + Ns/Np≈21/48 ที่ Dmax≈45% จะดันไม่ถึง 56 V จากบัส ~155 V  
+ฮาร์ดแวร์ 110 V ต้องใช้เรโชหม้อแปลงที่เหมาะกับแรงดันนี้
