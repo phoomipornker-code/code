@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v35";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v36";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -802,13 +802,11 @@ void TaskSampleData(void * pvParameters) {
                     fwdIrefCcCmd = iRef;
                     float iErr = iRef - i_bat_charge_filt;
                     if (iErr > FWD_CC_HOLD_BAND_A) {
+                        // Climb until I hits band or Dmax — no FF ceiling (Vac high made
+                        // dutyFf~276 and stuck at ~317 with I still ~0.4A).
                         if (!freezeDutyUp) {
                             float step = (iErr > FWD_CC_FAR_BAND_A) ? FWD_STEP_UP_CC_FAR : FWD_STEP_UP_CC;
-                            // Soft ceiling from design FF — do not jump above it in one go.
-                            float dutyFf = forwardDutyFfForIref(iRef, v_ac_in, v_bat_filt, allowed_max_duty);
-                            if (duty_accumulator < dutyFf + 40.0f) {
-                                duty_accumulator += step;
-                            }
+                            duty_accumulator += step;
                         }
                     } else if (iErr < -FWD_CC_HOLD_BAND_A) {
                         duty_accumulator -= FWD_STEP_DOWN_CC;
