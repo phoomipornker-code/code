@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v33";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v34";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward mirrors that same SoftStart→CC→CV→DONE + BMS/spike safety style.
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -64,7 +64,7 @@ const float FWD_CV_IREF_SLEW_A = 0.08;       // same as Boost
 const float FWD_CV_NEAR_BAND_V = 0.35;
 const float FWD_CV_DUTY_STEP_NEAR = 0.8;
 const float FWD_CV_DUTY_STEP_FAR = 2.5;
-const unsigned long FWD_SOFTSTART_MS = 2500; // same as Boost
+const unsigned long FWD_SOFTSTART_MS = 5000; // slower open so Cin can supply (was 2500)
 const unsigned long FWD_CV_ENTER_CONFIRM_MS = 200;
 const unsigned long FWD_CV_EXIT_CONFIRM_MS = 5000;
 // Same PI family as proven Boost (Boost CURR 14/55, VOLT 0.85/0.45).
@@ -76,13 +76,18 @@ const float FWD_VOLT_KP = 0.85;
 const float FWD_VOLT_KI = 0.45;
 const float FWD_VOLT_OUT_MIN = 0.0;
 const float FWD_VOLT_OUT_MAX = 3.5;
-const float FWD_DUTY_SLEW_UP = 4.0;
+// Slow duty open — fast climb starves Cin → bridge ripple / fake AC sag.
+const float FWD_DUTY_SLEW_UP = 1.5f;          // was 4
 const float FWD_DUTY_SLEW_DOWN = 6.0;
-const float FWD_DUTY_SLEW_UP_CC_FAR = 8.0;  // faster climb when far below CC target
-const float FWD_DUTY_SLEW_UP_SOFT = 6.0;    // SoftStart toward design D≈45%
-const float FWD_DUTY_SLEW_DOWN_SOFT = 5.0;
+const float FWD_DUTY_SLEW_UP_CC_FAR = 2.5f;   // was 8
+const float FWD_DUTY_SLEW_UP_SOFT = 1.5f;     // was 6 — SoftStart gentle for Cin
+const float FWD_DUTY_SLEW_DOWN_SOFT = 4.0f;
+const float FWD_CLIMB_HELP_NEAR = 1.0f;       // was 3
+const float FWD_CLIMB_HELP_FAR = 2.0f;        // was 6
+const float FWD_FF_STEP_UP = 2.0f;            // max raw/tick toward feedforward (no snap)
+const float FWD_AC_HOLD_CLIMB_V = 115.0f;     // freeze duty-up if bus dips (Cin stress)
 const unsigned long FWD_AC_COLLAPSE_CONFIRM_MS = 15000; // sustained AC loss only (temp sag = freeze duty-up)
-const float FWD_SOFTSTART_SEED_DUTY = 120.0; // floor seed; design aims near MAX_DUTY_FORWARD
+const float FWD_SOFTSTART_SEED_DUTY = 60.0;   // low seed; ramp slowly (was 120)
 const float FWD_AC_CURRENT_HARD_A = 2.5;     // soft outer cut (like Boost PV hard)
 const float FWD_BAT_CURRENT_HARD_A = 3.75f;  // soft outer cut (~CC+0.75, like Boost)
 const float FWD_AC_COLLAPSE_BACKOFF_V = 100.0; // sag backoff like Boost PV collapse
@@ -90,7 +95,8 @@ const float FWD_AC_VOLTAGE_FLOOR = 95.0;      // like BOOST_VOLTAGE_FLOOR
 // Approximate Ns/Np for SoftStart duty seed on 110 V-class forward (D=Vo/(Vin*n)).
 const float FWD_NS_NP_EST = 0.70f;
 // SoftStart: leave early only if near design-region duty and some charge current.
-const float FWD_SOFTSTART_READY_DUTY_FRAC = 0.80f;  // ≥80% of seed (~near 45%)
+const float FWD_SOFTSTART_READY_DUTY_FRAC = 0.55f;  // leave SoftStart earlier; CC finishes slow climb
+const float FWD_SOFTSTART_SEED_FRAC = 0.45f;        // SoftStart aims ~45% of CC duty (rest in CC)
 // =========================================================================
 // Calibration
 // =========================================================================
@@ -273,14 +279,15 @@ static inline float forwardDutyFracForTargetI() {
     float frac = FWD_DESIGN_DUTY_FRAC * (FWD_TARGET_CC_CURRENT / FWD_DESIGN_I_AT_D45);
     return boostClampf(frac, 0.08f, FWD_DESIGN_DUTY_FRAC);
 }
-// Forward SoftStart seed: blend voltage match with duty for CC setpoint (3 A → ~27%).
+// Forward SoftStart seed: start below CC duty so Cin is not slammed open.
 static inline int forwardEstimateDutyRaw(float vin, float vout, int maxDuty) {
     float vinUse = (vin > 80.0f) ? vin : 80.0f;
     float dTarget = forwardDutyFracForTargetI();
     float dV = vout / (vinUse * FWD_NS_NP_EST);
     dV = boostClampf(dV, 0.08f, FWD_DESIGN_DUTY_FRAC);
-    float d = max(dV * (FWD_TARGET_CC_CURRENT / FWD_DESIGN_I_AT_D45), dTarget * 0.90f);
-    d = boostClampf(d, 0.08f, dTarget);
+    float d = max(dV * (FWD_TARGET_CC_CURRENT / FWD_DESIGN_I_AT_D45), dTarget);
+    d *= FWD_SOFTSTART_SEED_FRAC;  // only partial open in SoftStart
+    d = boostClampf(d, 0.05f, dTarget);
     int raw = (int)roundf(d * 1023.0f);
     raw = constrain(raw, (int)FWD_SOFTSTART_SEED_DUTY, maxDuty);
     return raw;
@@ -782,16 +789,17 @@ void TaskSampleData(void * pvParameters) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
             if (currentState == STATE_FORWARD) {
                 const float dt = 0.02f;
-                // Temp AC sag: do not zero duty — only freeze increases (slewUp=0).
-                const bool freezeDutyUp = (v_ac_in < MIN_AC_VOLTAGE) || ac_is_collapsing;
+                // Freeze duty-up on hard sag OR Cin stress (bus dip while charging).
+                const bool freezeDutyUp = (v_ac_in < MIN_AC_VOLTAGE) || ac_is_collapsing ||
+                                          (v_ac_in < FWD_AC_HOLD_CLIMB_V && raw_duty > 40);
                 if (forwardMode == FWD_SOFTSTART) {
-                    // Ramp toward duty for CC setpoint (3 A ≈ 27% from HW 5 A@45%).
+                    // Gentle SoftStart — Cin must keep up with duty open rate.
                     int seedDuty = forwardEstimateDutyRaw(v_ac_in, TARGET_CV_VOLTAGE, allowed_max_duty);
                     float softUp = freezeDutyUp ? 0.0f : FWD_DUTY_SLEW_UP_SOFT;
                     duty_accumulator = boostApplySlew((float)seedDuty, duty_accumulator,
                                                       softUp, FWD_DUTY_SLEW_DOWN_SOFT);
                     bool nearSeed = (duty_accumulator >= ((float)seedDuty * FWD_SOFTSTART_READY_DUTY_FRAC));
-                    bool ready = (nearSeed && (i_bat_charge_filt >= 0.4f)) ||
+                    bool ready = (nearSeed && (i_bat_charge_filt >= 0.25f)) ||
                                  (now - forward_mode_enter_ms >= FWD_SOFTSTART_MS);
                     if (ready) {
                         forwardMode = FWD_CC;
@@ -819,19 +827,21 @@ void TaskSampleData(void * pvParameters) {
                     float iErr = iRef - i_bat_charge_filt;
                     float dDuty = boostRunPI(iErr, FWD_CURR_KP, FWD_CURR_KI, dt,
                                              &fwdCurrIntegrator, FWD_CURR_OUT_MIN, FWD_CURR_OUT_MAX);
-                    // Keep climb-help active until near setpoint duty (not stuck mid-duty).
+                    // Mild climb-help only when bus is healthy (Cin not stressed).
                     float climbCeil = forwardDutyFfForIref(iRef, v_ac_in, v_bat_filt, allowed_max_duty) + 20.0f;
                     climbCeil = min(climbCeil, (float)allowed_max_duty - 10.0f);
                     if (!freezeDutyUp && iErr > 0.5f && duty_accumulator < climbCeil &&
-                        v_ac_in >= FWD_AC_VOLTAGE_FLOOR) {
-                        dDuty = max(dDuty, (iErr > 1.5f) ? 6.0f : 3.0f);
+                        v_ac_in >= FWD_AC_HOLD_CLIMB_V) {
+                        dDuty = max(dDuty, (iErr > 1.5f) ? FWD_CLIMB_HELP_FAR : FWD_CLIMB_HELP_NEAR);
                     }
                     if (freezeDutyUp && dDuty > 0.0f) dDuty = 0.0f;
                     float dutyTarget = duty_accumulator + dDuty;
-                    // Feedforward floor from HW 5 A ↔ D=45%, capped at CC setpoint duty.
-                    if (!freezeDutyUp && iErr > 0.25f && v_ac_in >= FWD_AC_VOLTAGE_FLOOR) {
+                    // Soft feedforward — approach FF slowly (no instant snap that starves Cin).
+                    if (!freezeDutyUp && iErr > 0.25f && v_ac_in >= FWD_AC_HOLD_CLIMB_V) {
                         float dutyFf = forwardDutyFfForIref(iRef, v_ac_in, v_bat_filt, allowed_max_duty);
-                        if (dutyTarget < dutyFf) dutyTarget = dutyFf;
+                        if (dutyTarget < dutyFf) {
+                            dutyTarget = min(dutyFf, duty_accumulator + FWD_FF_STEP_UP);
+                        }
                     }
                     if (freezeDutyUp && dutyTarget > duty_accumulator) dutyTarget = duty_accumulator;
                     dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
