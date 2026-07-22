@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v26";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v27";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward mirrors that same SoftStart→CC→CV→DONE + BMS/spike safety style.
 // =========================================================================
@@ -73,6 +73,8 @@ const float FWD_VOLT_OUT_MIN = 0.0;
 const float FWD_VOLT_OUT_MAX = 3.5;
 const float FWD_DUTY_SLEW_UP = 4.0;
 const float FWD_DUTY_SLEW_DOWN = 6.0;
+const float FWD_DUTY_SLEW_UP_CC_FAR = 8.0;  // faster climb when far below CC target
+const unsigned long FWD_AC_COLLAPSE_CONFIRM_MS = 2000;  // like Boost PV collapse (was instant OFF)
 const float FWD_SOFTSTART_SEED_DUTY = 80.0;  // fallback seed if estimate tiny
 const float FWD_AC_CURRENT_HARD_A = 2.5;     // soft outer cut (like Boost PV hard)
 const float FWD_BAT_CURRENT_HARD_A = 5.75f;  // soft outer cut only (like Boost)
@@ -202,6 +204,7 @@ volatile ForwardMode forwardMode = FWD_SOFTSTART;
 float fwdCurrIntegrator = 0.0f;
 float fwdVoltIntegrator = 0.0f;
 float fwdIrefCvCmd = 0.5f;
+float fwdIrefCcCmd = 0.0f;  // last CC Iref (for debug)
 unsigned long fwdCvEnterMs = 0;
 unsigned long fwdCvExitMs = 0;
 unsigned long forward_mode_enter_ms = 0;
@@ -412,6 +415,8 @@ void loop() { vTaskDelay(1000); }
 void TaskSampleData(void * pvParameters) {
     unsigned long pv_collapse_start_time = 0;
     bool pv_is_collapsing = false;
+    unsigned long ac_collapse_start_time = 0;
+    bool ac_is_collapsing = false;
     unsigned long last_debug_time = 0;
     unsigned long last_sensor_error_log = 0;
     unsigned long full_condition_start_ms = 0;
@@ -681,7 +686,21 @@ void TaskSampleData(void * pvParameters) {
                 }
             }
             else if (currentState == STATE_FORWARD) {
-                if (v_ac_in < MIN_AC_VOLTAGE) { system_ON = false; }
+                // Debounce AC brownout like Boost PV collapse (field log: 143V→3V instant trip).
+                if (v_ac_in < MIN_AC_VOLTAGE) {
+                    if (!ac_is_collapsing) {
+                        ac_is_collapsing = true;
+                        ac_collapse_start_time = now;
+                        Serial.printf("[WARN] AC bridge low %.1fV — confirm %lums before shutdown.\n",
+                                      v_ac_in, FWD_AC_COLLAPSE_CONFIRM_MS);
+                    }
+                    if (now - ac_collapse_start_time >= FWD_AC_COLLAPSE_CONFIRM_MS) {
+                        system_ON = false;
+                        Serial.println("[CRITICAL] AC bridge collapsed below MIN_AC! Auto-Shutdown.");
+                    }
+                } else {
+                    ac_is_collapsing = false;
+                }
             }
         }
         if (!system_ON) {
@@ -693,6 +712,7 @@ void TaskSampleData(void * pvParameters) {
             boost_dither_phase = 0.0;
             forward_dither_phase = 0.0;
             pv_is_collapsing = false;
+            ac_is_collapsing = false;
             boostNewMode = BOOST_NEW_SOFTSTART;
             forwardMode = FWD_SOFTSTART;
         }
@@ -733,16 +753,20 @@ void TaskSampleData(void * pvParameters) {
                         iRef *= taper;
                     }
                     iRef = boostClampf(iRef, 0.0f, FWD_TARGET_CC_CURRENT);
+                    fwdIrefCcCmd = iRef;
                     float iErr = iRef - i_bat_charge_filt;
                     float dDuty = boostRunPI(iErr, FWD_CURR_KP, FWD_CURR_KI, dt,
                                              &fwdCurrIntegrator, FWD_CURR_OUT_MIN, FWD_CURR_OUT_MAX);
-                    if (iErr > 0.8f && duty_accumulator < 280.0f && v_ac_in >= FWD_AC_VOLTAGE_FLOOR) {
-                        dDuty = max(dDuty, 3.0f);
+                    // Keep climb-help active until near Forward Dmax (was stuck ~280 with I<<5A).
+                    float climbCeil = (float)allowed_max_duty - 40.0f;
+                    if (iErr > 0.5f && duty_accumulator < climbCeil && v_ac_in >= FWD_AC_VOLTAGE_FLOOR) {
+                        dDuty = max(dDuty, (iErr > 2.0f) ? 6.0f : 3.0f);
                     }
                     float dutyTarget = duty_accumulator + dDuty;
                     dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
+                    float slewUp = (iErr > 1.0f) ? FWD_DUTY_SLEW_UP_CC_FAR : FWD_DUTY_SLEW_UP;
                     duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator,
-                                                      FWD_DUTY_SLEW_UP, FWD_DUTY_SLEW_DOWN);
+                                                      slewUp, FWD_DUTY_SLEW_DOWN);
                     if (v_bat_filt >= FWD_CV_FORCE_VOLTAGE || max(v_bat, v_bat_filt) >= FWD_CV_FORCE_VOLTAGE) {
                         forwardMode = FWD_CV;
                         fwdCurrIntegrator = 0.0f;
@@ -1165,8 +1189,12 @@ void TaskSampleData(void * pvParameters) {
                               boostNewPvRef, boostNewIrefMppt, boostNewIrefCvCmd, boostNewPAvailFilt);
             }
             if (selectedChargeMode == USER_MODE_FORWARD || currentState == STATE_FORWARD) {
-                Serial.printf("  [FWD ] Iref_cv:%.2fA duty_acc:%.1f\n",
-                              fwdIrefCvCmd, duty_accumulator);
+                Serial.printf("  [FWD ] phase=%s Iref_cc:%.2fA Iref_cv:%.2fA duty_acc:%.1f Dmax=%d%s\n",
+                              (forwardMode == FWD_SOFTSTART) ? "SOFT" :
+                              (forwardMode == FWD_CC) ? "CC" :
+                              (forwardMode == FWD_CV) ? "CV" : "DONE",
+                              fwdIrefCcCmd, fwdIrefCvCmd, duty_accumulator, MAX_DUTY_FORWARD,
+                              ac_is_collapsing ? " AC_LOW!" : "");
             }
             Serial.println("=========================================================================================");
         }

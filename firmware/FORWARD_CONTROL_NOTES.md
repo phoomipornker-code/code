@@ -1,6 +1,6 @@
 # โน้ตส่วน STATE_FORWARD
 
-แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v26`
+แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v27`
 
 ## ค่าคงที่สำคัญ
 
@@ -32,6 +32,7 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
   → FWD_SOFTSTART : ramp duty → seed ~80 (slew 2/5 เหมือน Boost)
                     พร้อมเมื่อ Ibat≥0.4A หรือครบ 2.5s  → CC
   → FWD_CC        : current PI (14/55) → Iref=5A + taper ใกล้ 56V
+                    climb-help จนใกล้ Dmax; slew เร็วขึ้นเมื่อ I≪Iref
                     เข้า CV เมื่อ Vbat≥55.5 (confirm) หรือ ≥55.7 (force)
   → FWD_CV        : voltage PI → Iref → current PI → duty (สูตรเดียวกับ Boost)
                     FULL เมื่อ V≥55.9 และ I≤0.5A นาน 60s
@@ -42,6 +43,7 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 
 ## Safety (Forward)
 
+- AC bridge collapse: debounce **2 s** ก่อน Auto-Shutdown (เหมือน PV collapse)
 - BMS-open / spike preempt ใช้ร่วมกับ Boost
 - Duty preempt cap ใกล้ `BMS_PREEMPT_ZONE_V`
 - Over-current: **soft cut duty** แบบ Boost (ไม่ latch จากกระแส)
