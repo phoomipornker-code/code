@@ -904,7 +904,8 @@ void TaskSampleData(void * pvParameters) {
                         dutyTarget = max(0.0f, dutyTarget);
                     }
                     dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
-                    float cvSlewUp = nearTarget ? 1.2f : 2.5f;
+                    if (freezeDutyUp && dutyTarget > duty_accumulator) dutyTarget = duty_accumulator;
+                    float cvSlewUp = freezeDutyUp ? 0.0f : (nearTarget ? 1.2f : 2.5f);
                     float cvSlewDown = nearTarget ? 2.0f : 4.0f;
                     duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, cvSlewUp, cvSlewDown);
                     if (v_bat_filt <= FWD_CV_EXIT_VOLTAGE) {
