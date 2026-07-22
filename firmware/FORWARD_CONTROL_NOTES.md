@@ -39,7 +39,7 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 
 ## Safety (Forward)
 
-- AC sag/blip: **freeze duty-up เท่านั้น** (ไม่ dump duty); AC กระตุกสั้นๆ hold 400 ms; shutdown ถ้าหาย ≥ 15 s
+- AC sag/blip: **freeze duty-up เท่านั้น** (ไม่ dump duty); AC=0 ขณะ Ibat ยังไหล = glitch (ไม่เข้า sag); shutdown ถ้าหายจริง ≥ 15 s
 - Duty open ช้า (Cin); freeze climb ถ้า AC&lt;115 V
 - ADC mutex / bus-glitch / ACblip hold
 - Soft over-current / OVP ตามเดิม

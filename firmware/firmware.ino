@@ -744,8 +744,12 @@ void TaskSampleData(void * pvParameters) {
                 }
             }
             else if (currentState == STATE_FORWARD) {
-                // Temporary AC sag: keep running, only freeze duty climb (no PWM pause / no SoftStart reset).
-                if (v_ac_in < MIN_AC_VOLTAGE) {
+                // Freeze duty-up on real sag only. AC=0 while Ibat still flows = sense glitch.
+                bool ac_sense_dead = (v_ac_in < MIN_AC_VOLTAGE);
+                bool still_charging = (i_bat_charge_filt > 0.35f) || (i_bat_charge_abs > 0.35f);
+                if (ac_sense_dead && still_charging) {
+                    ac_is_collapsing = false;
+                } else if (ac_sense_dead) {
                     if (!ac_is_collapsing) {
                         ac_is_collapsing = true;
                         ac_collapse_start_time = now;
@@ -778,8 +782,11 @@ void TaskSampleData(void * pvParameters) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
             if (currentState == STATE_FORWARD) {
                 // No PID: SoftStart ramp + CC/CV hysteresis steps. Freeze up on Cin/AC stress.
-                const bool freezeDutyUp = (v_ac_in < MIN_AC_VOLTAGE) || ac_is_collapsing ||
-                                          (v_ac_in < FWD_AC_HOLD_CLIMB_V && raw_duty > 40);
+                // Do not freeze on AC=0 while battery current still flows (ADC blip).
+                const bool ac_fake_low = (v_ac_in < MIN_AC_VOLTAGE) &&
+                                         ((i_bat_charge_filt > 0.35f) || (i_bat_charge_abs > 0.35f));
+                const bool freezeDutyUp = (!ac_fake_low && ((v_ac_in < MIN_AC_VOLTAGE) || ac_is_collapsing)) ||
+                                          (v_ac_in < FWD_AC_HOLD_CLIMB_V && raw_duty > 40 && !ac_fake_low);
                 if (forwardMode == FWD_SOFTSTART) {
                     int seedDuty = forwardEstimateDutyRaw(v_ac_in, TARGET_CV_VOLTAGE, allowed_max_duty);
                     if (!freezeDutyUp && duty_accumulator < (float)seedDuty) {
