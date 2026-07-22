@@ -1,4 +1,4 @@
-# โฟลว์ชาร์ต Forward — cv58-boost-v14-forward-v25
+# โฟลว์ชาร์ต Forward — cv58-boost-v14-forward-v26
 
 โหมด **STATE_FORWARD** (AC 110 V → ชาร์จแบต 56 V)  
 วัดอินพุตที่ **ขาออกไดโอดบริดจ์ (DC)**  
