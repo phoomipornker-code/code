@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v32";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v33";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward mirrors that same SoftStart→CC→CV→DONE + BMS/spike safety style.
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -81,7 +81,7 @@ const float FWD_DUTY_SLEW_DOWN = 6.0;
 const float FWD_DUTY_SLEW_UP_CC_FAR = 8.0;  // faster climb when far below CC target
 const float FWD_DUTY_SLEW_UP_SOFT = 6.0;    // SoftStart toward design D≈45%
 const float FWD_DUTY_SLEW_DOWN_SOFT = 5.0;
-const unsigned long FWD_AC_COLLAPSE_CONFIRM_MS = 15000; // sustained AC loss only (temp sag = soft suspend)
+const unsigned long FWD_AC_COLLAPSE_CONFIRM_MS = 15000; // sustained AC loss only (temp sag = freeze duty-up)
 const float FWD_SOFTSTART_SEED_DUTY = 120.0; // floor seed; design aims near MAX_DUTY_FORWARD
 const float FWD_AC_CURRENT_HARD_A = 2.5;     // soft outer cut (like Boost PV hard)
 const float FWD_BAT_CURRENT_HARD_A = 3.75f;  // soft outer cut (~CC+0.75, like Boost)
@@ -748,27 +748,20 @@ void TaskSampleData(void * pvParameters) {
                 }
             }
             else if (currentState == STATE_FORWARD) {
-                // Temporary AC sag: suspend PWM (duty cleared in control loop), keep system ON.
-                // Auto-Shutdown only if sag lasts FWD_AC_COLLAPSE_CONFIRM_MS (sustained loss).
+                // Temporary AC sag: keep running, only freeze duty climb (no PWM pause / no SoftStart reset).
                 if (v_ac_in < MIN_AC_VOLTAGE) {
                     if (!ac_is_collapsing) {
                         ac_is_collapsing = true;
                         ac_collapse_start_time = now;
-                        Serial.printf("[WARN] AC sag %.1fV — PWM suspend, shutdown only if >%lums.\n",
+                        Serial.printf("[WARN] AC sag %.1fV — freeze duty-up (no pause). Shutdown if >%lums.\n",
                                       v_ac_in, FWD_AC_COLLAPSE_CONFIRM_MS);
                     }
                     if (now - ac_collapse_start_time >= FWD_AC_COLLAPSE_CONFIRM_MS) {
                         system_ON = false;
                         Serial.println("[CRITICAL] AC bridge lost (sustained). Auto-Shutdown.");
                     }
-                } else if (ac_is_collapsing) {
-                    // Sag recovered — clean SoftStart resume
+                } else {
                     ac_is_collapsing = false;
-                    forward_mode_enter_ms = now;
-                    forwardNewResetOnEntry();
-                    duty_accumulator = 0.0f;
-                    raw_duty = 0;
-                    Serial.printf("[INFO] AC recovered to %.1fV — resume SoftStart.\n", v_ac_in);
                 }
             }
         }
@@ -789,16 +782,14 @@ void TaskSampleData(void * pvParameters) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
             if (currentState == STATE_FORWARD) {
                 const float dt = 0.02f;
-                // Mirror proven Boost SoftStart→CC→CV→DONE (no MPPT; Vin = bridge DC).
-                if (v_ac_in < MIN_AC_VOLTAGE) {
-                    duty_accumulator = 0.0f;
-                    fwdCurrIntegrator = 0.0f;
-                    fwdVoltIntegrator = 0.0f;
-                } else if (forwardMode == FWD_SOFTSTART) {
+                // Temp AC sag: do not zero duty — only freeze increases (slewUp=0).
+                const bool freezeDutyUp = (v_ac_in < MIN_AC_VOLTAGE) || ac_is_collapsing;
+                if (forwardMode == FWD_SOFTSTART) {
                     // Ramp toward duty for CC setpoint (3 A ≈ 27% from HW 5 A@45%).
                     int seedDuty = forwardEstimateDutyRaw(v_ac_in, TARGET_CV_VOLTAGE, allowed_max_duty);
+                    float softUp = freezeDutyUp ? 0.0f : FWD_DUTY_SLEW_UP_SOFT;
                     duty_accumulator = boostApplySlew((float)seedDuty, duty_accumulator,
-                                                      FWD_DUTY_SLEW_UP_SOFT, FWD_DUTY_SLEW_DOWN_SOFT);
+                                                      softUp, FWD_DUTY_SLEW_DOWN_SOFT);
                     bool nearSeed = (duty_accumulator >= ((float)seedDuty * FWD_SOFTSTART_READY_DUTY_FRAC));
                     bool ready = (nearSeed && (i_bat_charge_filt >= 0.4f)) ||
                                  (now - forward_mode_enter_ms >= FWD_SOFTSTART_MS);
@@ -831,17 +822,21 @@ void TaskSampleData(void * pvParameters) {
                     // Keep climb-help active until near setpoint duty (not stuck mid-duty).
                     float climbCeil = forwardDutyFfForIref(iRef, v_ac_in, v_bat_filt, allowed_max_duty) + 20.0f;
                     climbCeil = min(climbCeil, (float)allowed_max_duty - 10.0f);
-                    if (iErr > 0.5f && duty_accumulator < climbCeil && v_ac_in >= FWD_AC_VOLTAGE_FLOOR) {
+                    if (!freezeDutyUp && iErr > 0.5f && duty_accumulator < climbCeil &&
+                        v_ac_in >= FWD_AC_VOLTAGE_FLOOR) {
                         dDuty = max(dDuty, (iErr > 1.5f) ? 6.0f : 3.0f);
                     }
+                    if (freezeDutyUp && dDuty > 0.0f) dDuty = 0.0f;
                     float dutyTarget = duty_accumulator + dDuty;
                     // Feedforward floor from HW 5 A ↔ D=45%, capped at CC setpoint duty.
-                    if (iErr > 0.25f && v_ac_in >= FWD_AC_VOLTAGE_FLOOR) {
+                    if (!freezeDutyUp && iErr > 0.25f && v_ac_in >= FWD_AC_VOLTAGE_FLOOR) {
                         float dutyFf = forwardDutyFfForIref(iRef, v_ac_in, v_bat_filt, allowed_max_duty);
                         if (dutyTarget < dutyFf) dutyTarget = dutyFf;
                     }
+                    if (freezeDutyUp && dutyTarget > duty_accumulator) dutyTarget = duty_accumulator;
                     dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
-                    float slewUp = (iErr > 1.0f) ? FWD_DUTY_SLEW_UP_CC_FAR : FWD_DUTY_SLEW_UP;
+                    float slewUp = freezeDutyUp ? 0.0f :
+                                   ((iErr > 1.0f) ? FWD_DUTY_SLEW_UP_CC_FAR : FWD_DUTY_SLEW_UP);
                     duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator,
                                                       slewUp, FWD_DUTY_SLEW_DOWN);
                     if (v_bat_filt >= FWD_CV_FORCE_VOLTAGE || max(v_bat, v_bat_filt) >= FWD_CV_FORCE_VOLTAGE) {
