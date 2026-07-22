@@ -1,6 +1,6 @@
 # โน้ตส่วน STATE_FORWARD
 
-แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v43`
+แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v44`
 
 ## ค่าคงที่สำคัญ
 
@@ -9,7 +9,7 @@ PWM_FREQ_FORWARD      = 67000;
 MAX_DUTY_FORWARD      = 460;        // ~45% — HW ~5 A ที่ D นี้
 FWD_DESIGN_I_AT_D45   = 5.0;
 FWD_TARGET_CC_CURRENT = 3.0;        // A setpoint
-TARGET_CV_VOLTAGE     = 56.00;
+TARGET_CV_VOLTAGE     = 55.80;      // Forward CV (Boost ยัง 56.00)
 MIN_AC_VOLTAGE        = 95.0;
 // ไม่ใช้ PID — step/hysteresis (v42: ขั้นละเอียดขึ้น)
 FWD_STEP_UP_CC        = 0.6;        // raw/tick (far: 1.2)
@@ -17,7 +17,7 @@ FWD_STEP_DOWN_CC      = 1.5;        // fine: 0.6
 FWD_CC_HOLD_BAND_A    = 0.10;       // hold เมื่อ |I−Iref| ในแบนด์
 FWD_STEP_UP_CV        = 0.40;       // near: 0.20
 FWD_STEP_DOWN_CV      = 0.80;       // fine: 0.35 / over: 1.50
-FWD_CV_HOLD_BAND_V    = 0.05;       // hold เมื่อ |V−56| ในแบนด์
+FWD_CV_HOLD_BAND_V    = 0.05;       // hold เมื่อ |V−55.8| ในแบนด์
 FWD_AC_HOLD_CLIMB_V   = 115.0;      // freeze เพิ่ม duty ถ้าบัสดิป
 ```
 
@@ -33,11 +33,11 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 เข้า STATE_FORWARD
   → FWD_SOFTSTART : เพิ่ม duty เป็นขั้นเล็กๆ ไปหา seed (~45% ของ duty เป้า CC)
   → FWD_CC        : I < Iref−band → +duty จนถึงแบนด์หรือ Dmax (ไม่มีเพดาน FF)
-                    เข้า CV เมื่อ Vbat≥**55.10** (confirm) / force **55.35**
-  → FWD_CV        : **รักษาระดับแรงดันคงที่ ~56 V** (ขั้นละเอียด)
+                    เข้า CV เมื่อ Vbat≥**54.90** (confirm) / force **55.20**
+  → FWD_CV        : **รักษาระดับแรงดันคงที่ ~55.8 V** (ขั้นละเอียด)
                     V ต่ำ → +duty; ในแบนด์ → hold; V สูง → −duty (กระแสถดเองเมื่อแบตเต็ม)
                     ไม่ slam duty ที่ BMS_PREEMPT ~55.95 (hard cap เฉพาะใกล้ BMS open 56.30)
-                    FULL เมื่อ V≥55.9 และ I≤0.5A นาน 60s
+                    FULL เมื่อ V≥55.7 และ I≤0.5A นาน 60s
   → FWD_DONE
 ```
 
