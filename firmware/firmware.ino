@@ -1187,12 +1187,19 @@ void TaskSampleData(void * pvParameters) {
                               boostNewPvRef, boostNewIrefMppt, boostNewIrefCvCmd, boostNewPAvailFilt);
             }
             if (selectedChargeMode == USER_MODE_FORWARD || currentState == STATE_FORWARD) {
-                Serial.printf("  [FWD ] phase=%s step Vcv:%.2fV Vf:%.2fV Ibat:%.2fA duty_acc:%.1f Dmax=%d (CVhold noPID)%s\n",
-                              (forwardMode == FWD_SOFTSTART) ? "SOFT" :
-                              (forwardMode == FWD_CC) ? "CC" :
-                              (forwardMode == FWD_CV) ? "CV" : "DONE",
-                              TARGET_CV_VOLTAGE, v_bat_filt, i_bat_charge_filt, duty_accumulator, MAX_DUTY_FORWARD,
-                              ac_is_collapsing ? " AC_SAG!" : "");
+                if (forwardMode == FWD_CV) {
+                    Serial.printf("  [FWD ] phase=CV hold Vcv:%.2fV Vf:%.2fV Ibat:%.2fA duty_acc:%.1f Dmax=%d (constV)%s\n",
+                                  TARGET_CV_VOLTAGE, v_bat_filt, i_bat_charge_filt,
+                                  duty_accumulator, MAX_DUTY_FORWARD,
+                                  ac_is_collapsing ? " AC_SAG!" : "");
+                } else {
+                    Serial.printf("  [FWD ] phase=%s step Iref_cc:%.2fA Ibat:%.2fA duty_acc:%.1f Dmax=%d (CC=%.0fA)%s\n",
+                                  (forwardMode == FWD_SOFTSTART) ? "SOFT" :
+                                  (forwardMode == FWD_CC) ? "CC" : "DONE",
+                                  fwdIrefCcCmd, i_bat_charge_filt, duty_accumulator, MAX_DUTY_FORWARD,
+                                  FWD_TARGET_CC_CURRENT,
+                                  ac_is_collapsing ? " AC_SAG!" : "");
+                }
             }
             Serial.println("=========================================================================================");
         }
