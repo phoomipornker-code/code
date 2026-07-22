@@ -1,21 +1,27 @@
-# โฟลว์ชาร์ตเฉพาะ Forward — อธิบายภาษาไทยทีละขั้น
+# โฟลว์ชาร์ต Forward — cv58-boost-v14-forward-v23
 
-โหมด **STATE_FORWARD** เท่านั้น (AC → ชาร์จแบต)  
-จากโค้ดหลัก `cv58-forward-67khz-5a-v16`
+โหมด **STATE_FORWARD** (AC 110 V → ชาร์จแบต 56 V)  
+วัดอินพุตที่ **ขาออกไดโอดบริดจ์ (DC)**
+
+ไฟล์ Mermaid: [`flowchart-forward-only.mmd`](flowchart-forward-only.mmd)
 
 ---
 
-## ค่าที่ใช้ในโค้ด
+## ค่าในโค้ด
 
-| รายการ | ค่า | ความหมาย |
-|--------|-----|----------|
-| ความถี่ PWM | **67 kHz** | ความเร็วสวิตช์ MOSFET Forward (`PWM_FREQ = 67000`) |
-| ขา PWM | GPIO 14 | ขับเกตฝั่ง Forward |
-| กระแสเป้า (CC) | 5.0 A | ชาร์จกระแสคงที่ |
-| แรงดันเป้า (CV) | 56.0 V | ชาร์จแรงดันคงที่ |
-| Duty สูงสุด | **460 / 1023 (~45%)** | จำกัดเพื่อรีเซ็ตขด Nr |
-| จุดรีชาร์จ | 54.0 V | แบตตกถึงค่านี้แล้วชาร์จใหม่ |
-| หยุดฉุกเฉิน | 56.8 V / 300 ms | แรงดันสูงเกิน → FULL HOLD |
+| รายการ | ค่า |
+|--------|-----|
+| PWM | **67 kHz**, GPIO 14 |
+| CC / CV | **5.0 A** / **56.0 V** |
+| Duty max | **460** (~45%, Nr=Np) |
+| บริดจ์ DC ขั้นต่ำ | **95 V** (AC 110 V) |
+| หน้าต่างแบตก่อน START | **40.0 … 56.4 V** |
+| SoftStart | seed duty ~80, 2 s / I≥0.35 A |
+| SoftStart fault | timeout + I&lt;0.15 A → latch |
+| เข้า CV | ≥55.5 V confirm / ≥55.7 V force |
+| FULL | V≥55.9 และ I≤0.5 A นาน 60 s |
+| รีชาร์จ | ≤ 54.0 V |
+| หยุดฉุกเฉิน | ≥ 56.8 V นาน 300 ms |
 
 ---
 
@@ -23,87 +29,72 @@
 
 ```mermaid
 flowchart TD
-    A(["① กด START<br/>เปิดระบบ"]) --> B{"② ตรวจว่ามีไฟ AC<br/>อย่างน้อย 140 โวลต์หรือไม่"}
-    B -- ไม่มี --> Z["②ข แจ้งว่าไม่มีไฟเข้า<br/>แล้วกลับไปรอ"]
-    B -- มี --> C["③ เข้าโหมด Forward<br/>เปิดรีเลย์ AC<br/>duty=0 SoftStart"]
-    C --> D["④ อ่านค่าจากเซนเซอร์<br/>แรงดัน AC / แรงดันแบต / กระแสแบต"]
-    D --> E{"⑤ พบข้อผิดพลาดหรือไม่<br/>แรงดันเกิน / ADC ค้าง / AC ตก"}
-    E -- พบ --> F["⑥ ปิด PWM และตัดรีเลย์"] --> D
-    E -- ไม่พบ --> G{"⑦ กำลังพักแบบ FULL HOLD<br/>อยู่หรือไม่"}
-    G -- ใช่ พักอยู่ --> H{"⑧ แรงดันแบต ≤ 54 โวลต์<br/>และยังมีไฟ AC อยู่หรือไม่"}
-    H -- ใช่ --> I["⑨ ปลดการพัก<br/>แล้วเริ่มชาร์จต่อ"] --> D
-    H -- ไม่ --> J["⑨ข คงหยุด PWM ต่อไป"] --> D
-    G -- ไม่ได้พัก --> S{"⑩ โหมด Forward ปัจจุบัน"}
-    S -- SoftStart --> SS["⑪ SoftStart: ramp duty<br/>จนมีกระแสหรือครบ 2 วินาที"] --> D
-    S -- CC --> CC["⑫ CC: PI กระแสเป้า 5A<br/>taper ใกล้ 56V"] --> ENT{"⑬ เข้า CV หรือยัง<br/>≥55.5 confirm / ≥55.7 force"}
-    ENT -- ยัง --> D
+    A(["STANDBY"]) --> M{"กด STOP<br/>สลับโหมด"}
+    M --> A
+    A --> S{"โหมดที่เลือก<br/>= FORWARD?<br/>แล้วกด START"}
+    S -- ไม่ใช่ / ไม่กด --> A
+    S -- ใช่ --> B{"แบต 40..56.4 V<br/>และบริดจ์ DC ≥ 95 V?"}
+    B -- ไม่ผ่าน --> ERR["ERROR<br/>ไม่มีอินพุต/แบต"] --> A
+    B -- ผ่าน --> C["เปิดรีเลย์ AC<br/>duty=0<br/>FWD_SOFTSTART"]
+    C --> LOOP["อ่านเซนเซอร์<br/>Vbridge / Vbat / Ibat / Iac"]
+    LOOP --> F{"ฟอลต์?<br/>OVP / BMS-open / OC / ADC stale / AC ตก"}
+    F -- ใช่ --> KILL["PWM=0 ตัดรีเลย์<br/>OVP latch"] --> A
+    F -- ไม่ --> H{"FULL HOLD?"}
+    H -- ใช่ --> R{"Vbat ≤ 54 V<br/>และ DC ≥ 95 V?"}
+    R -- ใช่ --> RESUME["ปลด FULL HOLD"] --> LOOP
+    R -- ไม่ --> HOLD["คงหยุด PWM"] --> LOOP
+    H -- ไม่ --> PH{"เฟส Forward"}
+
+    PH -- SoftStart --> SS{"Ibat ≥ 0.35 A?"}
+    SS -- ใช่ --> CC
+    SS -- ไม่ --> TO{"ครบ 2 s?"}
+    TO -- ยัง --> RAMP["ramp duty → seed ~80"] --> LOOP
+    TO -- ครบ + I&lt;0.15 A --> FAULT["SoftStart no-load<br/>FAULT latch"] --> A
+    TO -- ครบ + มีกระแส --> CC
+
+    PH -- CC --> CC["CC: Iref=5 A<br/>taper ใกล้ 56 V<br/>PI → duty"]
+    CC --> ENT{"Vbat ≥ 55.7 force<br/>หรือ ≥ 55.5 confirm?"}
+    ENT -- ยัง --> LOOP
     ENT -- ใช่ --> CV
-    S -- CV --> CV["⑭ CV: PI แรงดัน→Iref<br/>แล้ว PI กระแส→duty"] --> FULL{"⑮ เต็มหรือยัง<br/>V≥55.9 และ I≤0.5A นาน 60s"}
-    FULL -- ใช่ --> Q["⑯ FULL HOLD"] --> D
-    FULL -- ไม่ --> HV{"⑰ แรงดัน ≥ 56.8V<br/>นาน 300ms หรือไม่"}
+
+    PH -- CV --> CV["CV: V→Iref→duty<br/>deadband / slew"]
+    CV --> FULL{"V≥55.9 และ I≤0.5 A<br/>นาน 60 s?"}
+    FULL -- ใช่ --> Q["FULL HOLD"] --> LOOP
+    FULL -- ไม่ --> HV{"V≥56.8 นาน 300 ms?"}
     HV -- ใช่ --> Q
-    HV -- ไม่ --> D
-    S -- DONE --> Q
+    HV -- ไม่ --> EXIT{"Vbat ≤ 54.8<br/>นาน 5 s?"}
+    EXIT -- ใช่ --> CC
+    EXIT -- ไม่ --> LOOP
+
+    PH -- DONE --> Q
 ```
 
 ---
 
-## อธิบายทีละขั้นตอน (ภาษาไทย)
-
-### ①–⑨ เปิดระบบ / ฟอลต์ / FULL HOLD
-เหมือนเดิม: ต้องมี AC ≥ 140 V, กัน OVP/ADC timeout/AC ตก, พักเมื่อเต็มแล้วรีชาร์จที่ ≤ 54 V
-
-### ③ เข้าโหมด Forward
-1. เปิดรีเลย์ฝั่ง AC  
-2. ตั้ง `duty = 0` แล้วเข้า **FWD_SOFTSTART**  
-3. เคลียร์อินทิเกรเตอร์ของลูปกระแส/แรงดัน
-
-### ⑩–⑪ SoftStart
-ค่อยๆ ดัน duty ไปยัง seed (~80 raw) ด้วย slew จำกัด  
-พร้อมเข้า CC เมื่อมีกระแสชาร์จ ≥ 0.35 A หรือครบ 2 วินาที
-
-### ⑫ CC (กระแสคงที่)
-- เป้า `Iref = 5.0 A`  
-- ใกล้ 54.8–56 V จะ taper กระแสลงก่อนเข้า CV  
-- ปรับ duty ด้วย PI + slew ไม่เกิน 460
-
-### ⑬–⑭ CV (แรงดันคงที่)
-- เข้าเมื่อ Vbat ≥ 55.5 V (ยืนยันสั้นๆ) หรือ ≥ 55.7 V (บังคับ)  
-- ลูปนอก: แรงดัน → คำสั่งกระแส (`Iref`)  
-- ลูปใน: กระแส → ปรับ duty  
-- ในแถบ ±0.12 V แช่ duty; เกินเป้าลด duty เบาๆ
-
-### ⑮–⑰ เต็ม / หยุดฉุกเฉิน
-- **เต็มปกติ:** V ≥ 55.9 V และ I ≤ 0.5 A นาน 60 s → FULL HOLD  
-- **ฉุกเฉิน:** V ≥ 56.8 V นาน 300 ms → FULL HOLD  
-
----
-
-## สูตรสรุปในลูปควบคุม
+## เฟสควบคุมสั้นๆ
 
 ```text
-①→②→③ เข้า Forward (SoftStart)
-     ↓
-④ อ่าน V_ac, V_bat, I_bat
-     ↓
-⑤–⑥ ถ้าพัง → ปิด PWM
-     ↓
-⑦–⑨ ถ้า FULL HOLD → รอจน Vbat ≤ 54V
-     ↓
-SoftStart → CC (Iref=5A + taper) → CV (V→Iref→duty) → DONE
-duty = clamp(slew(...), 0..460)
-PWM_FORWARD ← duty @ 67 kHz
-     ↓
-กลับ ④
+STOP (STANDBY) → เลือก FORWARD
+START → เช็กแบต + บริดจ์ DC ≥ 95 V
+  → SoftStart (ramp duty)
+      → CC (5 A, taper ใกล้ CV)
+          → CV (56 V)
+              → DONE / FULL HOLD
+                  → รีชาร์จเมื่อ Vbat ≤ 54 V
 ```
+
+### Safety ระหว่างทำงาน
+- Hard OVP 57.8 V → latch (เคลียร์ด้วย STOP เมื่อแรงดันลด)
+- BMS-open / spike ใกล้ 56 V → ตัด PWM
+- Ibat &gt; 5.75 A หรือ |Iac| &gt; 2.5 A → latch
+- Duty cap ใกล้โซน BMS
 
 ---
 
-## ท่องจำสั้นๆ 6 ข้อ
+## ไฟล์ที่เกี่ยวข้อง
 
-1. **มี AC ถึงจะเข้า Forward**  
-2. **SoftStart ก่อน แล้วค่อย CC**  
-3. **CC ที่ 5 A แล้วสลับ CV ที่ ~55.5 V**  
-4. **CV ใช้ลูปซ้อน แรงดัน→กระแส→duty**  
-5. **Duty ไม่เกิน 460** แล้วค่อยออก PWM @ 67 kHz  
-6. **สูงเกิน 56.8 V → พัก; ตกถึง 54 V → ชาร์จใหม่**  
+| ไฟล์ | เนื้อหา |
+|------|---------|
+| [`flowchart-forward-only.mmd`](flowchart-forward-only.mmd) | Mermaid ล้วน |
+| [`../firmware/FORWARD_CONTROL_NOTES.md`](../firmware/FORWARD_CONTROL_NOTES.md) | โน้ตค่าคงที่/ลูป |
+| [`../firmware/firmware.ino`](../firmware/firmware.ino) | โค้ดจริง |
