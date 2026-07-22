@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v37";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v38";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -70,8 +70,9 @@ const float FWD_STEP_UP_CC = 1.5f;
 const float FWD_STEP_UP_CC_FAR = 2.5f;
 const float FWD_STEP_DOWN_CC = 3.0f;
 const float FWD_STEP_UP_CV = 1.0f;
-const float FWD_STEP_DOWN_CV = 2.5f;
-const float FWD_STEP_DOWN_CV_OVER = 5.0f;
+const float FWD_STEP_DOWN_CV = 3.0f;       // was 2.5 — stronger taper in CV
+const float FWD_STEP_DOWN_CV_OVER = 6.0f;
+const float FWD_CV_I_MIN_A = 0.30f;        // floor of CV current cap near 56 V
 const float FWD_CC_HOLD_BAND_A = 0.15f;   // |I−Iref| within band → hold duty
 const float FWD_CC_FAR_BAND_A = 0.80f;    // far below → slightly larger up step
 const float FWD_AC_HOLD_CLIMB_V = 115.0f; // freeze duty-up if bus dips (Cin stress)
@@ -817,22 +818,35 @@ void TaskSampleData(void * pvParameters) {
                         fwdCvEnterMs = 0;
                     }
                 } else if (forwardMode == FWD_CV) {
-                    float vErr = TARGET_CV_VOLTAGE - v_bat_filt;
-                    bool nearTarget = (fabsf(vErr) <= FWD_CV_NEAR_BAND_V);
-                    fwdIrefCvCmd = i_bat_charge_filt;  // debug: show actual I while CV stepping
-                    if (fabsf(vErr) <= CV_DEADBAND_V) {
-                        // hold duty in deadband
-                    } else if (vErr > 0.0f) {
-                        // below CV target — small up step if current not over CC
-                        if (!freezeDutyUp && !nearTarget &&
-                            i_bat_charge_filt < (FWD_TARGET_CC_CURRENT + 0.2f)) {
+                    // CV must taper current as V→56 V (field: held duty at 55.9 V with I≈2.8 A).
+                    float vPeak = max(v_bat, v_bat_filt);
+                    float rem = TARGET_CV_VOLTAGE - v_bat_filt;
+                    float nearSpan = max(0.15f, FWD_CV_NEAR_BAND_V);
+                    // iCap falls from ~CC at (56−near) toward FWD_CV_I_MIN at 56 V.
+                    float iCap = FWD_CV_I_MIN_A;
+                    if (rem > 0.0f) {
+                        iCap = boostClampf(FWD_TARGET_CC_CURRENT * (rem / nearSpan),
+                                           FWD_CV_I_MIN_A, FWD_TARGET_CC_CURRENT);
+                    }
+                    fwdIrefCvCmd = iCap;  // debug: CV current cap
+                    if (vPeak >= TARGET_CV_VOLTAGE || v_bat_filt >= (TARGET_CV_VOLTAGE - 0.02f)) {
+                        float over = max(0.0f, vPeak - TARGET_CV_VOLTAGE);
+                        duty_accumulator -= (FWD_STEP_DOWN_CV_OVER + over * 8.0f);
+                    } else if (v_bat_filt >= (TARGET_CV_VOLTAGE - FWD_CV_NEAR_BAND_V)) {
+                        // Near 56 V: regulate to iCap (taper), not hold high CC current.
+                        if (i_bat_charge_filt > (iCap + 0.12f)) {
+                            float excess = i_bat_charge_filt - iCap;
+                            duty_accumulator -= (FWD_STEP_DOWN_CV + excess * 2.0f);
+                        } else if (i_bat_charge_filt < (iCap - 0.25f) && !freezeDutyUp &&
+                                   rem > CV_DEADBAND_V) {
                             duty_accumulator += FWD_STEP_UP_CV;
                         }
-                    } else {
-                        // over voltage — step down
-                        float over = -vErr;
-                        duty_accumulator -= (nearTarget ? FWD_STEP_DOWN_CV
-                                                        : (FWD_STEP_DOWN_CV_OVER + over * 4.0f));
+                        // else hold
+                    } else if (rem > CV_DEADBAND_V) {
+                        // Still well below CV — gentle up if under CC
+                        if (!freezeDutyUp && i_bat_charge_filt < (FWD_TARGET_CC_CURRENT + 0.2f)) {
+                            duty_accumulator += FWD_STEP_UP_CV;
+                        }
                     }
                     if (v_bat > (v_bat_filt + 1.5f)) {
                         duty_accumulator -= 6.0f;
@@ -868,7 +882,15 @@ void TaskSampleData(void * pvParameters) {
                     }
                 }
                 // Outer safety clamps (step cuts — no PID unwind).
-                if (i_bat_charge_abs > (FWD_TARGET_CC_CURRENT + 0.25f)) {
+                if (forwardMode == FWD_CV) {
+                    // In CV use soft cut vs CV iCap (avoid dumping duty from CC+0.25 gate).
+                    float remCv = max(0.0f, TARGET_CV_VOLTAGE - v_bat_filt);
+                    float iCapSafe = boostClampf(FWD_TARGET_CC_CURRENT * (remCv / max(0.15f, FWD_CV_NEAR_BAND_V)),
+                                                 FWD_CV_I_MIN_A, FWD_TARGET_CC_CURRENT);
+                    if (i_bat_charge_abs > (iCapSafe + 0.35f)) {
+                        duty_accumulator -= (1.5f + (i_bat_charge_abs - iCapSafe) * 2.0f);
+                    }
+                } else if (i_bat_charge_abs > (FWD_TARGET_CC_CURRENT + 0.25f)) {
                     duty_accumulator -= (2.0f + (i_bat_charge_abs - FWD_TARGET_CC_CURRENT) * 3.0f);
                 }
                 if (fabs(i_ac_in) > FWD_AC_CURRENT_HARD_A) {
@@ -1181,12 +1203,11 @@ void TaskSampleData(void * pvParameters) {
                               boostNewPvRef, boostNewIrefMppt, boostNewIrefCvCmd, boostNewPAvailFilt);
             }
             if (selectedChargeMode == USER_MODE_FORWARD || currentState == STATE_FORWARD) {
-                Serial.printf("  [FWD ] phase=%s step Iref_cc:%.2fA Ibat:%.2fA duty_acc:%.1f Dmax=%d (CC=%.0fA noPID)%s\n",
+                Serial.printf("  [FWD ] phase=%s step Iref_cc:%.2fA Icap_cv:%.2fA Ibat:%.2fA duty_acc:%.1f Dmax=%d (noPID)%s\n",
                               (forwardMode == FWD_SOFTSTART) ? "SOFT" :
                               (forwardMode == FWD_CC) ? "CC" :
                               (forwardMode == FWD_CV) ? "CV" : "DONE",
-                              fwdIrefCcCmd, i_bat_charge_filt, duty_accumulator, MAX_DUTY_FORWARD,
-                              FWD_TARGET_CC_CURRENT,
+                              fwdIrefCcCmd, fwdIrefCvCmd, i_bat_charge_filt, duty_accumulator, MAX_DUTY_FORWARD,
                               ac_is_collapsing ? " AC_SAG!" : "");
             }
             Serial.println("=========================================================================================");
