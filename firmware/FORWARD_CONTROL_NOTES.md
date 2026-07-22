@@ -45,6 +45,7 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 ## Safety (Forward)
 
 - AC bridge collapse: debounce **2 s** ก่อน Auto-Shutdown (เหมือน PV collapse)
+- ADC: ปล่อย I2C mutex ทันทีหลังอ่าน ADS; ไม่นับ PV=0 เป็น glitch ใน FORWARD; stale trip 2.5 s
 - BMS-open / spike preempt ใช้ร่วมกับ Boost
 - Duty preempt cap ใกล้ `BMS_PREEMPT_ZONE_V`
 - Over-current: **soft cut duty** แบบ Boost (ไม่ latch จากกระแส); hard soft-cut ~3.75 A
