@@ -1,6 +1,6 @@
 # โน้ตส่วน STATE_FORWARD
 
-แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v41`
+แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v42`
 
 ## ค่าคงที่สำคัญ
 
@@ -11,10 +11,13 @@ FWD_DESIGN_I_AT_D45   = 5.0;
 FWD_TARGET_CC_CURRENT = 3.0;        // A setpoint
 TARGET_CV_VOLTAGE     = 56.00;
 MIN_AC_VOLTAGE        = 95.0;
-// ไม่ใช้ PID — step/hysteresis
-FWD_STEP_UP_CC        = 1.5;        // raw/tick
-FWD_STEP_DOWN_CC      = 3.0;
-FWD_CC_HOLD_BAND_A    = 0.15;       // hold เมื่อ |I−Iref| ในแบนด์
+// ไม่ใช้ PID — step/hysteresis (v42: ขั้นละเอียดขึ้น)
+FWD_STEP_UP_CC        = 0.6;        // raw/tick (far: 1.2)
+FWD_STEP_DOWN_CC      = 1.5;        // fine: 0.6
+FWD_CC_HOLD_BAND_A    = 0.10;       // hold เมื่อ |I−Iref| ในแบนด์
+FWD_STEP_UP_CV        = 0.40;       // near: 0.20
+FWD_STEP_DOWN_CV      = 0.80;       // fine: 0.35 / over: 1.50
+FWD_CV_HOLD_BAND_V    = 0.05;       // hold เมื่อ |V−56| ในแบนด์
 FWD_AC_HOLD_CLIMB_V   = 115.0;      // freeze เพิ่ม duty ถ้าบัสดิป
 ```
 
@@ -31,8 +34,9 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
   → FWD_SOFTSTART : เพิ่ม duty เป็นขั้นเล็กๆ ไปหา seed (~45% ของ duty เป้า CC)
   → FWD_CC        : I < Iref−band → +duty จนถึงแบนด์หรือ Dmax (ไม่มีเพดาน FF)
                     เข้า CV เมื่อ Vbat≥**55.10** (confirm) / force **55.35**
-  → FWD_CV        : **รักษาระดับแรงดันคงที่ ~56 V**
+  → FWD_CV        : **รักษาระดับแรงดันคงที่ ~56 V** (ขั้นละเอียด)
                     V ต่ำ → +duty; ในแบนด์ → hold; V สูง → −duty (กระแสถดเองเมื่อแบตเต็ม)
+                    ไม่ slam duty ที่ BMS_PREEMPT ~55.95 (hard cap เฉพาะใกล้ BMS open 56.30)
                     FULL เมื่อ V≥55.9 และ I≤0.5A นาน 60s
   → FWD_DONE
 ```
@@ -42,7 +46,7 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 - AC sag/blip: **freeze duty-up เท่านั้น** (ไม่ dump duty); AC=0 ขณะ Ibat ยังไหล = glitch (ไม่เข้า sag); shutdown ถ้าหายจริง ≥ 15 s
 - Duty open ช้า (Cin); freeze climb ถ้า AC&lt;115 V
 - ADC mutex / bus-glitch / ACblip hold
-- Soft over-current / OVP ตามเดิม
+- Soft over-current / OVP ตามเดิม (CV ใช้ขั้นละเอียด ไม่ตัดแรง)
 
 Duty จำกัดที่ `MAX_DUTY_FORWARD` (460)  
 PWM GPIO 14 @ 67 kHz
