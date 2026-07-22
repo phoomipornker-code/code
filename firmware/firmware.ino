@@ -3,9 +3,9 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v34";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v35";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
-// Forward mirrors that same SoftStart→CC→CV→DONE + BMS/spike safety style.
+// Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
 // =========================================================================
 // Hardware
@@ -53,50 +53,37 @@ const float HIGH_VOLTAGE_STOP_VOLTAGE = 56.80;
 const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 300;
 const float RESTART_CHARGE_VOLTAGE = 54.0;
 // =========================================================================
-// Forward (AC) control: SOFTSTART -> CC -> CV -> DONE
-// Tuned to mirror proven Boost loop (same PI/CV/slew style); no MPPT.
+// Forward (AC) control: SoftStart → CC → CV → DONE  (NO PID — step/hysteresis)
+// Slow duty steps protect Cin; freeze duty-up on AC sag / bus dip.
 // =========================================================================
 const float FWD_CV_ENTRY_VOLTAGE = 55.50;
 const float FWD_CV_FORCE_VOLTAGE = 55.70;
 const float FWD_CV_EXIT_VOLTAGE  = 54.80;
 const float FWD_CC_TAPER_START_V = 54.80;
-const float FWD_CV_IREF_SLEW_A = 0.08;       // same as Boost
 const float FWD_CV_NEAR_BAND_V = 0.35;
-const float FWD_CV_DUTY_STEP_NEAR = 0.8;
-const float FWD_CV_DUTY_STEP_FAR = 2.5;
-const unsigned long FWD_SOFTSTART_MS = 5000; // slower open so Cin can supply (was 2500)
+const unsigned long FWD_SOFTSTART_MS = 5000;
 const unsigned long FWD_CV_ENTER_CONFIRM_MS = 200;
 const unsigned long FWD_CV_EXIT_CONFIRM_MS = 5000;
-// Same PI family as proven Boost (Boost CURR 14/55, VOLT 0.85/0.45).
-const float FWD_CURR_KP = 14.0;
-const float FWD_CURR_KI = 55.0;
-const float FWD_CURR_OUT_MIN = -35.0;
-const float FWD_CURR_OUT_MAX = 45.0;
-const float FWD_VOLT_KP = 0.85;
-const float FWD_VOLT_KI = 0.45;
-const float FWD_VOLT_OUT_MIN = 0.0;
-const float FWD_VOLT_OUT_MAX = 3.5;
-// Slow duty open — fast climb starves Cin → bridge ripple / fake AC sag.
-const float FWD_DUTY_SLEW_UP = 1.5f;          // was 4
-const float FWD_DUTY_SLEW_DOWN = 6.0;
-const float FWD_DUTY_SLEW_UP_CC_FAR = 2.5f;   // was 8
-const float FWD_DUTY_SLEW_UP_SOFT = 1.5f;     // was 6 — SoftStart gentle for Cin
-const float FWD_DUTY_SLEW_DOWN_SOFT = 4.0f;
-const float FWD_CLIMB_HELP_NEAR = 1.0f;       // was 3
-const float FWD_CLIMB_HELP_FAR = 2.0f;        // was 6
-const float FWD_FF_STEP_UP = 2.0f;            // max raw/tick toward feedforward (no snap)
-const float FWD_AC_HOLD_CLIMB_V = 115.0f;     // freeze duty-up if bus dips (Cin stress)
-const unsigned long FWD_AC_COLLAPSE_CONFIRM_MS = 15000; // sustained AC loss only (temp sag = freeze duty-up)
-const float FWD_SOFTSTART_SEED_DUTY = 60.0;   // low seed; ramp slowly (was 120)
-const float FWD_AC_CURRENT_HARD_A = 2.5;     // soft outer cut (like Boost PV hard)
-const float FWD_BAT_CURRENT_HARD_A = 3.75f;  // soft outer cut (~CC+0.75, like Boost)
-const float FWD_AC_COLLAPSE_BACKOFF_V = 100.0; // sag backoff like Boost PV collapse
-const float FWD_AC_VOLTAGE_FLOOR = 95.0;      // like BOOST_VOLTAGE_FLOOR
-// Approximate Ns/Np for SoftStart duty seed on 110 V-class forward (D=Vo/(Vin*n)).
+// Step sizes (raw duty per 20 ms tick) — keep small for Cin.
+const float FWD_STEP_UP_SOFT = 1.5f;
+const float FWD_STEP_UP_CC = 1.5f;
+const float FWD_STEP_UP_CC_FAR = 2.5f;
+const float FWD_STEP_DOWN_CC = 3.0f;
+const float FWD_STEP_UP_CV = 1.0f;
+const float FWD_STEP_DOWN_CV = 2.5f;
+const float FWD_STEP_DOWN_CV_OVER = 5.0f;
+const float FWD_CC_HOLD_BAND_A = 0.15f;   // |I−Iref| within band → hold duty
+const float FWD_CC_FAR_BAND_A = 0.80f;    // far below → slightly larger up step
+const float FWD_AC_HOLD_CLIMB_V = 115.0f; // freeze duty-up if bus dips (Cin stress)
+const unsigned long FWD_AC_COLLAPSE_CONFIRM_MS = 15000;
+const float FWD_SOFTSTART_SEED_DUTY = 60.0;
+const float FWD_AC_CURRENT_HARD_A = 2.5;
+const float FWD_BAT_CURRENT_HARD_A = 3.75f;
+const float FWD_AC_COLLAPSE_BACKOFF_V = 100.0;
+const float FWD_AC_VOLTAGE_FLOOR = 95.0;
 const float FWD_NS_NP_EST = 0.70f;
-// SoftStart: leave early only if near design-region duty and some charge current.
-const float FWD_SOFTSTART_READY_DUTY_FRAC = 0.55f;  // leave SoftStart earlier; CC finishes slow climb
-const float FWD_SOFTSTART_SEED_FRAC = 0.45f;        // SoftStart aims ~45% of CC duty (rest in CC)
+const float FWD_SOFTSTART_READY_DUTY_FRAC = 0.55f;
+const float FWD_SOFTSTART_SEED_FRAC = 0.45f;
 // =========================================================================
 // Calibration
 // =========================================================================
@@ -216,10 +203,8 @@ unsigned long boostNewCvExitMs = 0;
 unsigned long boost_mode_enter_ms = 0;
 enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 volatile ForwardMode forwardMode = FWD_SOFTSTART;
-float fwdCurrIntegrator = 0.0f;
-float fwdVoltIntegrator = 0.0f;
-float fwdIrefCvCmd = 0.5f;
-float fwdIrefCcCmd = 0.0f;  // last CC Iref (for debug)
+float fwdIrefCcCmd = 0.0f;  // CC current target (debug)
+float fwdIrefCvCmd = 0.0f;  // unused for step CV; kept for debug label
 unsigned long fwdCvEnterMs = 0;
 unsigned long fwdCvExitMs = 0;
 unsigned long forward_mode_enter_ms = 0;
@@ -292,7 +277,7 @@ static inline int forwardEstimateDutyRaw(float vin, float vout, int maxDuty) {
     raw = constrain(raw, (int)FWD_SOFTSTART_SEED_DUTY, maxDuty);
     return raw;
 }
-// CC open-loop assist: scale from HW design 5 A ↔ D=45% to current Iref.
+// CC open-loop duty estimate from HW 5 A ↔ D=45% (optional ceiling hint).
 static inline float forwardDutyFfForIref(float iRef, float vin, float vbat, int maxDuty) {
     float iScale = boostClampf(iRef / FWD_DESIGN_I_AT_D45, 0.05f, 1.0f);
     float dI = FWD_DESIGN_DUTY_FRAC * iScale;
@@ -322,9 +307,8 @@ static inline void boostNewResetOnEntry(float vpvNow) {
 }
 static inline void forwardNewResetOnEntry() {
     forwardMode = FWD_SOFTSTART;
-    fwdCurrIntegrator = 0.0f;
-    fwdVoltIntegrator = 0.0f;
-    fwdIrefCvCmd = 0.5f;
+    fwdIrefCcCmd = 0.0f;
+    fwdIrefCvCmd = 0.0f;
     fwdCvEnterMs = 0;
     fwdCvExitMs = 0;
 }
@@ -614,10 +598,8 @@ void TaskSampleData(void * pvParameters) {
                             boostNewVoltIntegrator = 0.0f;
                         }
                     } else {
-                        fwdCurrIntegrator = 0.0f;
                         if (forwardMode != FWD_CV) {
                             forwardMode = FWD_CV;
-                            fwdVoltIntegrator = 0.0f;
                         }
                     }
                     Serial.printf("[WARN] Runaway soft-cut duty at %.2fV (filt=%.2fV).\n",
@@ -648,10 +630,8 @@ void TaskSampleData(void * pvParameters) {
                             boostNewVoltIntegrator = 0.0f;
                         }
                     } else {
-                        fwdCurrIntegrator = 0.0f;
                         if (forwardMode != FWD_CV) {
                             forwardMode = FWD_CV;
-                            fwdVoltIntegrator = 0.0f;
                         }
                     }
                     Serial.printf("[WARN] Spike soft-cut duty at %.2fV (step=%.2fV).\n",
@@ -788,34 +768,30 @@ void TaskSampleData(void * pvParameters) {
         if (system_ON && currentState != STATE_OFF) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
             if (currentState == STATE_FORWARD) {
-                const float dt = 0.02f;
-                // Freeze duty-up on hard sag OR Cin stress (bus dip while charging).
+                // No PID: SoftStart ramp + CC/CV hysteresis steps. Freeze up on Cin/AC stress.
                 const bool freezeDutyUp = (v_ac_in < MIN_AC_VOLTAGE) || ac_is_collapsing ||
                                           (v_ac_in < FWD_AC_HOLD_CLIMB_V && raw_duty > 40);
                 if (forwardMode == FWD_SOFTSTART) {
-                    // Gentle SoftStart — Cin must keep up with duty open rate.
                     int seedDuty = forwardEstimateDutyRaw(v_ac_in, TARGET_CV_VOLTAGE, allowed_max_duty);
-                    float softUp = freezeDutyUp ? 0.0f : FWD_DUTY_SLEW_UP_SOFT;
-                    duty_accumulator = boostApplySlew((float)seedDuty, duty_accumulator,
-                                                      softUp, FWD_DUTY_SLEW_DOWN_SOFT);
+                    if (!freezeDutyUp && duty_accumulator < (float)seedDuty) {
+                        duty_accumulator += FWD_STEP_UP_SOFT;
+                    }
+                    if (duty_accumulator > (float)seedDuty) duty_accumulator = (float)seedDuty;
                     bool nearSeed = (duty_accumulator >= ((float)seedDuty * FWD_SOFTSTART_READY_DUTY_FRAC));
                     bool ready = (nearSeed && (i_bat_charge_filt >= 0.25f)) ||
                                  (now - forward_mode_enter_ms >= FWD_SOFTSTART_MS);
                     if (ready) {
                         forwardMode = FWD_CC;
-                        fwdCurrIntegrator = 0.0f;
-                        Serial.printf("[INFO] FORWARD SoftStart done -> CC (I=%.2fA duty=%.0f seed=%d)\n",
+                        Serial.printf("[INFO] FORWARD SoftStart done -> CC step (I=%.2fA duty=%.0f seed=%d)\n",
                                       i_bat_charge_filt, duty_accumulator, seedDuty);
                     }
                 } else if (forwardMode == FWD_CC) {
                     float iRef = FWD_TARGET_CC_CURRENT;
-                    // AC sag backoff (like Boost PV collapse backoff)
                     if (v_ac_in < FWD_AC_COLLAPSE_BACKOFF_V) {
                         float sag = FWD_AC_COLLAPSE_BACKOFF_V - v_ac_in;
                         float collapseScale = boostClampf(1.0f - (sag * 0.35f), 0.15f, 1.0f);
                         iRef *= collapseScale;
                     }
-                    // Pre-CV taper (same shape as Boost)
                     if (v_bat_filt >= FWD_CC_TAPER_START_V) {
                         float span = max(0.20f, TARGET_CV_VOLTAGE - FWD_CC_TAPER_START_V);
                         float rem = TARGET_CV_VOLTAGE - v_bat_filt;
@@ -825,35 +801,21 @@ void TaskSampleData(void * pvParameters) {
                     iRef = boostClampf(iRef, 0.0f, FWD_TARGET_CC_CURRENT);
                     fwdIrefCcCmd = iRef;
                     float iErr = iRef - i_bat_charge_filt;
-                    float dDuty = boostRunPI(iErr, FWD_CURR_KP, FWD_CURR_KI, dt,
-                                             &fwdCurrIntegrator, FWD_CURR_OUT_MIN, FWD_CURR_OUT_MAX);
-                    // Mild climb-help only when bus is healthy (Cin not stressed).
-                    float climbCeil = forwardDutyFfForIref(iRef, v_ac_in, v_bat_filt, allowed_max_duty) + 20.0f;
-                    climbCeil = min(climbCeil, (float)allowed_max_duty - 10.0f);
-                    if (!freezeDutyUp && iErr > 0.5f && duty_accumulator < climbCeil &&
-                        v_ac_in >= FWD_AC_HOLD_CLIMB_V) {
-                        dDuty = max(dDuty, (iErr > 1.5f) ? FWD_CLIMB_HELP_FAR : FWD_CLIMB_HELP_NEAR);
-                    }
-                    if (freezeDutyUp && dDuty > 0.0f) dDuty = 0.0f;
-                    float dutyTarget = duty_accumulator + dDuty;
-                    // Soft feedforward — approach FF slowly (no instant snap that starves Cin).
-                    if (!freezeDutyUp && iErr > 0.25f && v_ac_in >= FWD_AC_HOLD_CLIMB_V) {
-                        float dutyFf = forwardDutyFfForIref(iRef, v_ac_in, v_bat_filt, allowed_max_duty);
-                        if (dutyTarget < dutyFf) {
-                            dutyTarget = min(dutyFf, duty_accumulator + FWD_FF_STEP_UP);
+                    if (iErr > FWD_CC_HOLD_BAND_A) {
+                        if (!freezeDutyUp) {
+                            float step = (iErr > FWD_CC_FAR_BAND_A) ? FWD_STEP_UP_CC_FAR : FWD_STEP_UP_CC;
+                            // Soft ceiling from design FF — do not jump above it in one go.
+                            float dutyFf = forwardDutyFfForIref(iRef, v_ac_in, v_bat_filt, allowed_max_duty);
+                            if (duty_accumulator < dutyFf + 40.0f) {
+                                duty_accumulator += step;
+                            }
                         }
+                    } else if (iErr < -FWD_CC_HOLD_BAND_A) {
+                        duty_accumulator -= FWD_STEP_DOWN_CC;
                     }
-                    if (freezeDutyUp && dutyTarget > duty_accumulator) dutyTarget = duty_accumulator;
-                    dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
-                    float slewUp = freezeDutyUp ? 0.0f :
-                                   ((iErr > 1.0f) ? FWD_DUTY_SLEW_UP_CC_FAR : FWD_DUTY_SLEW_UP);
-                    duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator,
-                                                      slewUp, FWD_DUTY_SLEW_DOWN);
+                    // else hold duty (hysteresis band)
                     if (v_bat_filt >= FWD_CV_FORCE_VOLTAGE || max(v_bat, v_bat_filt) >= FWD_CV_FORCE_VOLTAGE) {
                         forwardMode = FWD_CV;
-                        fwdCurrIntegrator = 0.0f;
-                        fwdVoltIntegrator = 0.0f;
-                        fwdIrefCvCmd = boostClampf(i_bat_charge_filt, 0.3f, 2.0f);
                         fwdCvEnterMs = 0;
                         Serial.printf("[INFO] Force FORWARD CV at Vbat=%.2f / filt=%.2f\n",
                                       v_bat, v_bat_filt);
@@ -861,9 +823,6 @@ void TaskSampleData(void * pvParameters) {
                         if (fwdCvEnterMs == 0) fwdCvEnterMs = now;
                         if (now - fwdCvEnterMs >= FWD_CV_ENTER_CONFIRM_MS) {
                             forwardMode = FWD_CV;
-                            fwdCurrIntegrator = 0.0f;
-                            fwdVoltIntegrator = 0.0f;
-                            fwdIrefCvCmd = boostClampf(i_bat_charge_filt, 0.3f, 2.0f);
                         }
                     } else {
                         fwdCvEnterMs = 0;
@@ -871,60 +830,28 @@ void TaskSampleData(void * pvParameters) {
                 } else if (forwardMode == FWD_CV) {
                     float vErr = TARGET_CV_VOLTAGE - v_bat_filt;
                     bool nearTarget = (fabsf(vErr) <= FWD_CV_NEAR_BAND_V);
-                    if (fabs(vErr) <= CV_DEADBAND_V) {
-                        vErr = 0.0f;
-                        fwdVoltIntegrator *= 0.92f;
-                    }
-                    float iReq = boostRunPI(vErr, FWD_VOLT_KP, FWD_VOLT_KI, dt,
-                                            &fwdVoltIntegrator, FWD_VOLT_OUT_MIN, FWD_VOLT_OUT_MAX);
-                    if (nearTarget) {
-                        float nearCap = 1.2f + boostClampf(vErr / FWD_CV_NEAR_BAND_V, 0.0f, 1.0f) * 1.0f;
-                        if (iReq > nearCap) iReq = nearCap;
-                    }
-                    if (v_ac_in < FWD_AC_COLLAPSE_BACKOFF_V) {
-                        float sag = FWD_AC_COLLAPSE_BACKOFF_V - v_ac_in;
-                        float collapseScale = boostClampf(1.0f - (sag * 0.35f), 0.15f, 1.0f);
-                        iReq *= collapseScale;
-                    }
-                    iReq = boostClampf(iReq, 0.0f, FWD_VOLT_OUT_MAX);
-                    fwdIrefCvCmd = boostApplySlew(iReq, fwdIrefCvCmd,
-                                                  FWD_CV_IREF_SLEW_A, FWD_CV_IREF_SLEW_A);
-                    float iRef = fwdIrefCvCmd;
-                    float iErr = iRef - i_bat_charge_filt;
-                    float dDuty = boostRunPI(iErr, FWD_CURR_KP * (nearTarget ? 0.55f : 0.85f),
-                                             FWD_CURR_KI * (nearTarget ? 0.45f : 0.70f),
-                                             dt, &fwdCurrIntegrator,
-                                             nearTarget ? -8.0f : FWD_CURR_OUT_MIN,
-                                             nearTarget ? 8.0f : 18.0f);
-                    float dutyStepLimit = nearTarget ? FWD_CV_DUTY_STEP_NEAR : FWD_CV_DUTY_STEP_FAR;
-                    if (dDuty > dutyStepLimit) dDuty = dutyStepLimit;
-                    if (dDuty < -dutyStepLimit) dDuty = -dutyStepLimit;
-                    float dutyTarget = duty_accumulator + dDuty;
-                    if (fabsf(TARGET_CV_VOLTAGE - v_bat_filt) <= CV_DEADBAND_V) {
-                        dutyTarget = duty_accumulator;
-                        fwdCurrIntegrator *= 0.95f;
-                    }
-                    if (v_bat_filt > TARGET_CV_VOLTAGE) {
-                        float over = v_bat_filt - TARGET_CV_VOLTAGE;
-                        dutyTarget -= (0.8f + over * 4.0f);
-                        fwdVoltIntegrator *= 0.85f;
+                    fwdIrefCvCmd = i_bat_charge_filt;  // debug: show actual I while CV stepping
+                    if (fabsf(vErr) <= CV_DEADBAND_V) {
+                        // hold duty in deadband
+                    } else if (vErr > 0.0f) {
+                        // below CV target — small up step if current not over CC
+                        if (!freezeDutyUp && !nearTarget &&
+                            i_bat_charge_filt < (FWD_TARGET_CC_CURRENT + 0.2f)) {
+                            duty_accumulator += FWD_STEP_UP_CV;
+                        }
+                    } else {
+                        // over voltage — step down
+                        float over = -vErr;
+                        duty_accumulator -= (nearTarget ? FWD_STEP_DOWN_CV
+                                                        : (FWD_STEP_DOWN_CV_OVER + over * 4.0f));
                     }
                     if (v_bat > (v_bat_filt + 1.5f)) {
-                        dutyTarget = min(dutyTarget, duty_accumulator - 6.0f);
-                        dutyTarget = max(0.0f, dutyTarget);
+                        duty_accumulator -= 6.0f;
                     }
-                    dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
-                    if (freezeDutyUp && dutyTarget > duty_accumulator) dutyTarget = duty_accumulator;
-                    float cvSlewUp = freezeDutyUp ? 0.0f : (nearTarget ? 1.2f : 2.5f);
-                    float cvSlewDown = nearTarget ? 2.0f : 4.0f;
-                    duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, cvSlewUp, cvSlewDown);
                     if (v_bat_filt <= FWD_CV_EXIT_VOLTAGE) {
                         if (fwdCvExitMs == 0) fwdCvExitMs = now;
                         if (now - fwdCvExitMs >= FWD_CV_EXIT_CONFIRM_MS) {
                             forwardMode = FWD_CC;
-                            fwdCurrIntegrator = 0.0f;
-                            fwdVoltIntegrator = 0.0f;
-                            fwdIrefCvCmd = 0.5f;
                             fwd_full_condition_start_ms = 0;
                         }
                     } else {
@@ -948,23 +875,18 @@ void TaskSampleData(void * pvParameters) {
                     if (v_bat_filt <= RESTART_CHARGE_VOLTAGE && v_ac_in >= MIN_AC_VOLTAGE) {
                         charge_full_hold = false;
                         forwardMode = FWD_CC;
-                        fwdCurrIntegrator = 0.0f;
-                        fwdVoltIntegrator = 0.0f;
-                        fwdIrefCvCmd = 0.5f;
                         Serial.println("[INFO] FORWARD resume from DONE -> CC.");
                     }
                 }
-                // Outer safety clamps — same style as proven Boost.
+                // Outer safety clamps (step cuts — no PID unwind).
                 if (i_bat_charge_abs > (FWD_TARGET_CC_CURRENT + 0.25f)) {
                     duty_accumulator -= (2.0f + (i_bat_charge_abs - FWD_TARGET_CC_CURRENT) * 3.0f);
-                    fwdCurrIntegrator *= 0.8f;
                 }
                 if (fabs(i_ac_in) > FWD_AC_CURRENT_HARD_A) {
                     duty_accumulator -= 5.0f;
                 }
                 if (i_bat_charge_abs > FWD_BAT_CURRENT_HARD_A) {
                     duty_accumulator -= 5.0f;
-                    fwdCurrIntegrator *= 0.8f;
                 }
                 if (v_ac_in < (FWD_AC_VOLTAGE_FLOOR - 0.5f)) {
                     duty_accumulator -= (2.0f + (FWD_AC_VOLTAGE_FLOOR - v_ac_in) * 2.5f);
@@ -974,11 +896,9 @@ void TaskSampleData(void * pvParameters) {
                     float cut = (forwardMode == FWD_CV) ? (0.6f + over_cv * 3.0f)
                                                         : (2.5f + over_cv * 10.0f);
                     duty_accumulator -= cut;
-                    if (forwardMode != FWD_CV) fwdCurrIntegrator = 0.0f;
                 }
                 if (v_bat > (TARGET_CV_VOLTAGE + 0.4f)) {
                     duty_accumulator -= (forwardMode == FWD_CV) ? 3.0f : 8.0f;
-                    if (forwardMode != FWD_CV) fwdCurrIntegrator = 0.0f;
                 }
                 if (v_bat_filt >= BMS_PREEMPT_ZONE_V || v_bat >= BMS_PREEMPT_ZONE_V) {
                     if (duty_accumulator > BMS_PREEMPT_DUTY_CAP_RAW) {
@@ -1272,11 +1192,11 @@ void TaskSampleData(void * pvParameters) {
                               boostNewPvRef, boostNewIrefMppt, boostNewIrefCvCmd, boostNewPAvailFilt);
             }
             if (selectedChargeMode == USER_MODE_FORWARD || currentState == STATE_FORWARD) {
-                Serial.printf("  [FWD ] phase=%s Iref_cc:%.2fA Iref_cv:%.2fA duty_acc:%.1f Dmax=%d (CC=%.0fA HW5A@45%%)%s\n",
+                Serial.printf("  [FWD ] phase=%s step Iref_cc:%.2fA Ibat:%.2fA duty_acc:%.1f Dmax=%d (CC=%.0fA noPID)%s\n",
                               (forwardMode == FWD_SOFTSTART) ? "SOFT" :
                               (forwardMode == FWD_CC) ? "CC" :
                               (forwardMode == FWD_CV) ? "CV" : "DONE",
-                              fwdIrefCcCmd, fwdIrefCvCmd, duty_accumulator, MAX_DUTY_FORWARD,
+                              fwdIrefCcCmd, i_bat_charge_filt, duty_accumulator, MAX_DUTY_FORWARD,
                               FWD_TARGET_CC_CURRENT,
                               ac_is_collapsing ? " AC_SAG!" : "");
             }
