@@ -1,22 +1,39 @@
 flowchart TD
-    A(["① กด START<br/>เปิดระบบ"]) --> B{"② ตรวจว่ามีไฟ AC<br/>อย่างน้อย 140 โวลต์หรือไม่"}
-    B -- ไม่มี --> Z["②ข แจ้งว่าไม่มีไฟเข้า<br/>แล้วกลับไปรอ"]
-    B -- มี --> C["③ เข้าโหมด Forward<br/>เปิดรีเลย์ AC<br/>duty=0 SoftStart"]
-    C --> D["④ อ่านค่าจากเซนเซอร์<br/>แรงดัน AC / แรงดันแบต / กระแสแบต"]
-    D --> E{"⑤ พบข้อผิดพลาดหรือไม่<br/>แรงดันเกิน / ADC ค้าง / AC ตก"}
-    E -- พบ --> F["⑥ ปิด PWM และตัดรีเลย์"] --> D
-    E -- ไม่พบ --> G{"⑦ กำลังพักแบบ FULL HOLD<br/>อยู่หรือไม่"}
-    G -- ใช่ พักอยู่ --> H{"⑧ แรงดันแบต ≤ 54 โวลต์<br/>และยังมีไฟ AC อยู่หรือไม่"}
-    H -- ใช่ --> I["⑨ ปลดการพัก<br/>แล้วเริ่มชาร์จต่อ"] --> D
-    H -- ไม่ --> J["⑨ข คงหยุด PWM ต่อไป"] --> D
-    G -- ไม่ได้พัก --> S{"⑩ โหมด Forward ปัจจุบัน"}
-    S -- SoftStart --> SS["⑪ SoftStart: ramp duty<br/>จนมีกระแสหรือครบ 2 วินาที"] --> D
-    S -- CC --> CC["⑫ CC: PI กระแสเป้า 5A<br/>taper ใกล้ 56V"] --> ENT{"⑬ เข้า CV หรือยัง<br/>≥55.5 confirm / ≥55.7 force"}
-    ENT -- ยัง --> D
-    ENT -- ใช่ --> CV
-    S -- CV --> CV["⑭ CV: PI แรงดัน→Iref<br/>แล้ว PI กระแส→duty"] --> FULL{"⑮ เต็มหรือยัง<br/>V≥55.9 และ I≤0.5A นาน 60s"}
-    FULL -- ใช่ --> Q["⑯ FULL HOLD"] --> D
-    FULL -- ไม่ --> HV{"⑰ แรงดัน ≥ 56.8V<br/>นาน 300ms หรือไม่"}
-    HV -- ใช่ --> Q
-    HV -- ไม่ --> D
-    S -- DONE --> Q
+    A(["STANDBY"]) --> M{"STOP: toggle mode"}
+    M --> A
+    A --> S{"Selected FORWARD + START?"}
+    S -- no --> A
+    S -- yes --> B{"Bat 40..56.4V and bridge DC >= 95V?"}
+    B -- fail --> ERR["ERROR"] --> A
+    B -- ok --> C["AC relay ON, duty=0, FWD_SOFTSTART"]
+    C --> LOOP["Read sensors"]
+    LOOP --> F{"Fault? OVP/BMS/OC/ADC/AC low"}
+    F -- yes --> KILL["PWM off, latch"] --> A
+    F -- no --> H{"FULL HOLD?"}
+    H -- yes --> R{"Vbat <= 54V and DC >= 95V?"}
+    R -- yes --> RESUME["Clear FULL HOLD"] --> LOOP
+    R -- no --> HOLD["Stay off"] --> LOOP
+    H -- no --> PH{"Forward phase"}
+
+    PH -- SoftStart --> SS{"Ibat >= 0.35A?"}
+    SS -- yes --> CC
+    SS -- no --> TO{"2s timeout?"}
+    TO -- no --> RAMP["Ramp duty to ~80"] --> LOOP
+    TO -- "yes + I < 0.15A" --> FAULT["No-load fault"] --> A
+    TO -- "yes + has I" --> CC
+
+    PH -- CC --> CC["CC Iref=5A + taper"]
+    CC --> ENT{"Enter CV? 55.5/55.7V"}
+    ENT -- no --> LOOP
+    ENT -- yes --> CV
+
+    PH -- CV --> CV["CV V->Iref->duty"]
+    CV --> FULL{"Full? V>=55.9 I<=0.5A 60s"}
+    FULL -- yes --> Q["FULL HOLD"] --> LOOP
+    FULL -- no --> HV{"V>=56.8 for 300ms?"}
+    HV -- yes --> Q
+    HV -- no --> EXIT{"Exit CV to CC? V<=54.8 5s"}
+    EXIT -- yes --> CC
+    EXIT -- no --> LOOP
+
+    PH -- DONE --> Q
