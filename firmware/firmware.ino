@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v40";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v41";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -77,7 +77,7 @@ const float FWD_CC_HOLD_BAND_A = 0.15f;   // |I−Iref| within band → hold dut
 const float FWD_CC_FAR_BAND_A = 0.80f;    // far below → slightly larger up step
 const float FWD_AC_HOLD_CLIMB_V = 115.0f; // freeze duty-up if bus dips (Cin stress)
 const unsigned long FWD_AC_COLLAPSE_CONFIRM_MS = 15000;
-const unsigned long FWD_AC_BRIEF_GLITCH_MS = 400; // ignore sudden AC=3V blips while BAT OK
+const unsigned long FWD_AC_BRIEF_GLITCH_MS = 1500; // hold lone AC=0 blips while BAT OK / still charging
 const float FWD_SOFTSTART_SEED_DUTY = 60.0;
 const float FWD_AC_CURRENT_HARD_A = 2.5;
 const float FWD_BAT_CURRENT_HARD_A = 3.75f;
@@ -478,13 +478,18 @@ void TaskSampleData(void * pvParameters) {
                 (raw_mv_v2 >= ADC_RAW_MIN_VALID_MV) &&
                 !isnan(last_valid_raw_mv_v1) &&
                 (last_valid_raw_mv_v1 >= ADC_RAW_MIN_VALID_MV);
-            if (ac_sudden_alone) {
+            // Still delivering charge current with BAT sense OK ⇒ AC=0 is almost certainly ADC glitch.
+            bool ac_glitch_while_charging =
+                ac_sudden_alone &&
+                (i_bat_charge_filt > 0.35f || i_bat_charge_abs > 0.35f);
+            if (ac_sudden_alone && !ac_glitch_while_charging) {
                 if (ac_brief_low_since_ms == 0) ac_brief_low_since_ms = now;
-            } else {
+            } else if (!ac_sudden_alone) {
                 ac_brief_low_since_ms = 0;
             }
-            bool ac_brief_glitch = ac_sudden_alone &&
-                (now - ac_brief_low_since_ms < FWD_AC_BRIEF_GLITCH_MS);
+            bool ac_brief_glitch = ac_glitch_while_charging ||
+                (ac_sudden_alone &&
+                 (now - ac_brief_low_since_ms < FWD_AC_BRIEF_GLITCH_MS));
             bool solar_raw_glitch = !forward_active &&
                                     (raw_mv_v0 < ADC_RAW_MIN_VALID_MV) &&
                                     (power_stage_active ||
