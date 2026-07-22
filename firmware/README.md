@@ -58,4 +58,4 @@ LCD บรรทัดแรกตอน STANDBY แสดงโหมด เช
 OVP latch เคลียร์ด้วย **STOP** เมื่อแรงดันลดลง
 
 สรุปลอจิก Forward: [`FORWARD_CONTROL_NOTES.md`](FORWARD_CONTROL_NOTES.md)  
-Changelog: [`CHANGELOG_v25.md`](CHANGELOG_v25.md) · [`CHANGELOG_v23.md`](CHANGELOG_v23.md) · [`CHANGELOG_v22.md`](CHANGELOG_v22.md) · [`CHANGELOG_v21.md`](CHANGELOG_v21.md) · [`CHANGELOG_v20.md`](CHANGELOG_v20.md) · [`CHANGELOG_v19.md`](CHANGELOG_v19.md) · [`CHANGELOG_v18.md`](CHANGELOG_v18.md) · [`CHANGELOG_v17.md`](CHANGELOG_v17.md)
+Changelog: [`CHANGELOG_v25.md`](CHANGELOG_v25.md) · [`CHANGELOG_v24.md`](CHANGELOG_v24.md) · [`CHANGELOG_v23.md`](CHANGELOG_v23.md) · [`CHANGELOG_v22.md`](CHANGELOG_v22.md) · [`CHANGELOG_v21.md`](CHANGELOG_v21.md) · [`CHANGELOG_v20.md`](CHANGELOG_v20.md) · [`CHANGELOG_v19.md`](CHANGELOG_v19.md) · [`CHANGELOG_v18.md`](CHANGELOG_v18.md) · [`CHANGELOG_v17.md`](CHANGELOG_v17.md)

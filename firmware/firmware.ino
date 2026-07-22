@@ -3,9 +3,9 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v25";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v26";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
-// Forward / mode-select / debug layered on top without changing Boost loop.
+// Forward mirrors that same SoftStart→CC→CV→DONE + BMS/spike safety style.
 // =========================================================================
 // Hardware
 // =========================================================================
@@ -73,9 +73,13 @@ const float FWD_VOLT_OUT_MIN = 0.0;
 const float FWD_VOLT_OUT_MAX = 3.5;
 const float FWD_DUTY_SLEW_UP = 4.0;
 const float FWD_DUTY_SLEW_DOWN = 6.0;
-const float FWD_SOFTSTART_SEED_DUTY = 80.0;  // gentle seed (~8% of 1023)
+const float FWD_SOFTSTART_SEED_DUTY = 80.0;  // fallback seed if estimate tiny
 const float FWD_AC_CURRENT_HARD_A = 2.5;     // soft outer cut (like Boost PV hard)
-const float FWD_BAT_CURRENT_HARD_A = 5.75f;  // soft outer cut only (no latch; like Boost)
+const float FWD_BAT_CURRENT_HARD_A = 5.75f;  // soft outer cut only (like Boost)
+const float FWD_AC_COLLAPSE_BACKOFF_V = 100.0; // sag backoff like Boost PV collapse
+const float FWD_AC_VOLTAGE_FLOOR = 95.0;      // like BOOST_VOLTAGE_FLOOR
+// Approximate Ns/Np for SoftStart duty seed on 110 V-class forward (D=Vo/(Vin*n)).
+const float FWD_NS_NP_EST = 0.70f;
 // =========================================================================
 // Calibration
 // =========================================================================
@@ -251,6 +255,15 @@ static inline int boostEstimateDutyRaw(float vin, float vout, int maxDuty) {
     d += BOOST_EST_DUTY_MARGIN;
     int raw = (int)roundf(d * 1023.0f);
     return constrain(raw, 20, maxDuty);
+}
+// Forward SoftStart seed: D ≈ Vo / (Vin * Ns/Np), capped to ~45% Nr=Np reset.
+static inline int forwardEstimateDutyRaw(float vin, float vout, int maxDuty) {
+    float vinUse = (vin > 80.0f) ? vin : 80.0f;
+    float d = vout / (vinUse * FWD_NS_NP_EST);
+    d = boostClampf(d, 0.08f, 0.45f);
+    int raw = (int)roundf(d * 1023.0f);
+    raw = constrain(raw, (int)FWD_SOFTSTART_SEED_DUTY, maxDuty);
+    return raw;
 }
 static inline void boostNewResetOnEntry(float vpvNow) {
     boostNewMode = BOOST_NEW_SOFTSTART;
@@ -483,10 +496,10 @@ void TaskSampleData(void * pvParameters) {
             i_bat_charge_abs = fabs(i_bat);
             float vbat_step = (last_vbat_sample > 0.0f) ? (v_bat - last_vbat_sample) : 0.0f;
             float vbat_filt_step = (last_vbat_filt_sample > 0.0f) ? (v_bat_filt - last_vbat_filt_sample) : 0.0f;
-            // BMS open / near-open: kill PWM ASAP (proven Boost path — Boost only).
+            // BMS open / near-open: same proven logic for Boost and Forward.
             if (!ovp_latched &&
                 system_ON &&
-                currentState == STATE_BOOST &&
+                (currentState == STATE_BOOST || currentState == STATE_FORWARD) &&
                 raw_duty > 0 &&
                 (v_bat_filt >= BMS_PREEMPT_ZONE_V || v_bat >= BMS_PREEMPT_ZONE_V) &&
                 ((v_bat >= BMS_OPEN_DETECT_V) ||
@@ -510,11 +523,10 @@ void TaskSampleData(void * pvParameters) {
                 Serial.printf("[CRITICAL] HARD OVP TRIP at %.2fV (trip=%.2fV). Output disabled.\n",
                               ovp_trip_voltage, HARD_OVP_TRIP_VOLTAGE);
             }
-            // Near CV, current naturally falls — do soft duty cut, not hard latch
-            // (hard latch was killing CV 57V tests with OVP_LOCK). Proven Boost only.
+            // Near CV runaway soft-cut — proven Boost logic, also applied to Forward.
             if (!ovp_latched &&
                 system_ON &&
-                currentState == STATE_BOOST &&
+                (currentState == STATE_BOOST || currentState == STATE_FORWARD) &&
                 raw_duty > 0 &&
                 v_bat_filt >= BOOST_CV_ENTRY_VOLTAGE &&
                 i_bat_charge_filt < MIN_CURRENT_FOR_ACTIVE_CHARGE &&
@@ -528,10 +540,18 @@ void TaskSampleData(void * pvParameters) {
                                   v_bat, v_bat_filt, raw_duty);
                 } else {
                     duty_accumulator = max(0.0f, duty_accumulator - 15.0f);
-                    boostNewCurrIntegrator = 0.0f;
-                    if (boostNewMode != BOOST_NEW_CV) {
-                        boostNewMode = BOOST_NEW_CV;
-                        boostNewVoltIntegrator = 0.0f;
+                    if (currentState == STATE_BOOST) {
+                        boostNewCurrIntegrator = 0.0f;
+                        if (boostNewMode != BOOST_NEW_CV) {
+                            boostNewMode = BOOST_NEW_CV;
+                            boostNewVoltIntegrator = 0.0f;
+                        }
+                    } else {
+                        fwdCurrIntegrator = 0.0f;
+                        if (forwardMode != FWD_CV) {
+                            forwardMode = FWD_CV;
+                            fwdVoltIntegrator = 0.0f;
+                        }
                     }
                     Serial.printf("[WARN] Runaway soft-cut duty at %.2fV (filt=%.2fV).\n",
                                   v_bat, v_bat_filt);
@@ -539,7 +559,7 @@ void TaskSampleData(void * pvParameters) {
             }
             if (!ovp_latched &&
                 system_ON &&
-                currentState == STATE_BOOST &&
+                (currentState == STATE_BOOST || currentState == STATE_FORWARD) &&
                 raw_duty > 0 &&
                 v_bat_filt >= (BOOST_CV_ENTRY_VOLTAGE - 0.2f) &&
                 (vbat_step > BOOST_VBAT_SPIKE_PRECUT_DELTA_V ||
@@ -554,10 +574,18 @@ void TaskSampleData(void * pvParameters) {
                                   v_bat, vbat_step, v_bat_filt, raw_duty);
                 } else {
                     duty_accumulator = max(0.0f, duty_accumulator - 12.0f);
-                    boostNewCurrIntegrator = 0.0f;
-                    if (boostNewMode != BOOST_NEW_CV) {
-                        boostNewMode = BOOST_NEW_CV;
-                        boostNewVoltIntegrator = 0.0f;
+                    if (currentState == STATE_BOOST) {
+                        boostNewCurrIntegrator = 0.0f;
+                        if (boostNewMode != BOOST_NEW_CV) {
+                            boostNewMode = BOOST_NEW_CV;
+                            boostNewVoltIntegrator = 0.0f;
+                        }
+                    } else {
+                        fwdCurrIntegrator = 0.0f;
+                        if (forwardMode != FWD_CV) {
+                            forwardMode = FWD_CV;
+                            fwdVoltIntegrator = 0.0f;
+                        }
                     }
                     Serial.printf("[WARN] Spike soft-cut duty at %.2fV (step=%.2fV).\n",
                                   v_bat, vbat_step);
@@ -678,18 +706,25 @@ void TaskSampleData(void * pvParameters) {
                     fwdCurrIntegrator = 0.0f;
                     fwdVoltIntegrator = 0.0f;
                 } else if (forwardMode == FWD_SOFTSTART) {
-                    // Same ready rule as Boost: current OR timeout (no no-load latch).
-                    duty_accumulator = boostApplySlew(FWD_SOFTSTART_SEED_DUTY, duty_accumulator, 2.0f, 5.0f);
+                    // Same SoftStart pattern as proven Boost: estimate seed duty, then ready on I or timeout.
+                    int seedDuty = forwardEstimateDutyRaw(v_ac_in, TARGET_CV_VOLTAGE, allowed_max_duty);
+                    duty_accumulator = boostApplySlew((float)seedDuty, duty_accumulator, 2.0f, 5.0f);
                     bool ready = (i_bat_charge_filt >= 0.4f) ||
                                  (now - forward_mode_enter_ms >= FWD_SOFTSTART_MS);
                     if (ready) {
                         forwardMode = FWD_CC;
                         fwdCurrIntegrator = 0.0f;
-                        Serial.printf("[INFO] FORWARD SoftStart done -> CC (I=%.2fA duty=%.0f)\n",
-                                      i_bat_charge_filt, duty_accumulator);
+                        Serial.printf("[INFO] FORWARD SoftStart done -> CC (I=%.2fA duty=%.0f seed=%d)\n",
+                                      i_bat_charge_filt, duty_accumulator, seedDuty);
                     }
                 } else if (forwardMode == FWD_CC) {
                     float iRef = FWD_TARGET_CC_CURRENT;
+                    // AC sag backoff (like Boost PV collapse backoff)
+                    if (v_ac_in < FWD_AC_COLLAPSE_BACKOFF_V) {
+                        float sag = FWD_AC_COLLAPSE_BACKOFF_V - v_ac_in;
+                        float collapseScale = boostClampf(1.0f - (sag * 0.35f), 0.15f, 1.0f);
+                        iRef *= collapseScale;
+                    }
                     // Pre-CV taper (same shape as Boost)
                     if (v_bat_filt >= FWD_CC_TAPER_START_V) {
                         float span = max(0.20f, TARGET_CV_VOLTAGE - FWD_CC_TAPER_START_V);
@@ -701,7 +736,7 @@ void TaskSampleData(void * pvParameters) {
                     float iErr = iRef - i_bat_charge_filt;
                     float dDuty = boostRunPI(iErr, FWD_CURR_KP, FWD_CURR_KI, dt,
                                              &fwdCurrIntegrator, FWD_CURR_OUT_MIN, FWD_CURR_OUT_MAX);
-                    if (iErr > 0.8f && duty_accumulator < 280.0f && v_ac_in >= MIN_AC_VOLTAGE) {
+                    if (iErr > 0.8f && duty_accumulator < 280.0f && v_ac_in >= FWD_AC_VOLTAGE_FLOOR) {
                         dDuty = max(dDuty, 3.0f);
                     }
                     float dutyTarget = duty_accumulator + dDuty;
@@ -739,6 +774,11 @@ void TaskSampleData(void * pvParameters) {
                     if (nearTarget) {
                         float nearCap = 1.2f + boostClampf(vErr / FWD_CV_NEAR_BAND_V, 0.0f, 1.0f) * 1.0f;
                         if (iReq > nearCap) iReq = nearCap;
+                    }
+                    if (v_ac_in < FWD_AC_COLLAPSE_BACKOFF_V) {
+                        float sag = FWD_AC_COLLAPSE_BACKOFF_V - v_ac_in;
+                        float collapseScale = boostClampf(1.0f - (sag * 0.35f), 0.15f, 1.0f);
+                        iReq *= collapseScale;
                     }
                     iReq = boostClampf(iReq, 0.0f, FWD_VOLT_OUT_MAX);
                     fwdIrefCvCmd = boostApplySlew(iReq, fwdIrefCvCmd,
@@ -807,18 +847,20 @@ void TaskSampleData(void * pvParameters) {
                         Serial.println("[INFO] FORWARD resume from DONE -> CC.");
                     }
                 }
-                // Outer safety clamps — soft cuts like Boost (no current latch).
+                // Outer safety clamps — same style as proven Boost.
                 if (i_bat_charge_abs > (FWD_TARGET_CC_CURRENT + 0.25f)) {
                     duty_accumulator -= (2.0f + (i_bat_charge_abs - FWD_TARGET_CC_CURRENT) * 3.0f);
                     fwdCurrIntegrator *= 0.8f;
                 }
                 if (fabs(i_ac_in) > FWD_AC_CURRENT_HARD_A) {
                     duty_accumulator -= 5.0f;
-                    fwdCurrIntegrator *= 0.85f;
                 }
                 if (i_bat_charge_abs > FWD_BAT_CURRENT_HARD_A) {
                     duty_accumulator -= 5.0f;
                     fwdCurrIntegrator *= 0.8f;
+                }
+                if (v_ac_in < (FWD_AC_VOLTAGE_FLOOR - 0.5f)) {
+                    duty_accumulator -= (2.0f + (FWD_AC_VOLTAGE_FLOOR - v_ac_in) * 2.5f);
                 }
                 if (v_bat_filt > TARGET_CV_VOLTAGE) {
                     float over_cv = v_bat_filt - TARGET_CV_VOLTAGE;
