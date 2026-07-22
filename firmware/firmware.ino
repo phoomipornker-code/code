@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v22";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v23";
 // =========================================================================
 // Hardware
 // =========================================================================
@@ -426,10 +426,13 @@ void TaskSampleData(void * pvParameters) {
             raw_mv_i1 = readADCStable(ads_curr, 1) * 0.1875;
             raw_mv_i2 = readADCStable(ads_curr, 2) * 0.1875;
             bool power_stage_active = (raw_duty > 0);
-            // Only hold last-good raw samples while the power stage is switching.
-            // Using residual Hall current alone caused false "glitch hold" and WARN spam when PV=0.
-            bool solar_raw_glitch = (raw_mv_v0 < ADC_RAW_MIN_VALID_MV) && power_stage_active;
-            bool bat_raw_glitch = (raw_mv_v2 < ADC_RAW_MIN_VALID_MV) && power_stage_active;
+            bool solar_raw_glitch = (raw_mv_v0 < ADC_RAW_MIN_VALID_MV) &&
+                                    (power_stage_active ||
+                                     i_solar_mag > ADC_GLITCH_CURRENT_GATE_A ||
+                                     i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A);
+            bool bat_raw_glitch = (raw_mv_v2 < ADC_RAW_MIN_VALID_MV) &&
+                                  (power_stage_active ||
+                                   i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A);
             if (solar_raw_glitch && !isnan(last_valid_raw_mv_v0)) {
                 raw_mv_v0 = last_valid_raw_mv_v0;
             } else if (!solar_raw_glitch) {
@@ -464,9 +467,6 @@ void TaskSampleData(void * pvParameters) {
             if (fabs(i_solar) < NOISE_I_THRESHOLD) i_solar = 0.0;
             if (fabs(i_ac_in) < NOISE_I_THRESHOLD) i_ac_in = 0.0;
             if (fabs(i_bat)   < NOISE_I_THRESHOLD) i_bat   = 0.0;
-            // No real input voltage ⇒ ignore residual Hall/offset current (ghost amps).
-            if (v_solar <= 0.0f) i_solar = 0.0f;
-            if (v_ac_in <= 0.0f) i_ac_in = 0.0f;
             vbat_filter_sum -= vbat_filter_buf[filter_index];
             ibat_filter_sum -= ibat_filter_buf[filter_index];
             vbat_filter_buf[filter_index] = v_bat;
