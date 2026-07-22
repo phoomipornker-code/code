@@ -1,6 +1,6 @@
 # โน้ตส่วน STATE_FORWARD
 
-แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v31`
+แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v32`
 
 ## ค่าคงที่สำคัญ
 
@@ -44,9 +44,9 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 
 ## Safety (Forward)
 
-- AC bridge collapse: debounce **2 s** ก่อน Auto-Shutdown (เหมือน PV collapse)
-- ADC: ปล่อย I2C mutex ทันทีหลังอ่าน ADS; hold PV/AC/BAT raw เมื่อ glitch; ไม่นับ PV=0 ใน FORWARD; stale trip 2.5 s
-- ถ้า AC+BAT ยุบพร้อมกัน ~ค่าเดียวกัน = bus glitch (ไม่ใช่ AC หายจริง) — hold ค่าเดิม ไม่เริ่ม AC collapse
+- AC sag ชั่วคราว: **พัก PWM** (duty=0) คง `system_ON` — กลับมา SoftStart เมื่อ AC ฟื้น; shutdown ต่อเมื่อหาย ≥ **15 s**
+- ADC: ปล่อย I2C mutex ทันทีหลังอ่าน ADS; hold AC เฉพาะ multi-ch bus glitch (ไม่บัง sag จริง); stale trip 2.5 s
+- ถ้า AC+BAT ยุบพร้อมกัน ~ค่าเดียวกัน = bus glitch — hold ค่าเดิม
 - BMS-open / spike preempt ใช้ร่วมกับ Boost
 - Duty preempt cap ใกล้ `BMS_PREEMPT_ZONE_V`
 - Over-current: **soft cut duty** แบบ Boost (ไม่ latch จากกระแส); hard soft-cut ~3.75 A

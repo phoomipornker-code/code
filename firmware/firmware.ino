@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v31";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v32";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward mirrors that same SoftStart→CC→CV→DONE + BMS/spike safety style.
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -81,7 +81,7 @@ const float FWD_DUTY_SLEW_DOWN = 6.0;
 const float FWD_DUTY_SLEW_UP_CC_FAR = 8.0;  // faster climb when far below CC target
 const float FWD_DUTY_SLEW_UP_SOFT = 6.0;    // SoftStart toward design D≈45%
 const float FWD_DUTY_SLEW_DOWN_SOFT = 5.0;
-const unsigned long FWD_AC_COLLAPSE_CONFIRM_MS = 2000;  // like Boost PV collapse (was instant OFF)
+const unsigned long FWD_AC_COLLAPSE_CONFIRM_MS = 15000; // sustained AC loss only (temp sag = soft suspend)
 const float FWD_SOFTSTART_SEED_DUTY = 120.0; // floor seed; design aims near MAX_DUTY_FORWARD
 const float FWD_AC_CURRENT_HARD_A = 2.5;     // soft outer cut (like Boost PV hard)
 const float FWD_BAT_CURRENT_HARD_A = 3.75f;  // soft outer cut (~CC+0.75, like Boost)
@@ -484,7 +484,8 @@ void TaskSampleData(void * pvParameters) {
             float pv_raw_before = raw_mv_v0;
             float ac_raw_before = raw_mv_v1;
             float bat_raw_before = raw_mv_v2;
-            // Same ~40mV on BAT+AC while charging ⇒ ADS bus glitch (field: false AC 3V trip).
+            // Same ~40mV on BAT+AC while charging ⇒ ADS bus glitch only.
+            // Lone AC collapse is a real temporary sag — must NOT hold last AC.
             bool multi_ch_bus_glitch =
                 power_stage_active &&
                 (raw_mv_v2 < ADC_RAW_MIN_VALID_MV) &&
@@ -495,10 +496,7 @@ void TaskSampleData(void * pvParameters) {
                                     (power_stage_active ||
                                      i_solar_mag > ADC_GLITCH_CURRENT_GATE_A ||
                                      i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A);
-            bool ac_raw_glitch = (raw_mv_v1 < ADC_RAW_MIN_VALID_MV) &&
-                                 (power_stage_active ||
-                                  i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
-                                  multi_ch_bus_glitch);
+            bool ac_raw_glitch = multi_ch_bus_glitch;  // hold AC only on bus glitch, not real sag
             bool bat_raw_glitch = (raw_mv_v2 < ADC_RAW_MIN_VALID_MV) &&
                                   (power_stage_active ||
                                    i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
@@ -750,20 +748,27 @@ void TaskSampleData(void * pvParameters) {
                 }
             }
             else if (currentState == STATE_FORWARD) {
-                // Debounce AC brownout like Boost PV collapse (field log: 143V→3V instant trip).
+                // Temporary AC sag: suspend PWM (duty cleared in control loop), keep system ON.
+                // Auto-Shutdown only if sag lasts FWD_AC_COLLAPSE_CONFIRM_MS (sustained loss).
                 if (v_ac_in < MIN_AC_VOLTAGE) {
                     if (!ac_is_collapsing) {
                         ac_is_collapsing = true;
                         ac_collapse_start_time = now;
-                        Serial.printf("[WARN] AC bridge low %.1fV — confirm %lums before shutdown.\n",
+                        Serial.printf("[WARN] AC sag %.1fV — PWM suspend, shutdown only if >%lums.\n",
                                       v_ac_in, FWD_AC_COLLAPSE_CONFIRM_MS);
                     }
                     if (now - ac_collapse_start_time >= FWD_AC_COLLAPSE_CONFIRM_MS) {
                         system_ON = false;
-                        Serial.println("[CRITICAL] AC bridge collapsed below MIN_AC! Auto-Shutdown.");
+                        Serial.println("[CRITICAL] AC bridge lost (sustained). Auto-Shutdown.");
                     }
-                } else {
+                } else if (ac_is_collapsing) {
+                    // Sag recovered — clean SoftStart resume
                     ac_is_collapsing = false;
+                    forward_mode_enter_ms = now;
+                    forwardNewResetOnEntry();
+                    duty_accumulator = 0.0f;
+                    raw_duty = 0;
+                    Serial.printf("[INFO] AC recovered to %.1fV — resume SoftStart.\n", v_ac_in);
                 }
             }
         }
@@ -1267,7 +1272,7 @@ void TaskSampleData(void * pvParameters) {
                               (forwardMode == FWD_CV) ? "CV" : "DONE",
                               fwdIrefCcCmd, fwdIrefCvCmd, duty_accumulator, MAX_DUTY_FORWARD,
                               FWD_TARGET_CC_CURRENT,
-                              ac_is_collapsing ? " AC_LOW!" : "");
+                              ac_is_collapsing ? " AC_SAG!" : "");
             }
             Serial.println("=========================================================================================");
         }
