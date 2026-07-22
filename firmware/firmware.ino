@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v23";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v24";
 // =========================================================================
 // Hardware
 // =========================================================================
@@ -36,8 +36,6 @@ const int MAX_DUTY_BOOST   = 760;
 // Battery must be present and in a safe start window before enabling a power stage.
 const float BAT_PRESENT_MIN_V = 40.0;
 const float BAT_START_MAX_V = 56.40;
-const float FWD_SOFTSTART_MIN_I_A = 0.15f; // no-load / open-battery SoftStart fault
-const float FWD_BAT_CURRENT_HARD_A = 5.75f;
 const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
 const float CV_DEADBAND_V = 0.12;
@@ -49,32 +47,33 @@ const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 300;
 const float RESTART_CHARGE_VOLTAGE = 54.0;
 // =========================================================================
 // Forward (AC) control: SOFTSTART -> CC -> CV -> DONE
-// Dual-PID min(CC,CV) replaced — that path fought and overshot near CV.
+// Tuned to mirror proven Boost loop (same PI/CV/slew style); no MPPT.
 // =========================================================================
 const float FWD_CV_ENTRY_VOLTAGE = 55.50;
 const float FWD_CV_FORCE_VOLTAGE = 55.70;
 const float FWD_CV_EXIT_VOLTAGE  = 54.80;
 const float FWD_CC_TAPER_START_V = 54.80;
-const float FWD_CV_IREF_SLEW_A = 0.06;       // A per 20ms tick
+const float FWD_CV_IREF_SLEW_A = 0.08;       // same as Boost
 const float FWD_CV_NEAR_BAND_V = 0.35;
-const float FWD_CV_DUTY_STEP_NEAR = 0.6;
-const float FWD_CV_DUTY_STEP_FAR = 2.0;
-const unsigned long FWD_SOFTSTART_MS = 2000;
+const float FWD_CV_DUTY_STEP_NEAR = 0.8;
+const float FWD_CV_DUTY_STEP_FAR = 2.5;
+const unsigned long FWD_SOFTSTART_MS = 2500; // same as Boost
 const unsigned long FWD_CV_ENTER_CONFIRM_MS = 200;
 const unsigned long FWD_CV_EXIT_CONFIRM_MS = 5000;
-const float FWD_CURR_KP = 8.0;
-const float FWD_CURR_KI = 35.0;
-const float FWD_CURR_OUT_MIN = -20.0;
-const float FWD_CURR_OUT_MAX = 25.0;
-const float FWD_VOLT_KP = 0.70;
-const float FWD_VOLT_KI = 0.35;
+// Same PI family as proven Boost (Boost CURR 14/55, VOLT 0.85/0.45).
+const float FWD_CURR_KP = 14.0;
+const float FWD_CURR_KI = 55.0;
+const float FWD_CURR_OUT_MIN = -35.0;
+const float FWD_CURR_OUT_MAX = 45.0;
+const float FWD_VOLT_KP = 0.85;
+const float FWD_VOLT_KI = 0.45;
 const float FWD_VOLT_OUT_MIN = 0.0;
-const float FWD_VOLT_OUT_MAX = 3.0;
-const float FWD_DUTY_SLEW_UP = 3.0;
-const float FWD_DUTY_SLEW_DOWN = 5.0;
-const float FWD_SOFTSTART_DUTY_SLEW = 1.5;
+const float FWD_VOLT_OUT_MAX = 3.5;
+const float FWD_DUTY_SLEW_UP = 4.0;
+const float FWD_DUTY_SLEW_DOWN = 6.0;
 const float FWD_SOFTSTART_SEED_DUTY = 80.0;  // gentle seed (~8% of 1023)
-const float FWD_AC_CURRENT_HARD_A = 2.5;     // primary-side soft limit
+const float FWD_AC_CURRENT_HARD_A = 2.5;     // soft outer cut (like Boost PV hard)
+const float FWD_BAT_CURRENT_HARD_A = 5.75f;  // soft outer cut only (no latch; like Boost)
 // =========================================================================
 // Calibration
 // =========================================================================
@@ -681,35 +680,25 @@ void TaskSampleData(void * pvParameters) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
             if (currentState == STATE_FORWARD) {
                 const float dt = 0.02f;
+                // Mirror proven Boost SoftStart→CC→CV→DONE (no MPPT; Vin = bridge DC).
                 if (v_ac_in < MIN_AC_VOLTAGE) {
                     duty_accumulator = 0.0f;
                     fwdCurrIntegrator = 0.0f;
                     fwdVoltIntegrator = 0.0f;
                 } else if (forwardMode == FWD_SOFTSTART) {
-                    duty_accumulator = boostApplySlew(FWD_SOFTSTART_SEED_DUTY, duty_accumulator,
-                                                      FWD_SOFTSTART_DUTY_SLEW, 4.0f);
-                    bool timed_out = (now - forward_mode_enter_ms >= FWD_SOFTSTART_MS);
-                    if (i_bat_charge_filt >= 0.35f) {
+                    // Same ready rule as Boost: current OR timeout (no no-load latch).
+                    duty_accumulator = boostApplySlew(FWD_SOFTSTART_SEED_DUTY, duty_accumulator, 2.0f, 5.0f);
+                    bool ready = (i_bat_charge_filt >= 0.4f) ||
+                                 (now - forward_mode_enter_ms >= FWD_SOFTSTART_MS);
+                    if (ready) {
                         forwardMode = FWD_CC;
                         fwdCurrIntegrator = 0.0f;
                         Serial.printf("[INFO] FORWARD SoftStart done -> CC (I=%.2fA duty=%.0f)\n",
                                       i_bat_charge_filt, duty_accumulator);
-                    } else if (timed_out && i_bat_charge_filt < FWD_SOFTSTART_MIN_I_A) {
-                        ovp_latched = true;
-                        ovp_trip_voltage = max(v_bat, v_bat_filt);
-                        ovp_trip_ms = now;
-                        forceSafeShutdown();
-                        Serial.printf("[CRITICAL] FORWARD SoftStart no-load fault (I=%.2fA). Check battery/BMS.\n",
-                                      i_bat_charge_filt);
-                    } else if (timed_out) {
-                        forwardMode = FWD_CC;
-                        fwdCurrIntegrator = 0.0f;
-                        Serial.printf("[INFO] FORWARD SoftStart timeout -> CC (I=%.2fA duty=%.0f)\n",
-                                      i_bat_charge_filt, duty_accumulator);
                     }
                 } else if (forwardMode == FWD_CC) {
                     float iRef = FWD_TARGET_CC_CURRENT;
-                    // Pre-CV taper: ease current as battery approaches CV target
+                    // Pre-CV taper (same shape as Boost)
                     if (v_bat_filt >= FWD_CC_TAPER_START_V) {
                         float span = max(0.20f, TARGET_CV_VOLTAGE - FWD_CC_TAPER_START_V);
                         float rem = TARGET_CV_VOLTAGE - v_bat_filt;
@@ -720,15 +709,13 @@ void TaskSampleData(void * pvParameters) {
                     float iErr = iRef - i_bat_charge_filt;
                     float dDuty = boostRunPI(iErr, FWD_CURR_KP, FWD_CURR_KI, dt,
                                              &fwdCurrIntegrator, FWD_CURR_OUT_MIN, FWD_CURR_OUT_MAX);
-                    // Help climb out of low-duty when far below CC target
-                    if (iErr > 0.8f && duty_accumulator < 200.0f && v_ac_in >= MIN_AC_VOLTAGE) {
-                        dDuty = max(dDuty, 2.0f);
+                    if (iErr > 0.8f && duty_accumulator < 280.0f && v_ac_in >= MIN_AC_VOLTAGE) {
+                        dDuty = max(dDuty, 3.0f);
                     }
                     float dutyTarget = duty_accumulator + dDuty;
                     dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
                     duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator,
                                                       FWD_DUTY_SLEW_UP, FWD_DUTY_SLEW_DOWN);
-                    // Enter CV: force near BMS zone, or soft confirm at entry voltage
                     if (v_bat_filt >= FWD_CV_FORCE_VOLTAGE || max(v_bat, v_bat_filt) >= FWD_CV_FORCE_VOLTAGE) {
                         forwardMode = FWD_CV;
                         fwdCurrIntegrator = 0.0f;
@@ -758,7 +745,7 @@ void TaskSampleData(void * pvParameters) {
                     float iReq = boostRunPI(vErr, FWD_VOLT_KP, FWD_VOLT_KI, dt,
                                             &fwdVoltIntegrator, FWD_VOLT_OUT_MIN, FWD_VOLT_OUT_MAX);
                     if (nearTarget) {
-                        float nearCap = 1.0f + boostClampf(vErr / FWD_CV_NEAR_BAND_V, 0.0f, 1.0f) * 1.0f;
+                        float nearCap = 1.2f + boostClampf(vErr / FWD_CV_NEAR_BAND_V, 0.0f, 1.0f) * 1.0f;
                         if (iReq > nearCap) iReq = nearCap;
                     }
                     iReq = boostClampf(iReq, 0.0f, FWD_VOLT_OUT_MAX);
@@ -766,11 +753,11 @@ void TaskSampleData(void * pvParameters) {
                                                   FWD_CV_IREF_SLEW_A, FWD_CV_IREF_SLEW_A);
                     float iRef = fwdIrefCvCmd;
                     float iErr = iRef - i_bat_charge_filt;
-                    float dDuty = boostRunPI(iErr, FWD_CURR_KP * (nearTarget ? 0.50f : 0.80f),
-                                             FWD_CURR_KI * (nearTarget ? 0.40f : 0.65f),
+                    float dDuty = boostRunPI(iErr, FWD_CURR_KP * (nearTarget ? 0.55f : 0.85f),
+                                             FWD_CURR_KI * (nearTarget ? 0.45f : 0.70f),
                                              dt, &fwdCurrIntegrator,
-                                             nearTarget ? -6.0f : FWD_CURR_OUT_MIN,
-                                             nearTarget ? 6.0f : 15.0f);
+                                             nearTarget ? -8.0f : FWD_CURR_OUT_MIN,
+                                             nearTarget ? 8.0f : 18.0f);
                     float dutyStepLimit = nearTarget ? FWD_CV_DUTY_STEP_NEAR : FWD_CV_DUTY_STEP_FAR;
                     if (dDuty > dutyStepLimit) dDuty = dutyStepLimit;
                     if (dDuty < -dutyStepLimit) dDuty = -dutyStepLimit;
@@ -781,16 +768,16 @@ void TaskSampleData(void * pvParameters) {
                     }
                     if (v_bat_filt > TARGET_CV_VOLTAGE) {
                         float over = v_bat_filt - TARGET_CV_VOLTAGE;
-                        dutyTarget -= (0.6f + over * 3.5f);
+                        dutyTarget -= (0.8f + over * 4.0f);
                         fwdVoltIntegrator *= 0.85f;
                     }
                     if (v_bat > (v_bat_filt + 1.5f)) {
-                        dutyTarget = min(dutyTarget, duty_accumulator - 5.0f);
+                        dutyTarget = min(dutyTarget, duty_accumulator - 6.0f);
                         dutyTarget = max(0.0f, dutyTarget);
                     }
                     dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
-                    float cvSlewUp = nearTarget ? 1.0f : 2.0f;
-                    float cvSlewDown = nearTarget ? 1.8f : 3.5f;
+                    float cvSlewUp = nearTarget ? 1.2f : 2.5f;
+                    float cvSlewDown = nearTarget ? 2.0f : 4.0f;
                     duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, cvSlewUp, cvSlewDown);
                     if (v_bat_filt <= FWD_CV_EXIT_VOLTAGE) {
                         if (fwdCvExitMs == 0) fwdCvExitMs = now;
@@ -828,37 +815,30 @@ void TaskSampleData(void * pvParameters) {
                         Serial.println("[INFO] FORWARD resume from DONE -> CC.");
                     }
                 }
-                // Outer safety clamps (Forward only)
+                // Outer safety clamps — soft cuts like Boost (no current latch).
                 if (i_bat_charge_abs > (FWD_TARGET_CC_CURRENT + 0.25f)) {
                     duty_accumulator -= (2.0f + (i_bat_charge_abs - FWD_TARGET_CC_CURRENT) * 3.0f);
                     fwdCurrIntegrator *= 0.8f;
                 }
-                if (i_bat_charge_abs > FWD_BAT_CURRENT_HARD_A) {
-                    ovp_latched = true;
-                    ovp_trip_voltage = max(v_bat, v_bat_filt);
-                    ovp_trip_ms = now;
-                    forceSafeShutdown();
-                    Serial.printf("[CRITICAL] FORWARD battery OC latch at I=%.2fA.\n", i_bat_charge_abs);
-                }
                 if (fabs(i_ac_in) > FWD_AC_CURRENT_HARD_A) {
-                    ovp_latched = true;
-                    ovp_trip_voltage = max(v_bat, v_bat_filt);
-                    ovp_trip_ms = now;
-                    forceSafeShutdown();
-                    Serial.printf("[CRITICAL] FORWARD primary OC latch at Iac=%.2fA.\n", i_ac_in);
+                    duty_accumulator -= 5.0f;
+                    fwdCurrIntegrator *= 0.85f;
+                }
+                if (i_bat_charge_abs > FWD_BAT_CURRENT_HARD_A) {
+                    duty_accumulator -= 5.0f;
+                    fwdCurrIntegrator *= 0.8f;
                 }
                 if (v_bat_filt > TARGET_CV_VOLTAGE) {
                     float over_cv = v_bat_filt - TARGET_CV_VOLTAGE;
-                    float cut = (forwardMode == FWD_CV) ? (0.5f + over_cv * 2.5f)
-                                                        : (2.0f + over_cv * 8.0f);
+                    float cut = (forwardMode == FWD_CV) ? (0.6f + over_cv * 3.0f)
+                                                        : (2.5f + over_cv * 10.0f);
                     duty_accumulator -= cut;
                     if (forwardMode != FWD_CV) fwdCurrIntegrator = 0.0f;
                 }
                 if (v_bat > (TARGET_CV_VOLTAGE + 0.4f)) {
-                    duty_accumulator -= (forwardMode == FWD_CV) ? 2.5f : 6.0f;
+                    duty_accumulator -= (forwardMode == FWD_CV) ? 3.0f : 8.0f;
                     if (forwardMode != FWD_CV) fwdCurrIntegrator = 0.0f;
                 }
-                // Near BMS zone: hard-cap duty (same idea as proven Boost path).
                 if (v_bat_filt >= BMS_PREEMPT_ZONE_V || v_bat >= BMS_PREEMPT_ZONE_V) {
                     if (duty_accumulator > BMS_PREEMPT_DUTY_CAP_RAW) {
                         duty_accumulator = BMS_PREEMPT_DUTY_CAP_RAW;
