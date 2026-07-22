@@ -3,7 +3,9 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v24";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v25";
+// Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
+// Forward / mode-select / debug layered on top without changing Boost loop.
 // =========================================================================
 // Hardware
 // =========================================================================
@@ -481,10 +483,10 @@ void TaskSampleData(void * pvParameters) {
             i_bat_charge_abs = fabs(i_bat);
             float vbat_step = (last_vbat_sample > 0.0f) ? (v_bat - last_vbat_sample) : 0.0f;
             float vbat_filt_step = (last_vbat_filt_sample > 0.0f) ? (v_bat_filt - last_vbat_filt_sample) : 0.0f;
-            // BMS open / near-open: kill PWM ASAP (Boost proven path + Forward).
+            // BMS open / near-open: kill PWM ASAP (proven Boost path — Boost only).
             if (!ovp_latched &&
                 system_ON &&
-                (currentState == STATE_BOOST || currentState == STATE_FORWARD) &&
+                currentState == STATE_BOOST &&
                 raw_duty > 0 &&
                 (v_bat_filt >= BMS_PREEMPT_ZONE_V || v_bat >= BMS_PREEMPT_ZONE_V) &&
                 ((v_bat >= BMS_OPEN_DETECT_V) ||
@@ -495,6 +497,7 @@ void TaskSampleData(void * pvParameters) {
                 ovp_trip_voltage = max(v_bat, v_bat_filt);
                 ovp_trip_ms = now;
                 forceSafeShutdown();
+                charge_full_hold = true;
                 Serial.printf("[CRITICAL] BMS-OPEN/preempt at raw=%.2f filt=%.2f I=%.2fA step=%.2f. PWM off.\n",
                               v_bat, v_bat_filt, i_bat_charge_filt, vbat_step);
             }
@@ -508,10 +511,10 @@ void TaskSampleData(void * pvParameters) {
                               ovp_trip_voltage, HARD_OVP_TRIP_VOLTAGE);
             }
             // Near CV, current naturally falls — do soft duty cut, not hard latch
-            // (hard latch was killing CV 57V tests with OVP_LOCK). Applies to Boost+Forward.
+            // (hard latch was killing CV 57V tests with OVP_LOCK). Proven Boost only.
             if (!ovp_latched &&
                 system_ON &&
-                (currentState == STATE_BOOST || currentState == STATE_FORWARD) &&
+                currentState == STATE_BOOST &&
                 raw_duty > 0 &&
                 v_bat_filt >= BOOST_CV_ENTRY_VOLTAGE &&
                 i_bat_charge_filt < MIN_CURRENT_FOR_ACTIVE_CHARGE &&
@@ -525,18 +528,10 @@ void TaskSampleData(void * pvParameters) {
                                   v_bat, v_bat_filt, raw_duty);
                 } else {
                     duty_accumulator = max(0.0f, duty_accumulator - 15.0f);
-                    if (currentState == STATE_BOOST) {
-                        boostNewCurrIntegrator = 0.0f;
-                        if (boostNewMode != BOOST_NEW_CV) {
-                            boostNewMode = BOOST_NEW_CV;
-                            boostNewVoltIntegrator = 0.0f;
-                        }
-                    } else {
-                        fwdCurrIntegrator = 0.0f;
-                        if (forwardMode != FWD_CV) {
-                            forwardMode = FWD_CV;
-                            fwdVoltIntegrator = 0.0f;
-                        }
+                    boostNewCurrIntegrator = 0.0f;
+                    if (boostNewMode != BOOST_NEW_CV) {
+                        boostNewMode = BOOST_NEW_CV;
+                        boostNewVoltIntegrator = 0.0f;
                     }
                     Serial.printf("[WARN] Runaway soft-cut duty at %.2fV (filt=%.2fV).\n",
                                   v_bat, v_bat_filt);
@@ -544,7 +539,7 @@ void TaskSampleData(void * pvParameters) {
             }
             if (!ovp_latched &&
                 system_ON &&
-                (currentState == STATE_BOOST || currentState == STATE_FORWARD) &&
+                currentState == STATE_BOOST &&
                 raw_duty > 0 &&
                 v_bat_filt >= (BOOST_CV_ENTRY_VOLTAGE - 0.2f) &&
                 (vbat_step > BOOST_VBAT_SPIKE_PRECUT_DELTA_V ||
@@ -559,24 +554,23 @@ void TaskSampleData(void * pvParameters) {
                                   v_bat, vbat_step, v_bat_filt, raw_duty);
                 } else {
                     duty_accumulator = max(0.0f, duty_accumulator - 12.0f);
-                    if (currentState == STATE_BOOST) {
-                        boostNewCurrIntegrator = 0.0f;
-                        if (boostNewMode != BOOST_NEW_CV) {
-                            boostNewMode = BOOST_NEW_CV;
-                            boostNewVoltIntegrator = 0.0f;
-                        }
-                    } else {
-                        fwdCurrIntegrator = 0.0f;
-                        if (forwardMode != FWD_CV) {
-                            forwardMode = FWD_CV;
-                            fwdVoltIntegrator = 0.0f;
-                        }
+                    boostNewCurrIntegrator = 0.0f;
+                    if (boostNewMode != BOOST_NEW_CV) {
+                        boostNewMode = BOOST_NEW_CV;
+                        boostNewVoltIntegrator = 0.0f;
                     }
                     Serial.printf("[WARN] Spike soft-cut duty at %.2fV (step=%.2fV).\n",
                                   v_bat, vbat_step);
                 }
             }
-            // OVP latch is cleared only by STOP when voltage is safe (see TaskLCDLoop).
+            if (ovp_latched &&
+                (now - ovp_trip_ms >= HARD_OVP_RELEASE_DELAY_MS) &&
+                v_bat_filt <= HARD_OVP_RELEASE_VOLTAGE &&
+                v_bat <= (HARD_OVP_RELEASE_VOLTAGE + 0.8f)) {
+                ovp_latched = false;
+                Serial.printf("[INFO] OVP latch cleared at %.2fV (release=%.2fV).\n",
+                              max(v_bat, v_bat_filt), HARD_OVP_RELEASE_VOLTAGE);
+            }
             last_vbat_sample = v_bat;
             last_vbat_filt_sample = v_bat_filt;
             last_adc_sample_ms = now;
@@ -673,8 +667,6 @@ void TaskSampleData(void * pvParameters) {
             pv_is_collapsing = false;
             boostNewMode = BOOST_NEW_SOFTSTART;
             forwardMode = FWD_SOFTSTART;
-            // FULL_HOLD is only valid while system_ON (resume path). Avoid stuck OFF+FULL_HOLD.
-            charge_full_hold = false;
         }
         if (system_ON && currentState != STATE_OFF) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
@@ -1090,7 +1082,7 @@ void TaskSampleData(void * pvParameters) {
             const char* sel_label =
                 (selectedChargeMode == USER_MODE_BOOST) ? "BOOST" : "FORWARD";
             const char* run_label = "STANDBY";
-            if (system_ON && charge_full_hold) {
+            if (charge_full_hold) {
                 run_label = "FULL_HOLD";
             } else if (ovp_latched) {
                 run_label = "OVP_LOCK";
