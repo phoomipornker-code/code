@@ -31,7 +31,7 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
   → FWD_SOFTSTART : เพิ่ม duty เป็นขั้นเล็กๆ ไปหา seed (~45% ของ duty เป้า CC)
   → FWD_CC        : I < Iref−band → +duty จนถึงแบนด์หรือ Dmax (ไม่มีเพดาน FF)
                     เข้า CV เมื่อ Vbat≥**55.10** (confirm) / force **55.35**
-  → FWD_CV        : V ต่ำ → +duty เล็ก; V สูง → −duty; deadband = hold
+  → FWD_CV        : ใกล้ 56V ใช้ iCap ลดตาม V; I > iCap → −duty; ≥56V → ตัดแรง
                     FULL เมื่อ V≥55.9 และ I≤0.5A นาน 60s
   → FWD_DONE
 ```
