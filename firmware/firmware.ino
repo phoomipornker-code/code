@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v36";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v37";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -56,9 +56,9 @@ const float RESTART_CHARGE_VOLTAGE = 54.0;
 // Forward (AC) control: SoftStart → CC → CV → DONE  (NO PID — step/hysteresis)
 // Slow duty steps protect Cin; freeze duty-up on AC sag / bus dip.
 // =========================================================================
-const float FWD_CV_ENTRY_VOLTAGE = 55.50;
-const float FWD_CV_FORCE_VOLTAGE = 55.70;
-const float FWD_CV_EXIT_VOLTAGE  = 54.80;
+const float FWD_CV_ENTRY_VOLTAGE = 55.10;  // was 55.50 — field ~55.2 already tapering in CC
+const float FWD_CV_FORCE_VOLTAGE = 55.35;  // was 55.70
+const float FWD_CV_EXIT_VOLTAGE  = 54.60;  // hysteresis below entry
 const float FWD_CC_TAPER_START_V = 54.80;
 const float FWD_CV_NEAR_BAND_V = 0.35;
 const unsigned long FWD_SOFTSTART_MS = 5000;
@@ -799,15 +799,19 @@ void TaskSampleData(void * pvParameters) {
                         duty_accumulator -= FWD_STEP_DOWN_CC;
                     }
                     // else hold duty (hysteresis band)
-                    if (v_bat_filt >= FWD_CV_FORCE_VOLTAGE || max(v_bat, v_bat_filt) >= FWD_CV_FORCE_VOLTAGE) {
+                    // Enter CV earlier (field: Vbat~55.2–55.4 stuck in tapered CC).
+                    float vBatPeak = max(v_bat, v_bat_filt);
+                    if (vBatPeak >= FWD_CV_FORCE_VOLTAGE) {
                         forwardMode = FWD_CV;
                         fwdCvEnterMs = 0;
                         Serial.printf("[INFO] Force FORWARD CV at Vbat=%.2f / filt=%.2f\n",
                                       v_bat, v_bat_filt);
-                    } else if (v_bat_filt >= FWD_CV_ENTRY_VOLTAGE) {
+                    } else if (vBatPeak >= FWD_CV_ENTRY_VOLTAGE) {
                         if (fwdCvEnterMs == 0) fwdCvEnterMs = now;
                         if (now - fwdCvEnterMs >= FWD_CV_ENTER_CONFIRM_MS) {
                             forwardMode = FWD_CV;
+                            Serial.printf("[INFO] FORWARD CC -> CV at Vbat=%.2f / filt=%.2f\n",
+                                          v_bat, v_bat_filt);
                         }
                     } else {
                         fwdCvEnterMs = 0;
