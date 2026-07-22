@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v39";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v40";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -77,6 +77,7 @@ const float FWD_CC_HOLD_BAND_A = 0.15f;   // |I−Iref| within band → hold dut
 const float FWD_CC_FAR_BAND_A = 0.80f;    // far below → slightly larger up step
 const float FWD_AC_HOLD_CLIMB_V = 115.0f; // freeze duty-up if bus dips (Cin stress)
 const unsigned long FWD_AC_COLLAPSE_CONFIRM_MS = 15000;
+const unsigned long FWD_AC_BRIEF_GLITCH_MS = 400; // ignore sudden AC=3V blips while BAT OK
 const float FWD_SOFTSTART_SEED_DUTY = 60.0;
 const float FWD_AC_CURRENT_HARD_A = 2.5;
 const float FWD_BAT_CURRENT_HARD_A = 3.75f;
@@ -434,6 +435,7 @@ void TaskSampleData(void * pvParameters) {
     float last_valid_raw_mv_v0 = NAN;
     float last_valid_raw_mv_v1 = NAN;  // AC bridge
     float last_valid_raw_mv_v2 = NAN;
+    unsigned long ac_brief_low_since_ms = 0;
     unsigned long last_adc_glitch_log = 0;
     for(;;) {
         unsigned long now = millis();
@@ -463,19 +465,32 @@ void TaskSampleData(void * pvParameters) {
             float pv_raw_before = raw_mv_v0;
             float ac_raw_before = raw_mv_v1;
             float bat_raw_before = raw_mv_v2;
-            // Same ~40mV on BAT+AC while charging ⇒ ADS bus glitch only.
-            // Lone AC collapse is a real temporary sag — must NOT hold last AC.
+            // Same ~40mV on BAT+AC while charging ⇒ ADS bus glitch.
+            // Sudden AC→~0 while BAT still valid: brief glitch/dropout — hold AC short time.
             bool multi_ch_bus_glitch =
                 power_stage_active &&
                 (raw_mv_v2 < ADC_RAW_MIN_VALID_MV) &&
                 (raw_mv_v1 < ADC_RAW_MIN_VALID_MV) &&
                 (fabsf(raw_mv_v1 - raw_mv_v2) < 15.0f);
+            bool ac_sudden_alone =
+                forward_active && power_stage_active &&
+                (raw_mv_v1 < ADC_RAW_MIN_VALID_MV) &&
+                (raw_mv_v2 >= ADC_RAW_MIN_VALID_MV) &&
+                !isnan(last_valid_raw_mv_v1) &&
+                (last_valid_raw_mv_v1 >= ADC_RAW_MIN_VALID_MV);
+            if (ac_sudden_alone) {
+                if (ac_brief_low_since_ms == 0) ac_brief_low_since_ms = now;
+            } else {
+                ac_brief_low_since_ms = 0;
+            }
+            bool ac_brief_glitch = ac_sudden_alone &&
+                (now - ac_brief_low_since_ms < FWD_AC_BRIEF_GLITCH_MS);
             bool solar_raw_glitch = !forward_active &&
                                     (raw_mv_v0 < ADC_RAW_MIN_VALID_MV) &&
                                     (power_stage_active ||
                                      i_solar_mag > ADC_GLITCH_CURRENT_GATE_A ||
                                      i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A);
-            bool ac_raw_glitch = multi_ch_bus_glitch;  // hold AC only on bus glitch, not real sag
+            bool ac_raw_glitch = multi_ch_bus_glitch || ac_brief_glitch;
             bool bat_raw_glitch = (raw_mv_v2 < ADC_RAW_MIN_VALID_MV) &&
                                   (power_stage_active ||
                                    i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
@@ -487,7 +502,7 @@ void TaskSampleData(void * pvParameters) {
             }
             if (ac_raw_glitch && !isnan(last_valid_raw_mv_v1)) {
                 raw_mv_v1 = last_valid_raw_mv_v1;
-            } else if (!ac_raw_glitch) {
+            } else if (!ac_raw_glitch && raw_mv_v1 >= ADC_RAW_MIN_VALID_MV) {
                 last_valid_raw_mv_v1 = raw_mv_v1;
             }
             if (bat_raw_glitch && !isnan(last_valid_raw_mv_v2)) {
@@ -498,9 +513,10 @@ void TaskSampleData(void * pvParameters) {
             if ((solar_raw_glitch || ac_raw_glitch || bat_raw_glitch) &&
                 (now - last_adc_glitch_log >= ADC_GLITCH_LOG_MS)) {
                 last_adc_glitch_log = now;
-                Serial.printf("[WARN] ADC glitch filtered: PVraw=%.1f ACraw=%.1f BATraw=%.1fmV duty=%d Ib=%.2fA%s\n",
+                Serial.printf("[WARN] ADC glitch filtered: PVraw=%.1f ACraw=%.1f BATraw=%.1fmV duty=%d Ib=%.2fA%s%s\n",
                               pv_raw_before, ac_raw_before, bat_raw_before, raw_duty, i_bat_charge_filt,
-                              multi_ch_bus_glitch ? " BUS!" : "");
+                              multi_ch_bus_glitch ? " BUS!" : "",
+                              ac_brief_glitch ? " ACblip!" : "");
             }
             float mv_pure_v0 = raw_mv_v0 - OFFSET_V_SOLAR; if (mv_pure_v0 < 0.0) mv_pure_v0 = 0.0;
             float mv_pure_v1 = raw_mv_v1 - OFFSET_V_AC;    if (mv_pure_v1 < 0.0) mv_pure_v1 = 0.0;
@@ -883,9 +899,8 @@ void TaskSampleData(void * pvParameters) {
                 if (i_bat_charge_abs > FWD_BAT_CURRENT_HARD_A) {
                     duty_accumulator -= 5.0f;
                 }
-                if (v_ac_in < (FWD_AC_VOLTAGE_FLOOR - 0.5f)) {
-                    duty_accumulator -= (2.0f + (FWD_AC_VOLTAGE_FLOOR - v_ac_in) * 2.5f);
-                }
+                // Do NOT dump duty on AC sag — user policy: freeze duty-up only.
+                // (Old floor cut: at Vac=3V subtracted ~232 raw/tick → duty 339→116.)
                 if (v_bat_filt > TARGET_CV_VOLTAGE) {
                     float over_cv = v_bat_filt - TARGET_CV_VOLTAGE;
                     float cut = (forwardMode == FWD_CV) ? (0.6f + over_cv * 3.0f)
