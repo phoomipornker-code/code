@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v58";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v59";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -177,6 +177,7 @@ const unsigned long DEBUG_PRINT_INTERVAL_MS = 5000;  // standby
 const unsigned long DEBUG_PRINT_CHARGE_MS = 3000;    // while charging
 const unsigned long LCD_REFRESH_INTERVAL_MS = 500;      // standby
 const unsigned long LCD_CHARGE_REFRESH_MS = 2000;       // sparse SOC update while charging
+const unsigned long LCD_SOFT_RESYNC_MS = 12000;         // heal EMI desync without Wire.end
 const unsigned long LCD_MUTEX_WAIT_MS = 80;
 const uint32_t I2C_CLOCK_HZ = 100000;
 const int I2C_SDA_PIN = 21;
@@ -249,6 +250,7 @@ float last_vbat_sample = 0.0;
 float last_vbat_filt_sample = 0.0;
 volatile bool lcd_force_refresh = true;
 volatile unsigned long last_lcd_draw_ms = 0;
+volatile unsigned long last_lcd_soft_resync_ms = 0;
 volatile bool lcd_show_no_power = false;
 volatile bool lcd_show_ovp_alert = false;
 volatile unsigned long lcd_alert_until_ms = 0;
@@ -258,8 +260,8 @@ void calibrateCurrentOffsetsAtBoot();
 int quantizeDutyWithDither(float duty_cmd, float *phase, int max_duty);
 void lcdPrintLineRaw(uint8_t row, const char *text);
 void lcdPrintLineFmt(uint8_t row, const char *fmt, ...);
-void loadLcdBatteryChars();
 void lcdDrawBatteryIconLine(uint8_t row, int socPct, bool charging);
+void lcdSoftResyncNoBusReset();
 void i2cBusSoftUnlock();
 void reinitI2CBusAndLCD();
 int estimatePackSocPct(float vPack);
@@ -388,92 +390,32 @@ void lcdPrintLineFmt(uint8_t row, const char *fmt, ...) {
     va_end(args);
     lcdPrintLineRaw(row, tmp);
 }
-// HD44780 CGRAM slots for battery icon while charging.
-enum {
-    LCD_CH_BAT_L = 0,  // left body wall
-    LCD_CH_BAT_E = 1,  // empty segment
-    LCD_CH_BAT_F = 2,  // filled segment
-    LCD_CH_BAT_R = 3,  // right body + terminal nub
-    LCD_CH_BOLT  = 4   // charging indicator
-};
-void loadLcdBatteryChars() {
-    // Horizontal battery outline; fill segments show SOC.
-    uint8_t batL[8] = {
-        0b00000,
-        0b01111,
-        0b01000,
-        0b01000,
-        0b01000,
-        0b01000,
-        0b01111,
-        0b00000
-    };
-    uint8_t batE[8] = {
-        0b00000,
-        0b11111,
-        0b00000,
-        0b00000,
-        0b00000,
-        0b00000,
-        0b11111,
-        0b00000
-    };
-    uint8_t batF[8] = {
-        0b00000,
-        0b11111,
-        0b11111,
-        0b11111,
-        0b11111,
-        0b11111,
-        0b11111,
-        0b00000
-    };
-    uint8_t batR[8] = {
-        0b00000,
-        0b11110,
-        0b00010,
-        0b00011,
-        0b00011,
-        0b00010,
-        0b11110,
-        0b00000
-    };
-    uint8_t bolt[8] = {
-        0b00100,
-        0b00100,
-        0b01110,
-        0b00100,
-        0b01000,
-        0b11100,
-        0b01000,
-        0b10000
-    };
-    lcd.createChar(LCD_CH_BAT_L, batL);
-    lcd.createChar(LCD_CH_BAT_E, batE);
-    lcd.createChar(LCD_CH_BAT_F, batF);
-    lcd.createChar(LCD_CH_BAT_R, batR);
-    lcd.createChar(LCD_CH_BOLT, bolt);
-}
+// Battery icon using CGROM only (0xFF solid block). No CGRAM/createChar —
+// EMI while charging corrupts custom glyphs into garbage (field photo).
 void lcdDrawBatteryIconLine(uint8_t row, int socPct, bool charging) {
-    // "▮▮▮▮▮ ⚡  78%" style on one 20-col line (custom glyphs + percent).
-    int fill = (socPct * 5 + 50) / 100;  // 0..5 segments
+    int fill = (socPct * 10 + 50) / 100;  // 0..10
     if (fill < 0) fill = 0;
-    if (fill > 5) fill = 5;
+    if (fill > 10) fill = 10;
     lcd.setCursor(0, row);
-    lcd.write((uint8_t)LCD_CH_BAT_L);
-    for (int i = 0; i < 5; i++) {
-        lcd.write((uint8_t)(i < fill ? LCD_CH_BAT_F : LCD_CH_BAT_E));
+    lcd.print('[');
+    for (int i = 0; i < 10; i++) {
+        if (i < fill) lcd.write((uint8_t)0xFF);  // solid block
+        else lcd.print('-');
     }
-    lcd.write((uint8_t)LCD_CH_BAT_R);
-    lcd.print(' ');
-    if (charging) lcd.write((uint8_t)LCD_CH_BOLT);
-    else lcd.print(' ');
-    char pct[12];
-    snprintf(pct, sizeof(pct), " %3d%%", socPct);
+    lcd.print(']');
+    lcd.print(charging ? '*' : ' ');
+    char pct[8];
+    snprintf(pct, sizeof(pct), "%3d%%", socPct);
     lcd.print(pct);
-    // Pad remainder of the 20-col row so old glyphs do not linger.
-    // Used: L+5seg+R(7) + sp(1) + bolt(1) + " NNN%"(5) = 14
-    for (int c = 14; c < 20; c++) lcd.print(' ');
+    // [ + 10 + ] + mark + NNN% = 17; pad to 20
+    for (int c = 17; c < 20; c++) lcd.print(' ');
+}
+// Re-sync HD44780 over the live I2C bus. Never Wire.end / pin bang while
+// system_ON — that glitches ADS + control (see v51/v52).
+void lcdSoftResyncNoBusReset() {
+    lcd.init();
+    lcd.backlight();
+    lcd.clear();
 }
 void i2cBusSoftUnlock() {
     // Clock out stuck slave (SDA low) before Wire.begin — common after EMI.
@@ -497,7 +439,6 @@ void reinitI2CBusAndLCD() {
     lcd.init();
     lcd.backlight();
     lcd.clear();
-    loadLcdBatteryChars();
 }
 // 16S LFP voltage→SOC (display estimate). Charging V is a bit high vs rest.
 int estimatePackSocPct(float vPack) {
@@ -539,6 +480,15 @@ void drawLcdScreen() {
     if (on && (ibf > 0.3f)) vSoc = vbf - (ibf * 0.04f);
     const int soc = estimatePackSocPct(vSoc);
     const bool chargingNow = on && (fabsf(ibf) > 0.15f);
+
+    // Periodic soft resync while charging — clears EMI garble without Wire.end.
+    const unsigned long now = millis();
+    if ((on || full) &&
+        (last_lcd_soft_resync_ms == 0 ||
+         (now - last_lcd_soft_resync_ms >= LCD_SOFT_RESYNC_MS))) {
+        lcdSoftResyncNoBusReset();
+        last_lcd_soft_resync_ms = now;
+    }
 
     if (on && full) {
         lcdPrintLineRaw(0, "BATTERY FULL HOLD");
@@ -651,7 +601,6 @@ void setup() {
         lcdPrintLineRaw(3, "STOP=mode START=go");
         xSemaphoreGive(i2c_Mutex);
     }
-    Serial.println("[BOOT] LCD draw owned by ADC task (no I2C fight).");
     if (!sensor_init_ok) {
         Serial.println("[FATAL] ADS1115 init failed. System is locked in safe standby.");
         forceSafeShutdown();
