@@ -1,6 +1,6 @@
 # โน้ตส่วน STATE_FORWARD
 
-แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v60`
+แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v61`
 
 ## ค่าคงที่สำคัญ
 
@@ -49,7 +49,7 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 - Duty open ช้า (Cin); freeze climb ถ้า AC&lt;115 V
 - ADC mutex / bus-glitch / ACblip / **BATspike** / **BATbad!** — เกตเสมอเมื่อมี last-plausible (รวมหลัง STOP)
 - Filter heal ถ้า `Vf` หลุดนอก 35–62 V
-- BMS-OPEN จริง: V สูง + กระแสยุบ + confirm ~120 ms
+- BMS-OPEN จริง: V สูง (≥~56.8) + กระแสยุบ ≤0.25 A + confirm ~200 ms — **ไม่ตัด** ตอนใกล้เต็มที่ยังมี I
 - HARD OVP: confirm สั้น ๆ + ต้องอยู่ในช่วง 16S จริง (ไม่ latch จาก filt≈74 / raw≈80)
 - LCD/I2C: **ตอนชาร์จปิดจอ** (clear + no backlight, ไม่ I2C ต่อ) จน **FULL** ค่อยโชว์รูปแบต CGROM; OVP ยังขึ้นได้; ไม่ Wire.end ตอน `system_ON`
 - Soft over-current / OVP ตามเดิม (CV ใช้ขั้นละเอียด ไม่ตัดแรง)
