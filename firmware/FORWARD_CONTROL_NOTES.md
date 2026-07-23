@@ -1,7 +1,6 @@
 # โน้ตส่วน STATE_FORWARD
 
-แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v79`  
-(เนื้อหาควบคุม = `cv58-boost-v14-forward-v63` ที่ชาร์จได้; `[STAT]` ทุก 60 s)
+แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v63`
 
 ## ค่าคงที่สำคัญ
 
