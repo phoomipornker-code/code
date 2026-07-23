@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v59";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v60";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -175,9 +175,10 @@ const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 const bool ENABLE_DEBUG_STATUS = true;         // one-line status (no RAW dump)
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 5000;  // standby
 const unsigned long DEBUG_PRINT_CHARGE_MS = 3000;    // while charging
-const unsigned long LCD_REFRESH_INTERVAL_MS = 500;      // standby
-const unsigned long LCD_CHARGE_REFRESH_MS = 2000;       // sparse SOC update while charging
-const unsigned long LCD_SOFT_RESYNC_MS = 12000;         // heal EMI desync without Wire.end
+const unsigned long LCD_REFRESH_INTERVAL_MS = 500;      // standby / FULL
+const unsigned long LCD_CHARGE_REFRESH_MS = 2000;       // only used after FULL (or alerts)
+// Soft resync kept for FULL/standby recover path — not used while charge-blanked.
+const unsigned long LCD_SOFT_RESYNC_MS = 12000;
 const unsigned long LCD_MUTEX_WAIT_MS = 80;
 const uint32_t I2C_CLOCK_HZ = 100000;
 const int I2C_SDA_PIN = 21;
@@ -251,6 +252,7 @@ float last_vbat_filt_sample = 0.0;
 volatile bool lcd_force_refresh = true;
 volatile unsigned long last_lcd_draw_ms = 0;
 volatile unsigned long last_lcd_soft_resync_ms = 0;
+volatile bool lcd_charge_blanked = false;  // true while charging: LCD off until FULL
 volatile bool lcd_show_no_power = false;
 volatile bool lcd_show_ovp_alert = false;
 volatile unsigned long lcd_alert_until_ms = 0;
@@ -464,11 +466,7 @@ void drawLcdScreen() {
     const bool on = system_ON;
     const bool full = charge_full_hold;
     const bool ovp = ovp_latched;
-    const SystemState st = currentState;
     const UserChargeMode mode = selectedChargeMode;
-    const ForwardMode fwdMode = forwardMode;
-    const BoostNewMode boostMode = boostNewMode;
-    const int dutyPct = active_duty_percent;
     const float vb = v_bat;
     const float vbf = v_bat_filt;
     const float ibf = i_bat_filt;
@@ -479,43 +477,35 @@ void drawLcdScreen() {
     float vSoc = vbf;
     if (on && (ibf > 0.3f)) vSoc = vbf - (ibf * 0.04f);
     const int soc = estimatePackSocPct(vSoc);
-    const bool chargingNow = on && (fabsf(ibf) > 0.15f);
 
-    // Periodic soft resync while charging — clears EMI garble without Wire.end.
+    // While actively charging: blank LCD (no I2C traffic) until FULL.
+    // Still show OVP / error alerts if latched.
+    if (on && !full && !ovp && !lcd_show_ovp_alert && !lcd_show_no_power) {
+        if (!lcd_charge_blanked) {
+            lcd.clear();
+            lcd.noBacklight();
+            lcd_charge_blanked = true;
+        }
+        return;
+    }
+
+    // Leaving blank period (FULL / STOP / OVP / standby) — restore backlight + content.
+    lcd_charge_blanked = false;
+
+    // Soft resync on FULL entry / standby recover (never Wire.end while ON).
     const unsigned long now = millis();
-    if ((on || full) &&
+    if (full &&
         (last_lcd_soft_resync_ms == 0 ||
          (now - last_lcd_soft_resync_ms >= LCD_SOFT_RESYNC_MS))) {
         lcdSoftResyncNoBusReset();
         last_lcd_soft_resync_ms = now;
     }
 
-    if (on && full) {
+    if (full) {
         lcdPrintLineRaw(0, "BATTERY FULL HOLD");
         lcdDrawBatteryIconLine(1, soc, false);
         lcdPrintLineFmt(2, "BAT:%5.1fV I:%4.2fA", vbf, ibf);
         lcdPrintLineRaw(3, "Hold STOP to end");
-    } else if (on) {
-        const char* path = (st == STATE_BOOST) ? "BOOST" : "FORW";
-        const char* phase = "----";
-        if (st == STATE_FORWARD) {
-            if (fwdMode == FWD_SOFTSTART) phase = "SOFT";
-            else if (fwdMode == FWD_CC) phase = "CC  ";
-            else if (fwdMode == FWD_CV) phase = "CV  ";
-            else phase = "DONE";
-        } else if (st == STATE_BOOST) {
-            if (boostMode == BOOST_NEW_SOFTSTART) phase = "SOFT";
-            else if (boostMode == BOOST_NEW_CC_MPPT) phase = "CC  ";
-            else if (boostMode == BOOST_NEW_CV) phase = "CV  ";
-            else phase = "DONE";
-        } else {
-            phase = "WAIT";
-        }
-        lcdPrintLineFmt(0, "%s %s  CHARGE", path, phase);
-        lcdDrawBatteryIconLine(1, soc, chargingNow);
-        lcdPrintLineFmt(2, "BAT:%5.1fV I:%4.2fA", vbf, fabsf(ibf));
-        lcdPrintLineFmt(3, "IN:%5.1fV D:%3d%%",
-                        (st == STATE_BOOST) ? vs : vac, dutyPct);
     } else if (ovp || lcd_show_ovp_alert) {
         lcdPrintLineRaw(0, "OVP TRIPPED");
         lcdPrintLineFmt(1, "VBAT:%5.1fV T:%4.1f", vbf, ovpTrip);
@@ -541,8 +531,7 @@ void drawLcdScreen() {
     lcd.backlight();
 }
 bool tryDrawLcdScreen() {
-    // Allowed in standby and while charging (sparse). Never from button-task reinit path
-    // while ON — that path is gated separately. No PWM mute.
+    // Standby / FULL / alerts only. Active charging blanks once then skips I2C.
     if (!xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(LCD_MUTEX_WAIT_MS))) {
         return false;
     }
@@ -834,6 +823,8 @@ void TaskSampleData(void * pvParameters) {
                     forceSafeShutdown();
                     charge_full_hold = true;
                     bms_open_suspect_ms = 0;
+                    last_lcd_soft_resync_ms = 0;
+                    lcd_force_refresh = true;
                     Serial.printf("[CRITICAL] BMS-OPEN/preempt at raw=%.2f filt=%.2f I=%.2fA step=%.2f. PWM off.\n",
                                   v_bat, v_bat_filt, i_bat_charge_filt, vbat_step);
                 }
@@ -1185,6 +1176,8 @@ void TaskSampleData(void * pvParameters) {
                             forwardMode = FWD_DONE;
                             charge_full_hold = true;
                             disablePowerStage();
+                            last_lcd_soft_resync_ms = 0;
+                            lcd_force_refresh = true;
                             Serial.println("[INFO] Battery FULL detected in FORWARD_CV.");
                         }
                     } else {
@@ -1406,6 +1399,8 @@ void TaskSampleData(void * pvParameters) {
                             boostNewMode = BOOST_NEW_DONE;
                             charge_full_hold = true;
                             disablePowerStage();
+                            last_lcd_soft_resync_ms = 0;
+                            lcd_force_refresh = true;
                             Serial.println("[INFO] Battery FULL detected in BOOST_NEW_CV.");
                         }
                     } else {
@@ -1473,6 +1468,8 @@ void TaskSampleData(void * pvParameters) {
                 if (now - high_voltage_stop_start_ms >= HIGH_VOLTAGE_STOP_CONFIRM_MS) {
                     charge_full_hold = true;
                     disablePowerStage();
+                    last_lcd_soft_resync_ms = 0;
+                    lcd_force_refresh = true;
                     Serial.printf("[INFO] High-voltage charge stop at %.2fV. Enter FULL HOLD.\n", v_bat_filt);
                 }
             } else {
@@ -1487,13 +1484,25 @@ void TaskSampleData(void * pvParameters) {
         }
         last_millis = now;
         active_duty_percent = round(((float)raw_duty * 100.0) / 1023.0);
-        // Standby: 500 ms. Charging/FULL: sparse SOC screen every 2 s (no PWM mute / no Wire.end).
-        const unsigned long lcdPeriod =
-            (system_ON || charge_full_hold) ? LCD_CHARGE_REFRESH_MS : LCD_REFRESH_INTERVAL_MS;
-        if (lcd_force_refresh || (now - last_lcd_draw_ms >= lcdPeriod)) {
-            if (tryDrawLcdScreen()) {
-                last_lcd_draw_ms = now;
-                lcd_force_refresh = false;
+        // LCD: blank while charging; refresh standby / FULL / alerts only.
+        const bool chargeActive =
+            system_ON && !charge_full_hold && !ovp_latched && !lcd_show_ovp_alert;
+        if (chargeActive) {
+            // One-shot blank on entry; then no LCD I2C until FULL/STOP/OVP.
+            if (!lcd_charge_blanked || lcd_force_refresh) {
+                if (tryDrawLcdScreen()) {
+                    last_lcd_draw_ms = now;
+                    lcd_force_refresh = false;
+                }
+            }
+        } else {
+            const unsigned long lcdPeriod =
+                charge_full_hold ? LCD_CHARGE_REFRESH_MS : LCD_REFRESH_INTERVAL_MS;
+            if (lcd_force_refresh || (now - last_lcd_draw_ms >= lcdPeriod)) {
+                if (tryDrawLcdScreen()) {
+                    last_lcd_draw_ms = now;
+                    lcd_force_refresh = false;
+                }
             }
         }
         const bool chargingNow =
@@ -1628,6 +1637,8 @@ void TaskLCDLoop(void * pvParameters) {
                 charge_full_hold = false;
                 lcd_show_no_power = false;
                 lcd_show_ovp_alert = false;
+                lcd_charge_blanked = false;   // force one blank on next draw
+                last_lcd_soft_resync_ms = 0;
                 lcd_force_refresh = true;
             } else {
                 system_ON = false;
