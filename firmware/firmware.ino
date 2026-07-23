@@ -449,12 +449,9 @@ void drawLcdScreen() {
     const int dutyPct = active_duty_percent;
     const float vb = v_bat;
     const float vbf = v_bat_filt;
-    const float ib = i_bat;
     const float ibf = i_bat_filt;
     const float vs = v_solar;
     const float vac = v_ac_in;
-    const float is = i_solar;
-    const float iac = i_ac_in;
     const float ovpTrip = ovp_trip_voltage;
     // Prefer filtered pack V for SOC; tiny IR trim while charging.
     float vSoc = vbf;
@@ -1414,10 +1411,7 @@ void TaskSampleData(void * pvParameters) {
         }
         last_millis = now;
         active_duty_percent = round(((float)raw_duty * 100.0) / 1023.0);
-        // Standby: 500 ms refresh. Charging: sparse SOC screen (no PWM mute, no Wire.end).
-        const bool chargingUi =
-            system_ON && (currentState == STATE_FORWARD || currentState == STATE_BOOST ||
-                          charge_full_hold || currentState == STATE_OFF);
+        // Standby: 500 ms. Charging/FULL: sparse SOC screen every 2 s (no PWM mute / no Wire.end).
         const unsigned long lcdPeriod =
             (system_ON || charge_full_hold) ? LCD_CHARGE_REFRESH_MS : LCD_REFRESH_INTERVAL_MS;
         if (lcd_force_refresh || (now - last_lcd_draw_ms >= lcdPeriod)) {
@@ -1426,7 +1420,6 @@ void TaskSampleData(void * pvParameters) {
                 lcd_force_refresh = false;
             }
         }
-        (void)chargingUi;
         const bool chargingNow =
             system_ON && (currentState == STATE_FORWARD || currentState == STATE_BOOST);
         const unsigned long dbgPeriod =
