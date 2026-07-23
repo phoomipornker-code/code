@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v70";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v71";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -563,8 +563,43 @@ void calibrateCurrentOffsetsAtBoot() {
     current_offset_i0 = sum_i0 / CAL_SAMPLES;
     current_offset_i1 = sum_i1 / CAL_SAMPLES;
     current_offset_i2 = sum_i2 / CAL_SAMPLES;
-    Serial.printf("[CAL] Current zero offsets (mV): I0=%.2f I1=%.2f I2=%.2f\n",
-                  current_offset_i0, current_offset_i1, current_offset_i2);
+    // No [CAL] dump — print live Tim/Iin/Vin/Iout/Vout/Duty snapshot instead.
+    // Voltage ADS map matches TaskSampleData: ch0=PV, ch2=AC, ch1=BAT.
+    float raw_pv = readADCStable(ads_volt, 0, true) * 0.1875f;
+    float raw_ac = readADCStable(ads_volt, 2, true) * 0.1875f;
+    float raw_bat = readADCStable(ads_volt, 1, true) * 0.1875f;
+    float raw_i0 = readADCStable(ads_curr, 0, true) * 0.1875f;
+    float raw_i1 = readADCStable(ads_curr, 1, true) * 0.1875f;
+    float raw_i2 = readADCStable(ads_curr, 2, true) * 0.1875f;
+    float v_pv = ((raw_pv - OFFSET_V_SOLAR) / 1000.0f) * CAL_SCALE_V_SOLAR * FIELD_TRIM_V_SOLAR;
+    float v_ac = ((raw_ac - OFFSET_V_AC) / 1000.0f) * CAL_SCALE_V_AC;
+    float v_b = ((raw_bat - OFFSET_V_BAT) / 1000.0f) * CAL_SCALE_V_BAT;
+    float i_pv = ((raw_i0 - current_offset_i0) / 1000.0f) * CAL_SCALE_I_SOLAR;
+    float i_ac = ((raw_i1 - current_offset_i1) / 1000.0f) * CAL_SCALE_I_AC;
+    float i_b = ((raw_i2 - current_offset_i2) / 1000.0f) * CAL_SCALE_I_BAT;
+    if (v_pv < NOISE_V_THRESHOLD) v_pv = 0.0f;
+    if (v_ac < NOISE_V_THRESHOLD) v_ac = 0.0f;
+    if (v_b < NOISE_V_THRESHOLD) v_b = 0.0f;
+    if (fabsf(i_pv) < NOISE_I_THRESHOLD) i_pv = 0.0f;
+    if (fabsf(i_ac) < NOISE_I_THRESHOLD) i_ac = 0.0f;
+    if (fabsf(i_b) < NOISE_I_THRESHOLD) i_b = 0.0f;
+    v_solar = v_pv;
+    v_ac_in = v_ac;
+    v_bat = v_b;
+    v_bat_filt = v_b;
+    i_solar = i_pv;
+    i_ac_in = i_ac;
+    i_bat = i_b;
+    i_bat_filt = i_b;
+    i_bat_charge_filt = fabsf(i_b);
+    i_bat_charge_abs = fabsf(i_b);
+    const bool use_boost = (selectedChargeMode == USER_MODE_BOOST);
+    const float vin = use_boost ? v_pv : v_ac;
+    const float iin = use_boost ? fabsf(i_pv) : fabsf(i_ac);
+    const unsigned long sec = millis() / 1000UL;
+    Serial.printf("          %02lu:%02lu:%02lu  %7.2f  %7.1f  %6.2f  %6.2f  %3d\n",
+                  (sec / 3600UL) % 100UL, (sec / 60UL) % 60UL, sec % 60UL,
+                  iin, vin, fabsf(i_b), v_b, 0);
 }
 void setup() {
     Serial.begin(115200);
