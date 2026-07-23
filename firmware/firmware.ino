@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v62";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v63";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -115,13 +115,15 @@ const float NOISE_I_THRESHOLD = 0.08;
 const float ADC_RAW_MIN_VALID_MV = 80.0;
 const float ADC_GLITCH_CURRENT_GATE_A = 0.35;
 const unsigned long ADC_GLITCH_LOG_MS = 5000;  // rate-limit glitch WARN spam
-// Sudden BAT sense jump up (~3.3 V/sample) ⇒ ADS mux/glitch (field: 53.8→91.6 = AC channel).
-const float ADC_BAT_HIGH_SPIKE_MV = 80.0f;
+// Sudden BAT sense jump up — field CV entry: +2.89 V (≈70 mV raw) passed old 80 mV
+// gate then SPIKE-PRECUT latched OVP at 57.92 while filt=55.33. ~50 mV ≈ 2.1 V.
+const float ADC_BAT_HIGH_SPIKE_MV = 50.0f;
 // 16S pack while charging must stay ~40–57 V ⇒ ADS mV ~955–1362. Field showed
 // BATraw=104 mV (V=4.37) with I≈3 A — passed old MIN=80 and poisoned the filter.
 const float ADC_BAT_MIN_PLAUSIBLE_MV = 850.0f;   // ~35.6 V
 const float ADC_BAT_MAX_PLAUSIBLE_MV = 1500.0f;  // ~62.8 V
 const float ADC_BAT_LOW_SPIKE_MV = 80.0f;        // sudden drop vs last good
+const float ADC_BAT_V_STEP_SPIKE_V = 2.0f;       // voltage-domain twin of high-spike gate
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 const unsigned long BMS_OPEN_CONFIRM_MS = 200;  // ignore brief V/I blips near CV
 const unsigned long HARD_OVP_CONFIRM_MS = 80;   // ignore single-sample HARD OVP
@@ -770,7 +772,11 @@ void TaskSampleData(void * pvParameters) {
             // Refuse to poison Vbat filter with out-of-range samples (4.4 V or ~100 V spikes).
             // Always — including after STOP (field: OVP at filt=74 after spike leaked in).
             const bool bat_v_implausible_now = (v_bat < 35.0f || v_bat > 62.0f);
-            if (bat_v_implausible_now) {
+            // Voltage-domain spike (field: +2.89 V ≈70 mV passed old 80 mV gate → false OVP).
+            const bool bat_v_step_spike =
+                !isnan(last_good_v_bat) &&
+                (v_bat > (last_good_v_bat + ADC_BAT_V_STEP_SPIKE_V));
+            if (bat_v_implausible_now || bat_v_step_spike) {
                 if (!isnan(last_good_v_bat)) {
                     v_bat = last_good_v_bat;
                 } else if (v_bat_filt >= 35.0f && v_bat_filt <= 62.0f) {
@@ -901,6 +907,8 @@ void TaskSampleData(void * pvParameters) {
                 hard_ovp_suspect_ms = 0;
             }
             // Near CV runaway soft-cut — proven Boost logic, also applied to Forward.
+            // Never latch OVP from a lone raw spike while filt is still far below trip
+            // (field: SPIKE-PRECUT 57.92 / filt 55.33 right after CC→CV with I still flowing).
             if (!ovp_latched &&
                 system_ON &&
                 (currentState == STATE_BOOST || currentState == STATE_FORWARD) &&
@@ -908,7 +916,10 @@ void TaskSampleData(void * pvParameters) {
                 v_bat_filt >= BOOST_CV_ENTRY_VOLTAGE &&
                 i_bat_charge_filt < MIN_CURRENT_FOR_ACTIVE_CHARGE &&
                 v_bat > (v_bat_filt + 3.0f)) {
-                if (v_bat >= HARD_OVP_TRIP_VOLTAGE) {
+                const bool runaway_ovp =
+                    (v_bat >= HARD_OVP_TRIP_VOLTAGE) &&
+                    (v_bat_filt >= (HARD_OVP_TRIP_VOLTAGE - 1.0f));
+                if (runaway_ovp) {
                     ovp_latched = true;
                     ovp_trip_voltage = v_bat;
                     ovp_trip_ms = now;
@@ -940,7 +951,13 @@ void TaskSampleData(void * pvParameters) {
                 (vbat_step > BOOST_VBAT_SPIKE_PRECUT_DELTA_V ||
                  (vbat_step > 0.7f && vbat_filt_step > 0.25f)) &&
                 v_bat > (v_bat_filt + BOOST_VBAT_SPIKE_PRECUT_RAW_ABOVE_FILT_V)) {
-                if (v_bat >= HARD_OVP_TRIP_VOLTAGE) {
+                // Latch only if filt also near HARD OVP (real runaway), not mux ghost.
+                const bool spike_ovp =
+                    (v_bat >= HARD_OVP_TRIP_VOLTAGE) &&
+                    (v_bat_filt >= (HARD_OVP_TRIP_VOLTAGE - 1.0f)) &&
+                    (i_bat_charge_filt <= 0.35f) &&
+                    (i_bat_charge_abs <= 0.50f);
+                if (spike_ovp) {
                     ovp_latched = true;
                     ovp_trip_voltage = v_bat;
                     ovp_trip_ms = now;
@@ -960,8 +977,8 @@ void TaskSampleData(void * pvParameters) {
                             forwardMode = FWD_CV;
                         }
                     }
-                    Serial.printf("[WARN] Spike soft-cut duty at %.2fV (step=%.2fV).\n",
-                                  v_bat, vbat_step);
+                    Serial.printf("[WARN] Spike soft-cut duty at %.2fV (step=%.2fV filt=%.2f I=%.2fA).\n",
+                                  v_bat, vbat_step, v_bat_filt, i_bat_charge_filt);
                 }
             }
             if (ovp_latched &&
