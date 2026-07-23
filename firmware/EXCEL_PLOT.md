@@ -1,27 +1,22 @@
 # พล็อตกราฟจาก Serial ลง Excel
 
-เฟิร์มแวร์ส่งบรรทัด **CSV** (คั่นด้วย Tab) ทุก ~1 วินาที
+บรรทัด **CSV** ทุก ~1 วินาที (คั่นด้วย Tab):
 
-## คอลัมน์
+```text
+CSV	t_s	Vin	Vout	Iout	Duty
+CSV	12.3	147.7	53.97	0.50	36
+```
 
 | คอลัมน์ | ความหมาย |
 |---------|----------|
-| t_ms | เวลา millis |
-| t_s | วินาที (ใช้เป็นแกน X) |
-| run | สถานะ เช่น F_CC, F_CV, B_CV, FULL, OVP |
-| Dpct | Duty % |
-| Draw | Duty raw (0–1023) |
-| Vbat | แรงดันแบตดิบ |
-| Vf | แรงดันแบตกรอง |
-| Ibat | กระแสแบตดิบ (abs) |
-| If | กระแสแบตกรอง |
-| Vin | PV หรือ AC ตามโหมด |
-| sel | BOOST / FORW ที่เลือก |
+| t_s | เวลา (วินาที) — แกน X |
+| Vin | แรงดันเข้า (PV / AC) |
+| Vout | แรงดันออกแบต |
+| Iout | กระแสออกแบต |
+| Duty | Duty % |
 
-## ขั้นตอนสั้น ๆ
+## ขั้นตอน
 
 1. Serial Monitor **115200** — คัดลอกเฉพาะบรรทัดขึ้นต้น `CSV`
-2. วางใน Excel → **Data → Text to Columns → Tab**
-3. Chart: X = `t_s`, Y = `Vf` + `If` (หรือ `Dpct`)
-
-กรองใน Notepad: เก็บเฉพาะบรรทัดที่ขึ้นต้นด้วย `CSV` แล้วบันทึกเป็น `.txt` ก่อนเปิดด้วย Excel ก็ได้
+2. วาง Excel → Data → Text to Columns → **Tab**
+3. Chart: X = `t_s`, Y = `Vin` / `Vout` / `Iout` / `Duty`

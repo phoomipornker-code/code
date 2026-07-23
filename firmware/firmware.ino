@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v64";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v65";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -571,8 +571,8 @@ void setup() {
     Serial.printf("[BOOT] %s | B_CC=%.0fA F_CC=%.0fA CV=%.2fV DmaxF=%d\n",
                   FW_VERSION_TAG, TARGET_CC_CURRENT, FWD_TARGET_CC_CURRENT,
                   TARGET_CV_VOLTAGE, MAX_DUTY_FORWARD);
-    // Tab-separated for Excel (any locale). Filter Serial lines starting with CSV.
-    Serial.println("CSV\tt_ms\tt_s\trun\tDpct\tDraw\tVbat\tVf\tIbat\tIf\tVin\tsel");
+    // Tab-separated for Excel. Columns: time, Vin, Vout, Iout, Duty%
+    Serial.println("CSV\tt_s\tVin\tVout\tIout\tDuty");
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(40);
@@ -1614,15 +1614,12 @@ void TaskSampleData(void * pvParameters) {
                 ? v_solar
                 : v_ac_in;
 
-        // Excel TSV (tab). Keep only lines that start with "CSV" then paste into Excel.
+        // Excel TSV — only Vin / Vout / Iout / Duty (filter lines starting with CSV).
         if (ENABLE_DEBUG_CSV && (now - last_csv_time >= DEBUG_CSV_INTERVAL_MS)) {
             last_csv_time = now;
-            Serial.printf("CSV\t%lu\t%.1f\t%s\t%d\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.1f\t%s\n",
-                          now, now / 1000.0f, run_label,
-                          active_duty_percent, raw_duty,
-                          v_bat, v_bat_filt,
-                          i_bat_charge_abs, i_bat_charge_filt,
-                          vin_now, sel_label);
+            Serial.printf("CSV\t%.1f\t%.1f\t%.2f\t%.2f\t%d\n",
+                          now / 1000.0f, vin_now, v_bat_filt, i_bat_charge_filt,
+                          active_duty_percent);
         }
 
         if (ENABLE_DEBUG_STATUS && (now - last_debug_time >= dbgPeriod)) {
