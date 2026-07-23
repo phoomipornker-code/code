@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v52";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v53";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -170,7 +170,8 @@ const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 const bool ENABLE_DEBUG_VERBOSE = true;
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 1000;
 const unsigned long DEBUG_PRINT_CHARGE_MS = 2000;       // rarer Serial while charging
-const unsigned long LCD_REFRESH_INTERVAL_MS = 500;      // standby only
+const unsigned long LCD_REFRESH_INTERVAL_MS = 500;      // standby
+const unsigned long LCD_CHARGE_REFRESH_MS = 2000;       // sparse SOC update while charging
 const unsigned long LCD_MUTEX_WAIT_MS = 80;
 const uint32_t I2C_CLOCK_HZ = 100000;
 const int I2C_SDA_PIN = 21;
@@ -254,6 +255,8 @@ void lcdPrintLineRaw(uint8_t row, const char *text);
 void lcdPrintLineFmt(uint8_t row, const char *fmt, ...);
 void i2cBusSoftUnlock();
 void reinitI2CBusAndLCD();
+int estimatePackSocPct(float vPack);
+void formatSocBar(char *out, size_t outLen, int socPct);
 void drawLcdScreen();
 bool tryDrawLcdScreen();
 static inline float boostClampf(float x, float lo, float hi) {
@@ -402,6 +405,38 @@ void reinitI2CBusAndLCD() {
     lcd.backlight();
     lcd.clear();
 }
+// 16S LFP voltage→SOC (display estimate). Charging V is a bit high vs rest.
+int estimatePackSocPct(float vPack) {
+    static const float vp[] = {40.0f, 48.0f, 49.6f, 51.2f, 52.0f, 52.8f, 53.6f, 54.4f, 55.2f, 55.9f};
+    static const float sp[] = { 0.0f, 10.0f, 20.0f, 40.0f, 55.0f, 70.0f, 85.0f, 92.0f, 97.0f, 100.0f};
+    const int n = 10;
+    if (vPack <= vp[0]) return 0;
+    if (vPack >= vp[n - 1]) return 100;
+    for (int i = 0; i < n - 1; i++) {
+        if (vPack <= vp[i + 1]) {
+            float t = (vPack - vp[i]) / (vp[i + 1] - vp[i]);
+            float s = sp[i] + t * (sp[i + 1] - sp[i]);
+            int pct = (int)lroundf(s);
+            if (pct < 0) pct = 0;
+            if (pct > 100) pct = 100;
+            return pct;
+        }
+    }
+    return 100;
+}
+void formatSocBar(char *out, size_t outLen, int socPct) {
+    if (outLen < 12) {
+        if (outLen) out[0] = '\0';
+        return;
+    }
+    int fill = (socPct * 10 + 50) / 100;  // 0..10
+    if (fill < 0) fill = 0;
+    if (fill > 10) fill = 10;
+    out[0] = '[';
+    for (int i = 0; i < 10; i++) out[1 + i] = (i < fill) ? '#' : '-';
+    out[11] = ']';
+    out[12] = '\0';
+}
 void drawLcdScreen() {
     // Caller holds i2c_Mutex. Snapshot locals to keep I2C burst short/consistent.
     const bool on = system_ON;
@@ -409,6 +444,8 @@ void drawLcdScreen() {
     const bool ovp = ovp_latched;
     const SystemState st = currentState;
     const UserChargeMode mode = selectedChargeMode;
+    const ForwardMode fwdMode = forwardMode;
+    const BoostNewMode boostMode = boostNewMode;
     const int dutyPct = active_duty_percent;
     const float vb = v_bat;
     const float vbf = v_bat_filt;
@@ -418,21 +455,40 @@ void drawLcdScreen() {
     const float vac = v_ac_in;
     const float is = i_solar;
     const float iac = i_ac_in;
-    const float wh = total_Wh;
     const float ovpTrip = ovp_trip_voltage;
+    // Prefer filtered pack V for SOC; tiny IR trim while charging.
+    float vSoc = vbf;
+    if (on && (ibf > 0.3f)) vSoc = vbf - (ibf * 0.04f);
+    const int soc = estimatePackSocPct(vSoc);
+    char socBar[13];
+    formatSocBar(socBar, sizeof(socBar), soc);
+
     if (on && full) {
         lcdPrintLineRaw(0, "BATTERY FULL HOLD");
-        lcdPrintLineFmt(1, "BAT:%5.1fV I:%4.2fA", vbf, ibf);
-        lcdPrintLineFmt(2, "Resume <= %5.1fV", RESTART_CHARGE_VOLTAGE);
+        lcdPrintLineFmt(1, "SOC:%3d%%  %s", soc, socBar);
+        lcdPrintLineFmt(2, "BAT:%5.1fV I:%4.2fA", vbf, ibf);
         lcdPrintLineRaw(3, "Hold STOP to end");
     } else if (on) {
-        lcdPrintLineFmt(0, "ACTIVE   DUTY:%3d%%", dutyPct);
-        lcdPrintLineFmt(1, "%-8s PWR:%5.1fWh",
-                        (st == STATE_BOOST) ? "BOOST PV" : "FORW AC", wh);
-        lcdPrintLineFmt(2, "IN :%5.1fV %5.1fA",
-                        (st == STATE_BOOST) ? vs : vac,
-                        (st == STATE_BOOST) ? is : iac);
-        lcdPrintLineFmt(3, "OUT:%5.1fV %5.1fA", vb, ib);
+        const char* path = (st == STATE_BOOST) ? "BOOST" : "FORW";
+        const char* phase = "----";
+        if (st == STATE_FORWARD) {
+            if (fwdMode == FWD_SOFTSTART) phase = "SOFT";
+            else if (fwdMode == FWD_CC) phase = "CC  ";
+            else if (fwdMode == FWD_CV) phase = "CV  ";
+            else phase = "DONE";
+        } else if (st == STATE_BOOST) {
+            if (boostMode == BOOST_NEW_SOFTSTART) phase = "SOFT";
+            else if (boostMode == BOOST_NEW_CC_MPPT) phase = "CC  ";
+            else if (boostMode == BOOST_NEW_CV) phase = "CV  ";
+            else phase = "DONE";
+        } else {
+            phase = "WAIT";
+        }
+        lcdPrintLineFmt(0, "%s %s SOC:%3d%%", path, phase, soc);
+        lcdPrintLineFmt(1, "%s", socBar);
+        lcdPrintLineFmt(2, "BAT:%5.1fV I:%4.2fA", vbf, fabsf(ibf));
+        lcdPrintLineFmt(3, "IN:%5.1fV D:%3d%%",
+                        (st == STATE_BOOST) ? vs : vac, dutyPct);
     } else if (ovp || lcd_show_ovp_alert) {
         lcdPrintLineRaw(0, "OVP TRIPPED");
         lcdPrintLineFmt(1, "VBAT:%5.1fV T:%4.1f", vbf, ovpTrip);
@@ -452,15 +508,14 @@ void drawLcdScreen() {
         lcdPrintLineFmt(0, "STANDBY  %s",
                         (mode == USER_MODE_BOOST) ? "BOOST" : "FORWD");
         lcdPrintLineFmt(1, "PV :%5.1fV AC:%5.1fV", vs, vac);
-        lcdPrintLineFmt(2, "BATT:%5.1fV", vb);
+        lcdPrintLineFmt(2, "BAT:%5.1fV SOC:%3d%%", vb, soc);
         lcdPrintLineRaw(3, "STOP=mode START=go");
     }
-    lcd.backlight();  // re-assert when we do write (standby only)
+    lcd.backlight();
 }
 bool tryDrawLcdScreen() {
-    if (system_ON || charge_full_hold) {
-        return false;  // standby-only LCD writes
-    }
+    // Allowed in standby and while charging (sparse). Never from button-task reinit path
+    // while ON — that path is gated separately. No PWM mute.
     if (!xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(LCD_MUTEX_WAIT_MS))) {
         return false;
     }
@@ -1359,17 +1414,19 @@ void TaskSampleData(void * pvParameters) {
         }
         last_millis = now;
         active_duty_percent = round(((float)raw_duty * 100.0) / 1023.0);
-        // LCD only in true standby — never during system_ON (avoids I2C/reinit PWM glitches).
-        if (!system_ON && !charge_full_hold) {
-            if (lcd_force_refresh || (now - last_lcd_draw_ms >= LCD_REFRESH_INTERVAL_MS)) {
-                if (tryDrawLcdScreen()) {
-                    last_lcd_draw_ms = now;
-                    lcd_force_refresh = false;
-                }
+        // Standby: 500 ms refresh. Charging: sparse SOC screen (no PWM mute, no Wire.end).
+        const bool chargingUi =
+            system_ON && (currentState == STATE_FORWARD || currentState == STATE_BOOST ||
+                          charge_full_hold || currentState == STATE_OFF);
+        const unsigned long lcdPeriod =
+            (system_ON || charge_full_hold) ? LCD_CHARGE_REFRESH_MS : LCD_REFRESH_INTERVAL_MS;
+        if (lcd_force_refresh || (now - last_lcd_draw_ms >= lcdPeriod)) {
+            if (tryDrawLcdScreen()) {
+                last_lcd_draw_ms = now;
+                lcd_force_refresh = false;
             }
-        } else {
-            lcd_force_refresh = true;  // redraw when back to standby
         }
+        (void)chargingUi;
         const bool chargingNow =
             system_ON && (currentState == STATE_FORWARD || currentState == STATE_BOOST);
         const unsigned long dbgPeriod =
