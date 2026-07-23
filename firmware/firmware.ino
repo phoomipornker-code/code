@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v65";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v66";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -182,6 +182,12 @@ const bool ENABLE_DEBUG_CSV = true;            // Excel-ready TSV lines (prefix 
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 5000;  // standby [STAT]
 const unsigned long DEBUG_PRINT_CHARGE_MS = 3000;    // charge [STAT]
 const unsigned long DEBUG_CSV_INTERVAL_MS = 1000;    // denser samples for Excel plots
+// Plot offsets so Vin/Vout/Iout/Duty sit in separate Y bands on one Excel chart.
+// Real values: Vout=as-is | I = (Iplot-100)/20 | Duty = Dplot-200 | Vin = Vinplot-300
+const float CSV_IOUT_SCALE = 20.0f;
+const float CSV_IOUT_OFFSET = 100.0f;
+const float CSV_DUTY_OFFSET = 200.0f;
+const float CSV_VIN_OFFSET = 300.0f;
 const unsigned long LCD_REFRESH_INTERVAL_MS = 500;      // standby / FULL
 const unsigned long LCD_CHARGE_REFRESH_MS = 2000;       // only used after FULL (or alerts)
 // Soft resync kept for FULL/standby recover path — not used while charge-blanked.
@@ -571,8 +577,9 @@ void setup() {
     Serial.printf("[BOOT] %s | B_CC=%.0fA F_CC=%.0fA CV=%.2fV DmaxF=%d\n",
                   FW_VERSION_TAG, TARGET_CC_CURRENT, FWD_TARGET_CC_CURRENT,
                   TARGET_CV_VOLTAGE, MAX_DUTY_FORWARD);
-    // Tab-separated for Excel. Columns: time, Vin, Vout, Iout, Duty%
-    Serial.println("CSV\tt_s\tVin\tVout\tIout\tDuty");
+    // Tab-separated for Excel — values spaced for one overlay chart.
+    // Bands: Vout~55 | Iplot=I*20+100 | Dplot=Duty+200 | Vinplot=Vin+300
+    Serial.println("CSV\tt_s\tVout\tIplot\tDplot\tVinplot");
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(40);
@@ -1614,12 +1621,14 @@ void TaskSampleData(void * pvParameters) {
                 ? v_solar
                 : v_ac_in;
 
-        // Excel TSV — only Vin / Vout / Iout / Duty (filter lines starting with CSV).
+        // Excel TSV — spaced Y bands so each series is visually separate on one chart.
         if (ENABLE_DEBUG_CSV && (now - last_csv_time >= DEBUG_CSV_INTERVAL_MS)) {
             last_csv_time = now;
-            Serial.printf("CSV\t%.1f\t%.1f\t%.2f\t%.2f\t%d\n",
-                          now / 1000.0f, vin_now, v_bat_filt, i_bat_charge_filt,
-                          active_duty_percent);
+            const float iplot = (i_bat_charge_filt * CSV_IOUT_SCALE) + CSV_IOUT_OFFSET;
+            const float dplot = (float)active_duty_percent + CSV_DUTY_OFFSET;
+            const float vplot = vin_now + CSV_VIN_OFFSET;
+            Serial.printf("CSV\t%.1f\t%.2f\t%.2f\t%.1f\t%.1f\n",
+                          now / 1000.0f, v_bat_filt, iplot, dplot, vplot);
         }
 
         if (ENABLE_DEBUG_STATUS && (now - last_debug_time >= dbgPeriod)) {
