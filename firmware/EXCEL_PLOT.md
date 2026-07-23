@@ -1,12 +1,12 @@
-# พล็อตกราฟจาก Serial (v78 = โค้ด v63)
+# พล็อตกราฟจาก Serial (v79 = โค้ด v63)
 
-v78 คืนเฟิร์มแวร์ที่ชาร์จได้จาก `cv58-boost-v14-forward-v63`  
-Serial ใช้บรรทัด `[STAT]` (ทุก ~3 s ตอนชาร์จ / ~5 s ตอน STANDBY) — **ไม่มี**ตาราง Tim/Iin แบบ v70+
+ควบคุมเหมือน `cv58-boost-v14-forward-v63`  
+Serial ใช้บรรทัด `[STAT]` ทุก **1 นาที** (v79)
 
 ตัวอย่าง:
 
 ```text
-[BOOT] cv58-boost-v14-forward-v78 | B_CC=6A F_CC=3A CV=55.90V DmaxF=460
+[BOOT] cv58-boost-v14-forward-v79 | B_CC=6A F_CC=3A CV=55.90V DmaxF=460
 [STAT] … START …
 [STAT] … FWD Soft … D=…% BAT … I=…A …
 ```
