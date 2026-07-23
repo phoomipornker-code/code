@@ -757,6 +757,22 @@ void TaskSampleData(void * pvParameters) {
             if (fabs(i_solar) < NOISE_I_THRESHOLD) i_solar = 0.0;
             if (fabs(i_ac_in) < NOISE_I_THRESHOLD) i_ac_in = 0.0;
             if (fabs(i_bat)   < NOISE_I_THRESHOLD) i_bat   = 0.0;
+            // Refuse to poison Vbat filter with 4.x V while still delivering charge current.
+            const bool bat_v_implausible_now =
+                (system_ON || power_stage_active) &&
+                (fabsf(i_bat) > ADC_GLITCH_CURRENT_GATE_A ||
+                 i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
+                 raw_duty > 20) &&
+                (v_bat < 35.0f || v_bat > 62.0f);
+            if (bat_v_implausible_now) {
+                if (!isnan(last_good_v_bat)) {
+                    v_bat = last_good_v_bat;
+                } else if (v_bat_filt >= 35.0f && v_bat_filt <= 62.0f) {
+                    v_bat = v_bat_filt;
+                }
+            } else if (v_bat >= 35.0f && v_bat <= 62.0f) {
+                last_good_v_bat = v_bat;
+            }
             vbat_filter_sum -= vbat_filter_buf[filter_index];
             ibat_filter_sum -= ibat_filter_buf[filter_index];
             vbat_filter_buf[filter_index] = v_bat;
