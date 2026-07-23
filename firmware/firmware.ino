@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v60";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v61";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -121,7 +121,7 @@ const float ADC_BAT_MIN_PLAUSIBLE_MV = 850.0f;   // ~35.6 V
 const float ADC_BAT_MAX_PLAUSIBLE_MV = 1500.0f;  // ~62.8 V
 const float ADC_BAT_LOW_SPIKE_MV = 80.0f;        // sudden drop vs last good
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
-const unsigned long BMS_OPEN_CONFIRM_MS = 120;  // ignore single-sample V spikes
+const unsigned long BMS_OPEN_CONFIRM_MS = 200;  // ignore brief V/I blips near CV
 const unsigned long HARD_OVP_CONFIRM_MS = 80;   // ignore single-sample HARD OVP
 // While charging, require sustained STOP to end (EMI on GPIO can false-edge).
 const unsigned long STOP_HOLD_END_MS = 350;
@@ -134,11 +134,12 @@ const float BOOST_CV_ENTRY_VOLTAGE = 55.50;
 const float BOOST_CV_FORCE_VOLTAGE = 55.70;
 const float BOOST_CV_EXIT_VOLTAGE  = 54.80;   // wider hysteresis so CV does not chatter
 const float BOOST_CC_TAPER_START_V = 54.80;
-const float BMS_OPEN_DETECT_V = 56.30;
+const float BMS_OPEN_DETECT_V = 56.80;      // above CV 55.9/56.0 — near-full is not open
 const float BMS_OPEN_JUMP_DELTA_V = 1.2;
-const float BMS_OPEN_CURRENT_MAX_A = 1.20;
+const float BMS_OPEN_CURRENT_MAX_A = 0.25f; // was 1.20 — taper ~0.7A near full ≠ BMS open
 const float BMS_PREEMPT_DUTY_CAP_RAW = 140.0;
 const float BMS_PREEMPT_ZONE_V = 55.95;
+const float BMS_OPEN_NEAR_FULL_MAX_V = 56.60f; // Forward/Boost CV band: never BMS-OPEN here if I flowing
 const float BOOST_CV_IREF_SLEW_A = 0.08;      // A per 20ms control tick
 const float BOOST_CV_NEAR_BAND_V = 0.35;      // within this of target => gentle control
 const float BOOST_CV_DUTY_STEP_NEAR = 0.8;    // raw duty step limit near target
@@ -799,22 +800,30 @@ void TaskSampleData(void * pvParameters) {
             i_bat_charge_abs = fabs(i_bat);
             float vbat_step = (last_vbat_sample > 0.0f) ? (v_bat - last_vbat_sample) : 0.0f;
             float vbat_filt_step = (last_vbat_filt_sample > 0.0f) ? (v_bat_filt - last_vbat_filt_sample) : 0.0f;
-            // BMS open: real open raises V and collapses I. Single ADC V-spike with I still
-            // flowing (field: raw=63.76 step=7.76 I=1.10) must not latch OVP.
+            // BMS open: real open raises V hard AND collapses I near zero.
+            // Field: CV near full Vf~56.2 I~0.68A was false-tripped (I≤1.2A looked "collapsed").
             bool bms_zone = (v_bat_filt >= BMS_PREEMPT_ZONE_V || v_bat >= BMS_PREEMPT_ZONE_V);
             bool i_collapsed = (i_bat_charge_filt <= BMS_OPEN_CURRENT_MAX_A) &&
-                               (i_bat_charge_abs <= (BMS_OPEN_CURRENT_MAX_A + 0.25f));
-            bool bms_v_event =
-                (v_bat >= BMS_OPEN_DETECT_V) ||
+                               (i_bat_charge_abs <= (BMS_OPEN_CURRENT_MAX_A + 0.15f));
+            bool bms_v_jump =
                 (vbat_step >= BMS_OPEN_JUMP_DELTA_V) ||
-                (v_bat > (v_bat_filt + 1.8f)) ||
-                (v_bat_filt >= BMS_OPEN_DETECT_V);
+                (v_bat > (v_bat_filt + 1.8f));
+            bool bms_v_high =
+                (v_bat >= BMS_OPEN_DETECT_V) &&
+                (v_bat_filt >= (BMS_OPEN_DETECT_V - 0.25f));
+            bool bms_v_event = bms_v_jump || bms_v_high;
+            // Near-full CV taper (V≤56.6 with charge current still flowing) is NOT BMS open.
+            bool near_full_taper =
+                (v_bat_filt <= BMS_OPEN_NEAR_FULL_MAX_V) &&
+                (v_bat <= (BMS_OPEN_NEAR_FULL_MAX_V + 0.30f)) &&
+                (i_bat_charge_filt > BMS_OPEN_CURRENT_MAX_A);
             bool bms_suspect = !ovp_latched &&
                                system_ON &&
                                (currentState == STATE_BOOST || currentState == STATE_FORWARD) &&
                                raw_duty > 0 &&
                                bms_zone &&
-                               bms_v_event;
+                               bms_v_event &&
+                               !near_full_taper;
             if (bms_suspect && i_collapsed) {
                 if (bms_open_suspect_ms == 0) bms_open_suspect_ms = now;
                 if (now - bms_open_suspect_ms >= BMS_OPEN_CONFIRM_MS) {
@@ -822,7 +831,7 @@ void TaskSampleData(void * pvParameters) {
                     ovp_trip_voltage = max(v_bat, v_bat_filt);
                     ovp_trip_ms = now;
                     forceSafeShutdown();
-                    charge_full_hold = true;
+                    // Do not pretend this is a normal FULL — latch OVP for STOP clear.
                     bms_open_suspect_ms = 0;
                     last_lcd_soft_resync_ms = 0;
                     lcd_force_refresh = true;
