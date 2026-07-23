@@ -1,6 +1,6 @@
 # โน้ตส่วน STATE_FORWARD
 
-แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v61`
+แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v62`
 
 ## ค่าคงที่สำคัญ
 
@@ -39,7 +39,8 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
                     V ต่ำ → +duty; ในแบนด์ → hold; V สูง → −duty (กระแสถดเองเมื่อแบตเต็ม)
                     ถ้า I≤0.40 A และใกล้เป้า → **freeze duty-up** (ไม่ปีนไป Dmax)
                     ไม่ slam duty ที่ BMS_PREEMPT ~55.95 (hard cap เฉพาะใกล้ BMS open 56.30)
-                    FULL เมื่อ V≥55.8 และ I≤0.5A นาน 60s
+                    FULL เมื่อ max(V,Vf)≥55.8 และ min(If,Iabs)≤0.5A นาน **15s**
+                    (fast: V≥55.9 และ Iabs≤0.35A นาน **5s**)
   → FWD_DONE
 ```
 
