@@ -3,7 +3,9 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v63";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v78";
+// RESTORED charge-proven control from cv58-boost-v14-forward-v63 (field: charge OK).
+// v64–v77 telemetry/Serial experiments discarded — do not reintroduce control changes lightly.
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
