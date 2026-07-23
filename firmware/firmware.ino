@@ -3,8 +3,8 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v80";
-// Same control as charge-OK v75; only Serial table slowed to 1 minute (was 1 s).
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v81";
+// Same control as charge-OK v75; Serial table every 20 s (v80 was 60 s; v75 was 1 s).
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -185,7 +185,7 @@ const bool ENABLE_EVENT_LOG = false;           // [INFO]/[WARN] chatter (ADC/AC 
 const unsigned long OC_EVENT_LOG_MS = 1000;    // rate-limit [OC] while hard limit active
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 5000;
 const unsigned long DEBUG_PRINT_CHARGE_MS = 3000;
-const unsigned long DEBUG_CSV_INTERVAL_MS = 60000;   // table every 1 min (was 1000)
+const unsigned long DEBUG_CSV_INTERVAL_MS = 20000;   // table every 20 s (v80: 60 s, v75: 1 s)
 const unsigned long LCD_REFRESH_INTERVAL_MS = 500;      // standby / FULL
 const unsigned long LCD_CHARGE_REFRESH_MS = 2000;       // only used after FULL (or alerts)
 // Soft resync kept for FULL/standby recover path — not used while charge-blanked.

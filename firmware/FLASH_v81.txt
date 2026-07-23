@@ -1,0 +1,10 @@
+# Flash v81 (= v75 control · ตารางทุก 20 วินาที)
+
+ZIP:
+https://github.com/phoomipornker-code/code/archive/refs/heads/cursor/fix-forward-keep-boost-1b21.zip
+
+ต้องเห็น:
+
+```text
+[BOOT] cv58-boost-v14-forward-v81 | …
+```
