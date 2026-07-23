@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v71";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v72";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -597,7 +597,7 @@ void calibrateCurrentOffsetsAtBoot() {
     const float vin = use_boost ? v_pv : v_ac;
     const float iin = use_boost ? fabsf(i_pv) : fabsf(i_ac);
     const unsigned long sec = millis() / 1000UL;
-    Serial.printf("          %02lu:%02lu:%02lu  %7.2f  %7.1f  %6.2f  %6.2f  %3d\n",
+    Serial.printf("%02lu:%02lu:%02lu   %6.2f    %6.1f   %5.2f   %5.2f  %4d\n",
                   (sec / 3600UL) % 100UL, (sec / 60UL) % 60UL, sec % 60UL,
                   iin, vin, fabsf(i_b), v_b, 0);
 }
@@ -606,7 +606,7 @@ void setup() {
     Serial.printf("[BOOT] %s | B_CC=%.0fA F_CC=%.0fA CV=%.2fV DmaxF=%d\n",
                   FW_VERSION_TAG, TARGET_CC_CURRENT, FWD_TARGET_CC_CURRENT,
                   TARGET_CV_VOLTAGE, MAX_DUTY_FORWARD);
-    Serial.println("           Tim     Iin     Vin     Iout    Vout    Duty");
+    Serial.println("Tim           Iin        Vin     Iout    Vout    Duty");
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(40);
@@ -1623,16 +1623,14 @@ void TaskSampleData(void * pvParameters) {
         const float vin_now = use_boost_in ? v_solar : v_ac_in;
         const float iin_now = use_boost_in ? fabsf(i_solar) : fabsf(i_ac_in);
 
-        // Table rows (no "CSV" prefix) — match field layout example.
-        const bool csvActive = system_ON || charge_full_hold || ovp_latched;
-        if (ENABLE_DEBUG_CSV && csvActive &&
-            (now - last_csv_time >= DEBUG_CSV_INTERVAL_MS)) {
+        // Table rows always — STANDBY and charging (no need to press START).
+        if (ENABLE_DEBUG_CSV && (now - last_csv_time >= DEBUG_CSV_INTERVAL_MS)) {
             last_csv_time = now;
             const unsigned long sec = now / 1000UL;
             const unsigned int hh = (unsigned int)((sec / 3600UL) % 100UL);
             const unsigned int mm = (unsigned int)((sec / 60UL) % 60UL);
             const unsigned int ss = (unsigned int)(sec % 60UL);
-            Serial.printf("          %02u:%02u:%02u  %7.2f  %7.1f  %6.2f  %6.2f  %3d\n",
+            Serial.printf("%02u:%02u:%02u   %6.2f    %6.1f   %5.2f   %5.2f  %4d\n",
                           hh, mm, ss,
                           iin_now, vin_now,
                           i_bat_charge_filt, v_bat_filt,
