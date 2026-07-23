@@ -1,20 +1,20 @@
-# พล็อตกราฟจาก Serial ลง Excel
+# พล็อตกราฟจาก Serial (v78 = โค้ด v63)
+
+v78 คืนเฟิร์มแวร์ที่ชาร์จได้จาก `cv58-boost-v14-forward-v63`  
+Serial ใช้บรรทัด `[STAT]` (ทุก ~3 s ตอนชาร์จ / ~5 s ตอน STANDBY) — **ไม่มี**ตาราง Tim/Iin แบบ v70+
+
+ตัวอย่าง:
 
 ```text
-Tim           Iin        Vin     Iout    Vout    Duty
-00:00:02   0.00    181.1   0.00   53.32    0
+[BOOT] cv58-boost-v14-forward-v78 | B_CC=6A F_CC=3A CV=55.90V DmaxF=460
+[STAT] … START …
+[STAT] … FWD Soft … D=…% BAT … I=…A …
 ```
 
-`Duty` = **raw PWM** (0–460 Forward / 0–1023 Boost scale) — ไม่ใช่ %
+## ขั้นตอนคร่าว ๆ
 
-ตารางพิมพ์โดย **TaskSerialLog** (แยกจากลูปควบคุม) — เปิด Monitor ได้โดยไม่ตัดชาร์จ (v77)
+1. คัดลอกค่าจาก `[STAT]` ที่สนใจ (V / I / Duty)
+2. วางใน Excel แล้วแยกคอลัมน์
+3. พล็อตกราฟ
 
-แสดงทันทีหลังบูตทุก ~1 วินาที — ไม่มี `[WARN]`/`[INFO]` แทรก (v73)
-
-เหตุการณ์สำคัญยังขึ้นแยกบรรทัด (v75): `[START]` `[STOP]` `[FULL]` `[OVP]` `[OC]` `[MODE]` — อย่าคัดลอกไปพล็อต
-
-## ขั้นตอน
-
-1. คัดลอกแถวเวลา (`00:…`) — ไม่เอา `[STAT]` / `[INFO]` / `[BOOT]`
-2. Excel → Text to Columns → **Space**
-3. พล็อตกราฟแยกต่อคอลัมน์
+อย่าคัดลอก `[WARN]` / `[INFO]` / `[CRITICAL]` / `[BOOT]` ปนกับตัวเลข

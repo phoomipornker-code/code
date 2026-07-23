@@ -1,6 +1,7 @@
 # โน้ตส่วน STATE_FORWARD
 
-แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v77`
+แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v78`  
+(เนื้อหาควบคุม = `cv58-boost-v14-forward-v63` ที่ชาร์จได้)
 
 ## ค่าคงที่สำคัญ
 
@@ -12,7 +13,7 @@ FWD_TARGET_CC_CURRENT = 3.0;        // A setpoint
 TARGET_CV_VOLTAGE     = 55.90;      // Forward CV (Boost ยัง 56.00)
 MIN_AC_VOLTAGE        = 95.0;
 // ไม่ใช้ PID — step/hysteresis (v42: ขั้นละเอียดขึ้น)
-FWD_STEP_UP_CC        = 1.2;        // raw/tick (far: 2.0) — v76 เร็วขึ้นจาก 0.6/1.2
+FWD_STEP_UP_CC        = 0.6;        // raw/tick (far: 1.2)
 FWD_STEP_DOWN_CC      = 1.5;        // fine: 0.6
 FWD_CC_HOLD_BAND_A    = 0.10;       // hold เมื่อ |I−Iref| ในแบนด์
 FWD_STEP_UP_CV        = 0.40;       // near: 0.20
@@ -20,9 +21,6 @@ FWD_STEP_DOWN_CV      = 0.80;       // fine: 0.35 / over: 1.50
 FWD_CV_HOLD_BAND_V    = 0.05;       // hold เมื่อ |V−55.9| ในแบนด์
 FWD_CV_TAPER_I_A      = 0.40;       // I ต่ำใกล้เป้า → freeze duty-up (กันบินไป Dmax)
 FWD_AC_HOLD_CLIMB_V   = 115.0;      // freeze เพิ่ม duty ถ้าบัสดิป
-FWD_SOFTSTART_MS      = 3500;
-FWD_STEP_UP_SOFT      = 1.5;
-FWD_SOFTSTART_SEED_FRAC = 0.55;
 ```
 
 Forward modes:
@@ -57,7 +55,6 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 - HARD OVP: confirm สั้น ๆ + ต้องอยู่ในช่วง 16S จริง (ไม่ latch จาก filt≈74 / raw≈80)
 - SPIKE-PRECUT / RUNAWAY: soft-cut duty เป็นหลัก; latch OVP เฉพาะเมื่อ filt ใกล้ trip และ I ยุบ
 - LCD/I2C: **ตอนชาร์จปิดจอ** (clear + no backlight, ไม่ I2C ต่อ) จน **FULL** ค่อยโชว์รูปแบต CGROM; OVP ยังขึ้นได้; ไม่ Wire.end ตอน `system_ON`
-- Serial: **TaskSerialLog** แยกจาก ADC/PWM — ตาราง + `[START]`/`[STOP]`/`[OVP]`/`[OC]` ไม่บล็อกควบคุม (v77)
 - Soft over-current / OVP ตามเดิม (CV ใช้ขั้นละเอียด ไม่ตัดแรง)
 - ตอนชาร์จ: **กด STOP ค้าง ~350 ms** เพื่อหยุด (กัน EMI ปลอม) — จะมี log `STOP held`
 
