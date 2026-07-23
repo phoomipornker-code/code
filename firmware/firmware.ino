@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v53";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v54";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -113,8 +113,12 @@ const float ADC_RAW_MIN_VALID_MV = 80.0;
 const float ADC_GLITCH_CURRENT_GATE_A = 0.35;
 const unsigned long ADC_GLITCH_LOG_MS = 1000;
 // Sudden BAT sense jump up (~3.3 V/sample) ⇒ ADS mux/glitch (field: 53.8→91.6 = AC channel).
-// Do NOT require charge current — I=0 is when the old filter missed and HARD OVP false-tripped.
 const float ADC_BAT_HIGH_SPIKE_MV = 80.0f;
+// 16S pack while charging must stay ~40–57 V ⇒ ADS mV ~955–1362. Field showed
+// BATraw=104 mV (V=4.37) with I≈3 A — passed old MIN=80 and poisoned the filter.
+const float ADC_BAT_MIN_PLAUSIBLE_MV = 850.0f;   // ~35.6 V
+const float ADC_BAT_MAX_PLAUSIBLE_MV = 1500.0f;  // ~62.8 V
+const float ADC_BAT_LOW_SPIKE_MV = 80.0f;        // sudden drop vs last good
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 const unsigned long BMS_OPEN_CONFIRM_MS = 120;  // ignore single-sample V spikes
 const unsigned long HARD_OVP_CONFIRM_MS = 80;   // ignore single-sample HARD OVP
@@ -599,6 +603,8 @@ void TaskSampleData(void * pvParameters) {
     float last_valid_raw_mv_v0 = NAN;
     float last_valid_raw_mv_v1 = NAN;  // AC bridge
     float last_valid_raw_mv_v2 = NAN;
+    float last_plausible_bat_mv = NAN;  // only updated with in-range BAT sense
+    float last_good_v_bat = NAN;
     unsigned long ac_brief_low_since_ms = 0;
     unsigned long last_adc_glitch_log = 0;
     unsigned long bms_open_suspect_ms = 0;
@@ -677,13 +683,29 @@ void TaskSampleData(void * pvParameters) {
             // Field: BAT read jumped to ~91.6 V (= AC bridge mV * BAT scale) while Vfilt~53.8
             // and I=0 → HARD OVP false trip. Hold last valid on any sudden up-spike.
             bool bat_raw_high_spike =
-                !isnan(last_valid_raw_mv_v2) &&
-                (last_valid_raw_mv_v2 >= ADC_RAW_MIN_VALID_MV) &&
-                (raw_mv_v2 > (last_valid_raw_mv_v2 + ADC_BAT_HIGH_SPIKE_MV)) &&
+                !isnan(last_plausible_bat_mv) &&
+                (raw_mv_v2 > (last_plausible_bat_mv + ADC_BAT_HIGH_SPIKE_MV)) &&
                 (power_stage_active || system_ON ||
                  i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
                  i_bat_charge_abs > ADC_GLITCH_CURRENT_GATE_A);
-            bool bat_raw_glitch = bat_raw_low_glitch || bat_raw_high_spike;
+            // Field: BATraw=104 mV → 4.37 V while I≈3 A / duty~40% (passed MIN=80).
+            bool bat_mv_in_pack_range =
+                (raw_mv_v2 >= ADC_BAT_MIN_PLAUSIBLE_MV) &&
+                (raw_mv_v2 <= ADC_BAT_MAX_PLAUSIBLE_MV);
+            bool bat_raw_low_spike =
+                !isnan(last_plausible_bat_mv) &&
+                (raw_mv_v2 < (last_plausible_bat_mv - ADC_BAT_LOW_SPIKE_MV)) &&
+                (power_stage_active || system_ON ||
+                 i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
+                 i_bat_charge_abs > ADC_GLITCH_CURRENT_GATE_A);
+            bool bat_raw_implausible =
+                (power_stage_active || system_ON) &&
+                (raw_duty > 20 ||
+                 i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
+                 i_bat_charge_abs > ADC_GLITCH_CURRENT_GATE_A) &&
+                !bat_mv_in_pack_range;
+            bool bat_raw_glitch = bat_raw_low_glitch || bat_raw_high_spike ||
+                                 bat_raw_low_spike || bat_raw_implausible;
             if (solar_raw_glitch && !isnan(last_valid_raw_mv_v0)) {
                 raw_mv_v0 = last_valid_raw_mv_v0;
             } else if (!solar_raw_glitch) {
@@ -694,19 +716,28 @@ void TaskSampleData(void * pvParameters) {
             } else if (!ac_raw_glitch && raw_mv_v1 >= ADC_RAW_MIN_VALID_MV) {
                 last_valid_raw_mv_v1 = raw_mv_v1;
             }
-            if (bat_raw_glitch && !isnan(last_valid_raw_mv_v2)) {
-                raw_mv_v2 = last_valid_raw_mv_v2;
-            } else if (!bat_raw_glitch) {
+            if (bat_raw_glitch) {
+                if (!isnan(last_plausible_bat_mv)) {
+                    raw_mv_v2 = last_plausible_bat_mv;
+                } else if (!isnan(last_valid_raw_mv_v2) &&
+                           (last_valid_raw_mv_v2 >= ADC_BAT_MIN_PLAUSIBLE_MV) &&
+                           (last_valid_raw_mv_v2 <= ADC_BAT_MAX_PLAUSIBLE_MV)) {
+                    raw_mv_v2 = last_valid_raw_mv_v2;
+                }
+                // else: leave raw; post-convert path will avoid filter poison
+            } else if (bat_mv_in_pack_range) {
                 last_valid_raw_mv_v2 = raw_mv_v2;
+                last_plausible_bat_mv = raw_mv_v2;
             }
             if ((solar_raw_glitch || ac_raw_glitch || bat_raw_glitch) &&
                 (now - last_adc_glitch_log >= ADC_GLITCH_LOG_MS)) {
                 last_adc_glitch_log = now;
-                Serial.printf("[WARN] ADC glitch filtered: PVraw=%.1f ACraw=%.1f BATraw=%.1fmV duty=%d Ib=%.2fA%s%s%s\n",
+                Serial.printf("[WARN] ADC glitch filtered: PVraw=%.1f ACraw=%.1f BATraw=%.1fmV duty=%d Ib=%.2fA%s%s%s%s\n",
                               pv_raw_before, ac_raw_before, bat_raw_before, raw_duty, i_bat_charge_filt,
                               multi_ch_bus_glitch ? " BUS!" : "",
                               ac_brief_glitch ? " ACblip!" : "",
-                              bat_raw_high_spike ? " BATspike!" : "");
+                              bat_raw_high_spike ? " BATspike!" : "",
+                              (bat_raw_implausible || bat_raw_low_spike) ? " BATbad!" : "");
             }
             float mv_pure_v0 = raw_mv_v0 - OFFSET_V_SOLAR; if (mv_pure_v0 < 0.0) mv_pure_v0 = 0.0;
             float mv_pure_v1 = raw_mv_v1 - OFFSET_V_AC;    if (mv_pure_v1 < 0.0) mv_pure_v1 = 0.0;
