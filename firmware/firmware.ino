@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v55";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v56";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -104,7 +104,7 @@ const float OFFSET_I_SOLAR = 1659.7;
 const float OFFSET_I_AC    = 1646.9;
 const float OFFSET_I_BAT   = 1646.9;
 const float CAL_SCALE_V_AC    = 71.43;
-const float CAL_SCALE_V_BAT   = 41.85;
+const float CAL_SCALE_V_BAT   = 41.5;
 const float CAL_SCALE_I_SOLAR = 42.46;
 const float CAL_SCALE_I_AC    = 42.46;
 const float CAL_SCALE_I_BAT   = 42.46;
