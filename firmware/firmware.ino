@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v75";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v76";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -65,13 +65,14 @@ const float FWD_CV_FORCE_VOLTAGE = 55.30;
 const float FWD_CV_EXIT_VOLTAGE  = 54.50;  // hysteresis below entry
 const float FWD_CC_TAPER_START_V = 54.70;
 const float FWD_CV_NEAR_BAND_V = 0.30;
-const unsigned long FWD_SOFTSTART_MS = 5000;
+const unsigned long FWD_SOFTSTART_MS = 3500;  // was 5000 — still Cin-safe, less crawl
 const unsigned long FWD_CV_ENTER_CONFIRM_MS = 200;
 const unsigned long FWD_CV_EXIT_CONFIRM_MS = 5000;
-// Fine step sizes (raw duty per 20 ms) — smoother const-V / CC (was ~1.5–5).
-const float FWD_STEP_UP_SOFT = 0.8f;
-const float FWD_STEP_UP_CC = 0.6f;
-const float FWD_STEP_UP_CC_FAR = 1.2f;
+// SoftStart/CC: faster open than v42 (was 0.8/0.6/1.2) — still slower than pre-v34 slam.
+// CV stays fine for const-V hold.
+const float FWD_STEP_UP_SOFT = 1.5f;
+const float FWD_STEP_UP_CC = 1.2f;
+const float FWD_STEP_UP_CC_FAR = 2.0f;
 const float FWD_STEP_DOWN_CC = 1.5f;
 const float FWD_STEP_DOWN_CC_FINE = 0.6f;
 const float FWD_STEP_UP_CV = 0.40f;
@@ -93,7 +94,7 @@ const float FWD_AC_COLLAPSE_BACKOFF_V = 100.0;
 const float FWD_AC_VOLTAGE_FLOOR = 95.0;
 const float FWD_NS_NP_EST = 0.70f;
 const float FWD_SOFTSTART_READY_DUTY_FRAC = 0.55f;
-const float FWD_SOFTSTART_SEED_FRAC = 0.45f;
+const float FWD_SOFTSTART_SEED_FRAC = 0.55f;  // SoftStart aims farther (was 0.45)
 // =========================================================================
 // Calibration
 // =========================================================================
@@ -1677,7 +1678,7 @@ void TaskSampleData(void * pvParameters) {
                           hh, mm, ss,
                           iin_now, vin_now,
                           i_bat_charge_filt, v_bat_filt,
-                          active_duty_percent);
+                          raw_duty);
         }
 
         // [STAT] only on mode toggle or charge start — keep table readable.
