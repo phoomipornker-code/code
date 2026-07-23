@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v48";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v49";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -168,10 +168,12 @@ const float HARD_OVP_TRIP_VOLTAGE = 57.80;
 const float HARD_OVP_RELEASE_VOLTAGE = 55.80;
 const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 const bool ENABLE_DEBUG_VERBOSE = true;
-const unsigned long DEBUG_PRINT_INTERVAL_MS = 1000;  // was 500 — less Serial starvation of LCD
-const unsigned long LCD_REFRESH_INTERVAL_MS = 400;   // was 180 — fewer I2C bursts while charging
-const unsigned long LCD_MUTEX_WAIT_MS = 120;
+const unsigned long DEBUG_PRINT_INTERVAL_MS = 1000;
+const unsigned long LCD_REFRESH_INTERVAL_MS = 500;  // drawn from ADC task (no I2C fight)
+const unsigned long LCD_MUTEX_WAIT_MS = 80;
 const uint32_t I2C_CLOCK_HZ = 100000;
+const int I2C_SDA_PIN = 21;
+const int I2C_SCL_PIN = 22;
 // =========================================================================
 // Runtime variables
 // =========================================================================
@@ -238,13 +240,21 @@ int filter_index = 0;
 int filter_count = 0;
 float last_vbat_sample = 0.0;
 float last_vbat_filt_sample = 0.0;
+volatile bool lcd_force_refresh = true;
+volatile unsigned long last_lcd_draw_ms = 0;
+volatile bool lcd_show_no_power = false;
+volatile bool lcd_show_ovp_alert = false;
+volatile unsigned long lcd_alert_until_ms = 0;
 void TaskSampleData(void * pvParameters);
 void TaskLCDLoop(void * pvParameters);
 void calibrateCurrentOffsetsAtBoot();
 int quantizeDutyWithDither(float duty_cmd, float *phase, int max_duty);
 void lcdPrintLineRaw(uint8_t row, const char *text);
 void lcdPrintLineFmt(uint8_t row, const char *fmt, ...);
+void i2cBusSoftUnlock();
 void reinitI2CBusAndLCD();
+void drawLcdScreen();
+bool tryDrawLcdScreen();
 static inline float boostClampf(float x, float lo, float hi) {
     if (x < lo) return lo;
     if (x > hi) return hi;
@@ -368,15 +378,90 @@ void lcdPrintLineFmt(uint8_t row, const char *fmt, ...) {
     va_end(args);
     lcdPrintLineRaw(row, tmp);
 }
-void reinitI2CBusAndLCD() {
+void i2cBusSoftUnlock() {
+    // Clock out stuck slave (SDA low) before Wire.begin — common after EMI.
     Wire.end();
-    delay(2);
-    Wire.begin(21, 22);
+    pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+    pinMode(I2C_SCL_PIN, OUTPUT);
+    for (int i = 0; i < 16; i++) {
+        digitalWrite(I2C_SCL_PIN, HIGH);
+        delayMicroseconds(5);
+        digitalWrite(I2C_SCL_PIN, LOW);
+        delayMicroseconds(5);
+    }
+    digitalWrite(I2C_SCL_PIN, HIGH);
+    delayMicroseconds(5);
+}
+void reinitI2CBusAndLCD() {
+    i2cBusSoftUnlock();
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(I2C_CLOCK_HZ);
-    Wire.setTimeOut(25);
+    Wire.setTimeOut(40);
     lcd.init();
     lcd.backlight();
     lcd.clear();
+}
+void drawLcdScreen() {
+    // Caller holds i2c_Mutex. Snapshot locals to keep I2C burst short/consistent.
+    const bool on = system_ON;
+    const bool full = charge_full_hold;
+    const bool ovp = ovp_latched;
+    const SystemState st = currentState;
+    const UserChargeMode mode = selectedChargeMode;
+    const int dutyPct = active_duty_percent;
+    const float vb = v_bat;
+    const float vbf = v_bat_filt;
+    const float ib = i_bat;
+    const float ibf = i_bat_filt;
+    const float vs = v_solar;
+    const float vac = v_ac_in;
+    const float is = i_solar;
+    const float iac = i_ac_in;
+    const float wh = total_Wh;
+    const float ovpTrip = ovp_trip_voltage;
+    if (on && full) {
+        lcdPrintLineRaw(0, "BATTERY FULL HOLD");
+        lcdPrintLineFmt(1, "BAT:%5.1fV I:%4.2fA", vbf, ibf);
+        lcdPrintLineFmt(2, "Resume <= %5.1fV", RESTART_CHARGE_VOLTAGE);
+        lcdPrintLineRaw(3, "Hold STOP to end");
+    } else if (on) {
+        lcdPrintLineFmt(0, "ACTIVE   DUTY:%3d%%", dutyPct);
+        lcdPrintLineFmt(1, "%-8s PWR:%5.1fWh",
+                        (st == STATE_BOOST) ? "BOOST PV" : "FORW AC", wh);
+        lcdPrintLineFmt(2, "IN :%5.1fV %5.1fA",
+                        (st == STATE_BOOST) ? vs : vac,
+                        (st == STATE_BOOST) ? is : iac);
+        lcdPrintLineFmt(3, "OUT:%5.1fV %5.1fA", vb, ib);
+    } else if (ovp || lcd_show_ovp_alert) {
+        lcdPrintLineRaw(0, "OVP TRIPPED");
+        lcdPrintLineFmt(1, "VBAT:%5.1fV T:%4.1f", vbf, ovpTrip);
+        lcdPrintLineFmt(2, "REL <= %5.1fV", HARD_OVP_RELEASE_VOLTAGE);
+        lcdPrintLineRaw(3, "STOP to clear latch");
+    } else if (lcd_show_no_power) {
+        lcdPrintLineRaw(0, "ERROR");
+        if (mode == USER_MODE_BOOST) {
+            lcdPrintLineRaw(1, "NO PV FOR BOOST");
+            lcdPrintLineFmt(2, "Need PV>=%4.0fV", MIN_PV_VOLTAGE);
+        } else {
+            lcdPrintLineRaw(1, "NO AC FOR FORWARD");
+            lcdPrintLineFmt(2, "Need AC>=%4.0fV", MIN_AC_VOLTAGE);
+        }
+        lcdPrintLineRaw(3, "STOP=mode START=go");
+    } else {
+        lcdPrintLineFmt(0, "STANDBY  %s",
+                        (mode == USER_MODE_BOOST) ? "BOOST" : "FORWD");
+        lcdPrintLineFmt(1, "PV :%5.1fV AC:%5.1fV", vs, vac);
+        lcdPrintLineFmt(2, "BATT:%5.1fV", vb);
+        lcdPrintLineRaw(3, "STOP=mode START=go");
+    }
+}
+bool tryDrawLcdScreen() {
+    if (!xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(LCD_MUTEX_WAIT_MS))) {
+        return false;
+    }
+    drawLcdScreen();
+    xSemaphoreGive(i2c_Mutex);
+    return true;
 }
 void calibrateCurrentOffsetsAtBoot() {
     const int CAL_SAMPLES = 80;
@@ -405,9 +490,9 @@ void setup() {
                   MAX_DUTY_FORWARD, PWM_FREQ_BOOST, PWM_FREQ_FORWARD);
     Serial.println("[BOOT] UI: STOP toggles BOOST/FORWARD in STANDBY; hold STOP ~350ms to end charge.");
     Serial.println("[BOOT] Forward AC sense: diode-bridge DC, AC110V (MIN_AC post-bridge).");
-    Wire.begin(21, 22);
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(I2C_CLOCK_HZ);
-    Wire.setTimeOut(25);
+    Wire.setTimeOut(40);
     bool volt_ok = ads_volt.begin(0x48);
     bool curr_ok = ads_curr.begin(0x49);
     sensor_init_ok = (volt_ok && curr_ok);
@@ -425,6 +510,14 @@ void setup() {
     ledcWrite(PWM_BOOST_PIN, 0);
     i2c_Mutex = xSemaphoreCreateMutex();
     reinitI2CBusAndLCD();
+    if (xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(200))) {
+        lcdPrintLineRaw(0, "BOOT OK");
+        lcdPrintLineFmt(1, "%s", FW_VERSION_TAG);
+        lcdPrintLineRaw(2, "LCD+ADS I2C ready");
+        lcdPrintLineRaw(3, "STOP=mode START=go");
+        xSemaphoreGive(i2c_Mutex);
+    }
+    Serial.println("[BOOT] LCD draw owned by ADC task (no I2C fight).");
     if (!sensor_init_ok) {
         Serial.println("[FATAL] ADS1115 init failed. System is locked in safe standby.");
         forceSafeShutdown();
@@ -432,8 +525,8 @@ void setup() {
         calibrateCurrentOffsetsAtBoot();
         last_adc_sample_ms = millis();
     }
-    xTaskCreatePinnedToCore(TaskSampleData, "ADC_PWM_Task", 4096, NULL, 2, NULL, 0);
-    xTaskCreatePinnedToCore(TaskLCDLoop, "LCD_Task", 8192, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(TaskSampleData, "ADC_PWM_Task", 8192, NULL, 2, NULL, 0);
+    xTaskCreatePinnedToCore(TaskLCDLoop, "Button_Task", 4096, NULL, 2, NULL, 1);
 }
 void loop() { vTaskDelay(1000); }
 void TaskSampleData(void * pvParameters) {
@@ -1260,6 +1353,13 @@ void TaskSampleData(void * pvParameters) {
         }
         last_millis = now;
         active_duty_percent = round(((float)raw_duty * 100.0) / 1023.0);
+        // Draw LCD here (same task as ADS) so display always gets the bus after samples.
+        if (lcd_force_refresh || (now - last_lcd_draw_ms >= LCD_REFRESH_INTERVAL_MS)) {
+            if (tryDrawLcdScreen()) {
+                last_lcd_draw_ms = now;
+                lcd_force_refresh = false;
+            }
+        }
         if (ENABLE_DEBUG_VERBOSE && (now - last_debug_time >= DEBUG_PRINT_INTERVAL_MS)) {
             last_debug_time = now;
             const char* sel_label =
@@ -1326,22 +1426,24 @@ void TaskSampleData(void * pvParameters) {
     }
 }
 void TaskLCDLoop(void * pvParameters) {
+    // Buttons only — LCD pixels are drawn from TaskSampleData to avoid I2C fights.
     bool last_start_state = HIGH, last_stop_state = HIGH;
-    bool show_no_power_alert = false;
-    bool show_ovp_alert = false;
-    unsigned long alert_millis = 0;
-    unsigned long last_lcd_recover = 0;
-    unsigned long last_lcd_refresh = 0;
-    int lcd_mutex_fail_count = 0;
     bool start_raw_last = HIGH, stop_raw_last = HIGH;
     unsigned long start_change_ms = 0, stop_change_ms = 0;
     unsigned long stop_held_since_ms = 0;
     bool stop_end_armed = false;
+    unsigned long last_standby_reinit_ms = 0;
     const unsigned long DEBOUNCE_MS = 80;
-    for(;;) {
+    for (;;) {
         unsigned long now = millis();
+        if (lcd_alert_until_ms != 0 && now >= lcd_alert_until_ms) {
+            lcd_show_no_power = false;
+            lcd_show_ovp_alert = false;
+            lcd_alert_until_ms = 0;
+            lcd_force_refresh = true;
+        }
         bool start_raw = digitalRead(BUTTON_START_PIN);
-        bool stop_raw  = digitalRead(BUTTON_STOP_PIN);
+        bool stop_raw = digitalRead(BUTTON_STOP_PIN);
         if (start_raw != start_raw_last) {
             start_raw_last = start_raw;
             start_change_ms = now;
@@ -1351,23 +1453,21 @@ void TaskLCDLoop(void * pvParameters) {
             stop_change_ms = now;
         }
         bool current_start = last_start_state;
-        bool current_stop  = last_stop_state;
+        bool current_stop = last_stop_state;
         if (now - start_change_ms >= DEBOUNCE_MS) current_start = start_raw;
-        if (now - stop_change_ms >= DEBOUNCE_MS) current_stop  = stop_raw;
+        if (now - stop_change_ms >= DEBOUNCE_MS) current_stop = stop_raw;
         bool start_pressed = (current_start == LOW);
-        bool stop_pressed  = (current_stop == LOW);
+        bool stop_pressed = (current_stop == LOW);
         bool start_edge = (start_pressed && last_start_state == HIGH);
-        bool stop_edge  = (stop_pressed && last_stop_state == HIGH);
+        bool stop_edge = (stop_pressed && last_stop_state == HIGH);
         if (system_ON || charge_full_hold) {
-            // Running: require sustained STOP (EMI/false edges were ending charge with no log).
             if (stop_pressed) {
                 if (stop_held_since_ms == 0) stop_held_since_ms = now;
                 if (!stop_end_armed && (now - stop_held_since_ms >= STOP_HOLD_END_MS)) {
                     stop_end_armed = true;
-                    show_no_power_alert = false;
-                    show_ovp_alert = false;
                     system_ON = false;
                     charge_full_hold = false;
+                    lcd_force_refresh = true;
                     Serial.printf("[INFO] STOP held %lums — charge ended (was %s).\n",
                                   (unsigned long)STOP_HOLD_END_MS,
                                   (currentState == STATE_FORWARD) ? "FORWARD" :
@@ -1380,23 +1480,20 @@ void TaskLCDLoop(void * pvParameters) {
         } else if (stop_edge) {
             stop_held_since_ms = 0;
             stop_end_armed = false;
-            show_no_power_alert = false;
-            show_ovp_alert = false;
             if (ovp_latched &&
                 v_bat_filt <= HARD_OVP_RELEASE_VOLTAGE &&
                 v_bat <= (HARD_OVP_RELEASE_VOLTAGE + 0.8f)) {
-                // Standby + OVP: STOP clears latch when voltage is safe.
                 ovp_latched = false;
+                lcd_force_refresh = true;
                 Serial.printf("[INFO] OVP latch cleared by STOP at %.2fV (release=%.2fV).\n",
                               max(v_bat, v_bat_filt), HARD_OVP_RELEASE_VOLTAGE);
             } else if (!ovp_latched) {
-                // Standby: STOP toggles selected charge mode before START.
                 selectedChargeMode = (selectedChargeMode == USER_MODE_BOOST)
                                          ? USER_MODE_FORWARD
                                          : USER_MODE_BOOST;
+                lcd_force_refresh = true;
                 Serial.printf("[INFO] Mode select -> %s (press START to begin)\n",
                               (selectedChargeMode == USER_MODE_BOOST) ? "BOOST PV" : "FORWARD AC");
-                last_lcd_refresh = 0;  // force LCD refresh to show new mode
             }
         } else if (!stop_pressed) {
             stop_held_since_ms = 0;
@@ -1409,111 +1506,46 @@ void TaskLCDLoop(void * pvParameters) {
                                                         : (v_ac_in >= MIN_AC_VOLTAGE);
             if (ovp_latched) {
                 system_ON = false;
-                show_no_power_alert = false;
-                show_ovp_alert = true;
-                alert_millis = now;
+                lcd_show_ovp_alert = true;
+                lcd_show_no_power = false;
+                lcd_alert_until_ms = now + 3000;
+                lcd_force_refresh = true;
             } else if (sensor_init_ok && bat_ok && selected_input_ok) {
                 system_ON = true;
                 charge_full_hold = false;
-                show_no_power_alert = false;
-                show_ovp_alert = false;
+                lcd_show_no_power = false;
+                lcd_show_ovp_alert = false;
+                lcd_force_refresh = true;
             } else {
                 system_ON = false;
-                show_no_power_alert = true;
-                show_ovp_alert = false;
-                alert_millis = now;
+                lcd_show_no_power = true;
+                lcd_show_ovp_alert = false;
+                lcd_alert_until_ms = now + 3000;
+                lcd_force_refresh = true;
             }
         }
-        last_start_state = current_start; last_stop_state = current_stop;
-        const bool charge_active = system_ON && (currentState != STATE_OFF) && (raw_duty > 0);
+        last_start_state = current_start;
+        last_stop_state = current_stop;
         if (system_ON != last_system_state) {
-            if (xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(LCD_MUTEX_WAIT_MS))) {
-                lcd.clear();
-                xSemaphoreGive(i2c_Mutex);
-                lcd_mutex_fail_count = 0;
-            } else {
-                lcd_mutex_fail_count++;
-            }
-            if (!system_ON) {
-                total_Wh = 0;
-            }
+            if (!system_ON) total_Wh = 0;
             last_system_state = system_ON;
+            lcd_force_refresh = true;
         }
-        if (show_no_power_alert && (now - alert_millis > 3000)) {
-            show_no_power_alert = false;
-            if (xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(LCD_MUTEX_WAIT_MS))) {
-                lcd.clear();
-                xSemaphoreGive(i2c_Mutex);
-                lcd_mutex_fail_count = 0;
-            } else {
-                lcd_mutex_fail_count++;
-            }
-        }
-        if (show_ovp_alert && (now - alert_millis > 3000)) {
-            show_ovp_alert = false;
-            if (xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(LCD_MUTEX_WAIT_MS))) {
-                lcd.clear();
-                xSemaphoreGive(i2c_Mutex);
-                lcd_mutex_fail_count = 0;
-            } else {
-                lcd_mutex_fail_count++;
-            }
-        }
-        if (now - last_lcd_refresh >= LCD_REFRESH_INTERVAL_MS) {
-            if (xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(LCD_MUTEX_WAIT_MS))) {
-                if (system_ON && charge_full_hold) {
-                    lcdPrintLineRaw(0, "BATTERY FULL HOLD");
-                    lcdPrintLineFmt(1, "BAT:%5.1fV I:%4.2fA", v_bat_filt, i_bat_filt);
-                    lcdPrintLineFmt(2, "Resume <= %5.1fV", RESTART_CHARGE_VOLTAGE);
-                    lcdPrintLineRaw(3, "Press STOP to cancel");
-                } else if (system_ON) {
-                    lcdPrintLineFmt(0, "ACTIVE   DUTY:%3d%%", active_duty_percent);
-                    lcdPrintLineFmt(1, "%-8s PWR:%5.1fWh", (currentState == STATE_BOOST ? "BOOST PV" : "FORW AC"), total_Wh);
-                    lcdPrintLineFmt(2, "IN :%5.1fV %5.1fA", (currentState == STATE_BOOST ? v_solar : v_ac_in), (currentState == STATE_BOOST ? i_solar : i_ac_in));
-                    lcdPrintLineFmt(3, "OUT:%5.1fV %5.1fA", v_bat, i_bat);
-                } else if (ovp_latched || show_ovp_alert) {
-                    lcdPrintLineRaw(0, "OVP TRIPPED");
-                    lcdPrintLineFmt(1, "VBAT:%5.1fV T:%4.1f", v_bat_filt, ovp_trip_voltage);
-                    lcdPrintLineFmt(2, "REL <= %5.1fV", HARD_OVP_RELEASE_VOLTAGE);
-                    lcdPrintLineRaw(3, "STOP to clear latch");
-                } else if (show_no_power_alert) {
-                    lcdPrintLineRaw(0, "ERROR");
-                    if (selectedChargeMode == USER_MODE_BOOST) {
-                        lcdPrintLineRaw(1, "NO PV FOR BOOST");
-                        lcdPrintLineFmt(2, "Need PV>=%4.0fV", MIN_PV_VOLTAGE);
-                    } else {
-                        lcdPrintLineRaw(1, "NO AC FOR FORWARD");
-                        lcdPrintLineFmt(2, "Need AC>=%4.0fV", MIN_AC_VOLTAGE);
-                    }
-                    lcdPrintLineRaw(3, "STOP=mode START=go");
-                } else {
-                    lcdPrintLineFmt(0, "STANDBY  %s",
-                                    (selectedChargeMode == USER_MODE_BOOST) ? "BOOST" : "FORWD");
-                    lcdPrintLineFmt(1, "PV :%5.1fV AC:%5.1fV", v_solar, v_ac_in);
-                    lcdPrintLineFmt(2, "BATT:%5.1fV", v_bat);
-                    lcdPrintLineRaw(3, "STOP=mode START=go");
-                }
-                xSemaphoreGive(i2c_Mutex);
-                lcd_mutex_fail_count = 0;
-                last_lcd_refresh = now;
-            } else {
-                lcd_mutex_fail_count++;
-            }
-        }
-        // Never Wire.end()/lcd.init while power stage is live — EMI + reinit freezes display
-        // and can stall ADS. Recover only in standby / after stop.
+        const bool charge_active = system_ON && (currentState != STATE_OFF) && (raw_duty > 0);
         if (!charge_active &&
-            lcd_mutex_fail_count >= 12 &&
-            (now - last_lcd_recover > 5000)) {
-            last_lcd_recover = now;
+            lcd_force_refresh &&
+            (now - last_lcd_draw_ms > 2000) &&
+            (now - last_standby_reinit_ms > 5000)) {
+            last_standby_reinit_ms = now;
             if (xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(200))) {
                 reinitI2CBusAndLCD();
+                drawLcdScreen();
                 xSemaphoreGive(i2c_Mutex);
-                lcd_mutex_fail_count = 0;
-                last_lcd_refresh = 0;
+                last_lcd_draw_ms = now;
+                lcd_force_refresh = false;
                 Serial.println("[WARN] LCD I2C recovered (standby reinit).");
             }
         }
-        vTaskDelay(50 / portTICK_PERIOD_MS);
+        vTaskDelay(20 / portTICK_PERIOD_MS);
     }
 }
