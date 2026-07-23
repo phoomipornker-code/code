@@ -1762,10 +1762,9 @@ void TaskLCDLoop(void * pvParameters) {
                                          ? USER_MODE_FORWARD
                                          : USER_MODE_BOOST;
                 lcd_force_refresh = true;
-                if (ENABLE_EVENT_LOG) {
-                    Serial.printf("[INFO] Mode select -> %s (press START to begin)\n",
-                                  (selectedChargeMode == USER_MODE_BOOST) ? "BOOST PV" : "FORWARD AC");
-                }
+                // Always show mode change (even when EVENT_LOG is quiet).
+                Serial.printf("[MODE] %s (press START)\n",
+                              (selectedChargeMode == USER_MODE_BOOST) ? "BOOST PV" : "FORWARD AC");
             }
         } else if (!stop_pressed) {
             stop_held_since_ms = 0;
