@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v69";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v70";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -177,11 +177,11 @@ const float BOOST_VBAT_SPIKE_PRECUT_RAW_ABOVE_FILT_V = 1.0;
 const float HARD_OVP_TRIP_VOLTAGE = 57.80;
 const float HARD_OVP_RELEASE_VOLTAGE = 55.80;
 const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
-const bool ENABLE_DEBUG_STATUS = true;         // human [STAT] line
-const bool ENABLE_DEBUG_CSV = true;            // Excel-ready TSV lines (prefix CSV)
-const unsigned long DEBUG_PRINT_INTERVAL_MS = 5000;  // standby [STAT]
-const unsigned long DEBUG_PRINT_CHARGE_MS = 3000;    // charge [STAT]
-const unsigned long DEBUG_CSV_INTERVAL_MS = 1000;    // denser samples for Excel plots
+const bool ENABLE_DEBUG_STATUS = true;         // [STAT] on mode change / charge start only
+const bool ENABLE_DEBUG_CSV = true;            // Tim Iin Vin Iout Vout Duty table rows
+const unsigned long DEBUG_PRINT_INTERVAL_MS = 5000;  // unused for idle STAT
+const unsigned long DEBUG_PRINT_CHARGE_MS = 3000;    // unused — no mid-charge STAT spam
+const unsigned long DEBUG_CSV_INTERVAL_MS = 1000;    // table sample rate while charging
 const unsigned long LCD_REFRESH_INTERVAL_MS = 500;      // standby / FULL
 const unsigned long LCD_CHARGE_REFRESH_MS = 2000;       // only used after FULL (or alerts)
 // Soft resync kept for FULL/standby recover path — not used while charge-blanked.
@@ -571,8 +571,7 @@ void setup() {
     Serial.printf("[BOOT] %s | B_CC=%.0fA F_CC=%.0fA CV=%.2fV DmaxF=%d\n",
                   FW_VERSION_TAG, TARGET_CC_CURRENT, FWD_TARGET_CC_CURRENT,
                   TARGET_CV_VOLTAGE, MAX_DUTY_FORWARD);
-    // Layout: Tim | Iin | Vin | Iout | Vout | Duty  (tab-separated, real values)
-    Serial.println("CSV\tTim\tIin\tVin\tIout\tVout\tDuty");
+    Serial.println("           Tim     Iin     Vin     Iout    Vout    Duty");
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(40);
@@ -616,9 +615,9 @@ void TaskSampleData(void * pvParameters) {
     bool pv_is_collapsing = false;
     unsigned long ac_collapse_start_time = 0;
     bool ac_is_collapsing = false;
-    unsigned long last_debug_time = 0;
     unsigned long last_csv_time = 0;
     int last_stat_sel = (int)USER_MODE_BOOST;  // match default — no STANDBY spam until toggle
+    bool last_system_on_for_stat = false;
     unsigned long last_sensor_error_log = 0;
     unsigned long full_condition_start_ms = 0;
     unsigned long fwd_full_condition_start_ms = 0;
@@ -1581,32 +1580,6 @@ void TaskSampleData(void * pvParameters) {
                 }
             }
         }
-        const bool chargingNow =
-            system_ON && (currentState == STATE_FORWARD || currentState == STATE_BOOST);
-        const unsigned long dbgPeriod =
-            chargingNow ? DEBUG_PRINT_CHARGE_MS : DEBUG_PRINT_INTERVAL_MS;
-
-        // Build run label once for STAT + CSV.
-        const char* run_label = "STANDBY";
-        if (charge_full_hold) {
-            run_label = "FULL";
-        } else if (ovp_latched) {
-            run_label = "OVP";
-        } else if (!system_ON) {
-            run_label = "STANDBY";
-        } else if (currentState == STATE_BOOST) {
-            if (boostNewMode == BOOST_NEW_SOFTSTART) run_label = "B_SOFT";
-            else if (boostNewMode == BOOST_NEW_CC_MPPT) run_label = "B_CC";
-            else if (boostNewMode == BOOST_NEW_CV) run_label = "B_CV";
-            else run_label = "B_DONE";
-        } else if (currentState == STATE_FORWARD) {
-            if (forwardMode == FWD_SOFTSTART) run_label = "F_SOFT";
-            else if (forwardMode == FWD_CC) run_label = "F_CC";
-            else if (forwardMode == FWD_CV) run_label = "F_CV";
-            else run_label = "F_DONE";
-        } else if (system_ON) {
-            run_label = "START";
-        }
         const char* sel_label =
             (selectedChargeMode == USER_MODE_BOOST) ? "BOOST" : "FORW";
         const bool use_boost_in =
@@ -1615,7 +1588,7 @@ void TaskSampleData(void * pvParameters) {
         const float vin_now = use_boost_in ? v_solar : v_ac_in;
         const float iin_now = use_boost_in ? fabsf(i_solar) : fabsf(i_ac_in);
 
-        // Excel TSV per sketch: Tim | Iin | Vin | Iout | Vout | Duty
+        // Table rows (no "CSV" prefix) — match field layout example.
         const bool csvActive = system_ON || charge_full_hold || ovp_latched;
         if (ENABLE_DEBUG_CSV && csvActive &&
             (now - last_csv_time >= DEBUG_CSV_INTERVAL_MS)) {
@@ -1624,35 +1597,33 @@ void TaskSampleData(void * pvParameters) {
             const unsigned int hh = (unsigned int)((sec / 3600UL) % 100UL);
             const unsigned int mm = (unsigned int)((sec / 60UL) % 60UL);
             const unsigned int ss = (unsigned int)(sec % 60UL);
-            Serial.printf("CSV\t%02u:%02u:%02u\t%.2f\t%.1f\t%.2f\t%.2f\t%d\n",
+            Serial.printf("          %02u:%02u:%02u  %7.2f  %7.1f  %6.2f  %6.2f  %3d\n",
                           hh, mm, ss,
                           iin_now, vin_now,
                           i_bat_charge_filt, v_bat_filt,
                           active_duty_percent);
         }
 
-        // [STAT]: periodic while charging/FULL/OVP; STANDBY only on mode change.
+        // [STAT] only on mode toggle or charge start — keep table readable.
         if (ENABLE_DEBUG_STATUS) {
             const int sel_now = (int)selectedChargeMode;
             const bool mode_changed = (sel_now != last_stat_sel);
+            const bool charge_started = system_ON && !last_system_on_for_stat;
             const unsigned long sec = now / 1000UL;
             const unsigned int hh = (unsigned int)((sec / 3600UL) % 100UL);
             const unsigned int mm = (unsigned int)((sec / 60UL) % 60UL);
             const unsigned int ss = (unsigned int)(sec % 60UL);
-            if (system_ON || charge_full_hold || ovp_latched) {
-                if (now - last_debug_time >= dbgPeriod) {
-                    last_debug_time = now;
-                    Serial.printf("[STAT] %02u:%02u:%02u %s D=%d%% BAT %.2fV/%.2fV I=%.2fA IN=%.1fV%s\n",
-                                  hh, mm, ss, run_label, active_duty_percent,
-                                  v_bat, v_bat_filt, i_bat_charge_filt,
-                                  vin_now,
-                                  ac_is_collapsing ? " AC_SAG" : "");
-                }
-            } else if (mode_changed) {
+            if (charge_started) {
+                Serial.printf("[STAT] %02u:%02u:%02u START D=%d%% BAT %.2fV/%.2fV I=%.2fA IN=%.1fV\n",
+                              hh, mm, ss, active_duty_percent,
+                              v_bat, v_bat_filt, i_bat_charge_filt, vin_now);
+            } else if (!system_ON && mode_changed) {
                 last_stat_sel = sel_now;
                 Serial.printf("[STAT] %02u:%02u:%02u STANDBY %s BAT %.2fV PV %.1f AC %.1f\n",
                               hh, mm, ss, sel_label, v_bat_filt, v_solar, v_ac_in);
             }
+            if (mode_changed) last_stat_sel = sel_now;
+            last_system_on_for_stat = system_ON;
         }
         vTaskDelay(20 / portTICK_PERIOD_MS);
     }
