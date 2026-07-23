@@ -1,7 +1,7 @@
 # เฟิร์มแวร์ ESP32 — ชาร์จเจอร์ Boost PV + Forward AC
 
 ไฟล์หลัก: [`firmware.ino`](firmware.ino)  
-แท็ก: `cv58-boost-v14-forward-v73`
+แท็ก: `cv58-boost-v14-forward-v74`
 
 ## นโยบายเวอร์ชันนี้
 
