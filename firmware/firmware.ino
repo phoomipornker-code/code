@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v67";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v68";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -182,12 +182,6 @@ const bool ENABLE_DEBUG_CSV = true;            // Excel-ready TSV lines (prefix 
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 5000;  // standby [STAT]
 const unsigned long DEBUG_PRINT_CHARGE_MS = 3000;    // charge [STAT]
 const unsigned long DEBUG_CSV_INTERVAL_MS = 1000;    // denser samples for Excel plots
-// Plot offsets so Vin/Vout/Iout/Duty sit in separate Y bands on one Excel chart.
-// Real values: Vout=as-is | I = (Iplot-100)/20 | Duty = Dplot-200 | Vin = Vinplot-300
-const float CSV_IOUT_SCALE = 20.0f;
-const float CSV_IOUT_OFFSET = 100.0f;
-const float CSV_DUTY_OFFSET = 200.0f;
-const float CSV_VIN_OFFSET = 300.0f;
 const unsigned long LCD_REFRESH_INTERVAL_MS = 500;      // standby / FULL
 const unsigned long LCD_CHARGE_REFRESH_MS = 2000;       // only used after FULL (or alerts)
 // Soft resync kept for FULL/standby recover path — not used while charge-blanked.
@@ -577,9 +571,8 @@ void setup() {
     Serial.printf("[BOOT] %s | B_CC=%.0fA F_CC=%.0fA CV=%.2fV DmaxF=%d\n",
                   FW_VERSION_TAG, TARGET_CC_CURRENT, FWD_TARGET_CC_CURRENT,
                   TARGET_CV_VOLTAGE, MAX_DUTY_FORWARD);
-    // Tab-separated for Excel — values spaced for one overlay chart.
-    // Bands: Vout~55 | Iplot=I*20+100 | Dplot=Duty+200 | Vinplot=Vin+300
-    Serial.println("CSV\tt_s\tVout\tIplot\tDplot\tVinplot");
+    // Real values + time (no fake Y offsets). Filter lines starting with CSV.
+    Serial.println("CSV\ttime\tVin\tVout\tIout\tDuty");
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(40);
@@ -1622,35 +1615,41 @@ void TaskSampleData(void * pvParameters) {
                 ? v_solar
                 : v_ac_in;
 
-        // Excel TSV — only while active (not idle STANDBY spam).
+        // Excel TSV — real Vin/Vout/Iout/Duty + HH:MM:SS (only while active).
         const bool csvActive = system_ON || charge_full_hold || ovp_latched;
         if (ENABLE_DEBUG_CSV && csvActive &&
             (now - last_csv_time >= DEBUG_CSV_INTERVAL_MS)) {
             last_csv_time = now;
-            const float iplot = (i_bat_charge_filt * CSV_IOUT_SCALE) + CSV_IOUT_OFFSET;
-            const float dplot = (float)active_duty_percent + CSV_DUTY_OFFSET;
-            const float vplot = vin_now + CSV_VIN_OFFSET;
-            Serial.printf("CSV\t%.1f\t%.2f\t%.2f\t%.1f\t%.1f\n",
-                          now / 1000.0f, v_bat_filt, iplot, dplot, vplot);
+            const unsigned long sec = now / 1000UL;
+            const unsigned int hh = (unsigned int)((sec / 3600UL) % 100UL);
+            const unsigned int mm = (unsigned int)((sec / 60UL) % 60UL);
+            const unsigned int ss = (unsigned int)(sec % 60UL);
+            Serial.printf("CSV\t%02u:%02u:%02u\t%.1f\t%.2f\t%.2f\t%d\n",
+                          hh, mm, ss, vin_now, v_bat_filt, i_bat_charge_filt,
+                          active_duty_percent);
         }
 
         // [STAT]: periodic while charging/FULL/OVP; STANDBY only on mode change.
         if (ENABLE_DEBUG_STATUS) {
             const int sel_now = (int)selectedChargeMode;
             const bool mode_changed = (sel_now != last_stat_sel);
+            const unsigned long sec = now / 1000UL;
+            const unsigned int hh = (unsigned int)((sec / 3600UL) % 100UL);
+            const unsigned int mm = (unsigned int)((sec / 60UL) % 60UL);
+            const unsigned int ss = (unsigned int)(sec % 60UL);
             if (system_ON || charge_full_hold || ovp_latched) {
                 if (now - last_debug_time >= dbgPeriod) {
                     last_debug_time = now;
-                    Serial.printf("[STAT] %s D=%d%% BAT %.2fV/%.2fV I=%.2fA IN=%.1fV%s\n",
-                                  run_label, active_duty_percent,
+                    Serial.printf("[STAT] %02u:%02u:%02u %s D=%d%% BAT %.2fV/%.2fV I=%.2fA IN=%.1fV%s\n",
+                                  hh, mm, ss, run_label, active_duty_percent,
                                   v_bat, v_bat_filt, i_bat_charge_filt,
                                   vin_now,
                                   ac_is_collapsing ? " AC_SAG" : "");
                 }
             } else if (mode_changed) {
                 last_stat_sel = sel_now;
-                Serial.printf("[STAT] STANDBY %s BAT %.2fV PV %.1f AC %.1f\n",
-                              sel_label, v_bat_filt, v_solar, v_ac_in);
+                Serial.printf("[STAT] %02u:%02u:%02u STANDBY %s BAT %.2fV PV %.1f AC %.1f\n",
+                              hh, mm, ss, sel_label, v_bat_filt, v_solar, v_ac_in);
             }
         }
         vTaskDelay(20 / portTICK_PERIOD_MS);
