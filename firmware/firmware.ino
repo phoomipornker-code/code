@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v61";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v62";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -50,7 +50,9 @@ const float CV_DEADBAND_V = 0.12;
 const float FULL_DETECT_VOLTAGE = 55.90;   // Boost FULL (CV 56.0)
 const float FWD_FULL_DETECT_VOLTAGE = 55.80; // Forward FULL near CV 55.9
 const float FULL_END_CURRENT = 0.50;
-const unsigned long FULL_CONFIRM_MS = 60000;
+const unsigned long FULL_CONFIRM_MS = 60000;          // Boost
+const unsigned long FWD_FULL_CONFIRM_MS = 15000;      // Forward: was 60s — too long near full
+const unsigned long FWD_FULL_FAST_CONFIRM_MS = 5000;  // V peak≥CV and Iabs collapsed
 const float HIGH_VOLTAGE_STOP_VOLTAGE = 56.80;
 const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 300;
 const float RESTART_CHARGE_VOLTAGE = 54.0;
@@ -795,6 +797,33 @@ void TaskSampleData(void * pvParameters) {
                 v_bat_filt = last_good_v_bat;
                 v_bat = last_good_v_bat;
             }
+            // Field near full: V raw≈56.4 while Vf lagged ~55.2 after spike holds — pull Vf up.
+            static uint8_t v_catchup_hits = 0;
+            if (!isnan(v_bat) && v_bat >= 35.0f && v_bat <= 62.0f &&
+                (v_bat > (v_bat_filt + 0.40f)) && (v_bat - v_bat_filt) < 3.0f) {
+                if (++v_catchup_hits >= 3) {
+                    for (int i = 0; i < 8; i++) vbat_filter_buf[i] = v_bat;
+                    vbat_filter_sum = v_bat * 8.0f;
+                    filter_count = 8;
+                    v_bat_filt = v_bat;
+                    v_catchup_hits = 0;
+                }
+            } else {
+                v_catchup_hits = 0;
+            }
+            // Field: Iabs≈0 but If stuck ~2 A (boxcar stale) → FULL never trips. Snap filt to raw.
+            static uint8_t i_zero_hits = 0;
+            if (fabsf(i_bat) <= NOISE_I_THRESHOLD && fabsf(i_bat_filt) > 0.40f) {
+                if (++i_zero_hits >= 5) {
+                    for (int i = 0; i < 8; i++) ibat_filter_buf[i] = i_bat;
+                    ibat_filter_sum = i_bat * 8.0f;
+                    filter_count = 8;
+                    i_bat_filt = i_bat;
+                    i_zero_hits = 0;
+                }
+            } else {
+                i_zero_hits = 0;
+            }
             i_solar_mag = fabs(i_solar);
             i_bat_charge_filt = fabs(i_bat_filt);
             i_bat_charge_abs = fabs(i_bat);
@@ -1178,17 +1207,28 @@ void TaskSampleData(void * pvParameters) {
                     } else {
                         fwdCvExitMs = 0;
                     }
-                    bool doneCond = (v_bat_filt >= FWD_FULL_DETECT_VOLTAGE) &&
-                                    (i_bat_charge_filt <= FULL_END_CURRENT);
+                    // Field: Vf lagged at 55.21 while Vraw=56.38 and Iabs=0 / If stuck 2A
+                    // → never reached old (Vf≥55.8 && If≤0.5 for 60s). Use peak V + min I.
+                    const float vFull = max(v_bat, v_bat_filt);
+                    const float iFull = min(i_bat_charge_filt, i_bat_charge_abs);
+                    bool doneSlow = (vFull >= FWD_FULL_DETECT_VOLTAGE) &&
+                                    (iFull <= FULL_END_CURRENT);
+                    bool doneFast = (vFull >= TARGET_CV_VOLTAGE) &&
+                                    (i_bat_charge_abs <= 0.35f) &&
+                                    (iFull <= 1.00f);
+                    bool doneCond = doneSlow || doneFast;
+                    unsigned long needMs = doneFast ? FWD_FULL_FAST_CONFIRM_MS
+                                                     : FWD_FULL_CONFIRM_MS;
                     if (doneCond) {
                         if (fwd_full_condition_start_ms == 0) fwd_full_condition_start_ms = now;
-                        if (now - fwd_full_condition_start_ms >= FULL_CONFIRM_MS) {
+                        if (now - fwd_full_condition_start_ms >= needMs) {
                             forwardMode = FWD_DONE;
                             charge_full_hold = true;
                             disablePowerStage();
                             last_lcd_soft_resync_ms = 0;
                             lcd_force_refresh = true;
-                            Serial.println("[INFO] Battery FULL detected in FORWARD_CV.");
+                            Serial.printf("[INFO] Battery FULL (FORWARD CV) V=%.2f/%.2f I=%.2f/%.2fA\n",
+                                          v_bat, v_bat_filt, i_bat_charge_abs, i_bat_charge_filt);
                         }
                     } else {
                         fwd_full_condition_start_ms = 0;
@@ -1473,14 +1513,17 @@ void TaskSampleData(void * pvParameters) {
                 ledcWrite(PWM_FORWARD_PIN, 0);
             }
             total_Wh += ((v_bat * i_bat_charge_filt) * (now - last_millis)) / 3600000.0;
-            if (v_bat_filt >= HIGH_VOLTAGE_STOP_VOLTAGE) {
+            // High-V stop: use peak so lagged Vf cannot block cut near full.
+            const float vStop = max(v_bat, v_bat_filt);
+            if (vStop >= HIGH_VOLTAGE_STOP_VOLTAGE) {
                 if (high_voltage_stop_start_ms == 0) high_voltage_stop_start_ms = now;
                 if (now - high_voltage_stop_start_ms >= HIGH_VOLTAGE_STOP_CONFIRM_MS) {
                     charge_full_hold = true;
                     disablePowerStage();
                     last_lcd_soft_resync_ms = 0;
                     lcd_force_refresh = true;
-                    Serial.printf("[INFO] High-voltage charge stop at %.2fV. Enter FULL HOLD.\n", v_bat_filt);
+                    Serial.printf("[INFO] High-voltage charge stop at %.2fV (filt=%.2f). Enter FULL HOLD.\n",
+                                  vStop, v_bat_filt);
                 }
             } else {
                 high_voltage_stop_start_ms = 0;
