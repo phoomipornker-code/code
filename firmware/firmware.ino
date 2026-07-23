@@ -3,10 +3,12 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v76";
+#include <string.h>
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v77";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
+// Serial telemetry runs on a separate low-prio task — never block ADC/PWM control.
 // =========================================================================
 // Hardware
 // =========================================================================
@@ -181,7 +183,8 @@ const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 const bool ENABLE_DEBUG_STATUS = false;        // [STAT] lines (off — table is enough)
 const bool ENABLE_DEBUG_CSV = true;            // Tim Iin Vin Iout Vout Duty table rows
 const bool ENABLE_EVENT_LOG = false;           // [INFO]/[WARN] chatter (ADC/AC sag/phase)
-// Always print: [BOOT] [MODE] [START] [STOP] [FULL] [OVP] [OC] [CRITICAL] + table.
+// Always queue: [BOOT] [MODE] [START] [STOP] [FULL] [OVP] [OC] — printed by TaskSerialLog.
+// ADC/PWM task never calls Serial.* (USB block was killing charge via ADC timeout).
 const unsigned long OC_EVENT_LOG_MS = 1000;    // rate-limit [OC] while hard limit active
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 5000;
 const unsigned long DEBUG_PRINT_CHARGE_MS = 3000;
@@ -209,7 +212,7 @@ volatile unsigned long ovp_trip_ms = 0;
 volatile bool system_ON = false;
 volatile bool charge_full_hold = false;
 volatile int active_duty_percent = 0;
-int raw_duty = 0;
+volatile int raw_duty = 0;  // volatile: Serial task reads; control task writes
 float duty_accumulator = 0.0;
 float boost_dither_phase = 0.0;
 float forward_dither_phase = 0.0;
@@ -247,6 +250,40 @@ unsigned long fwdCvExitMs = 0;
 unsigned long forward_mode_enter_ms = 0;
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 SemaphoreHandle_t i2c_Mutex;
+// Non-blocking event log → drained by TaskSerialLog (never Serial.* in ADC/PWM task).
+const int LOG_Q_DEPTH = 16;
+const int LOG_MSG_LEN = 128;
+static char log_q[LOG_Q_DEPTH][LOG_MSG_LEN];
+static volatile uint8_t log_q_head = 0;
+static volatile uint8_t log_q_tail = 0;
+static portMUX_TYPE log_mux = portMUX_INITIALIZER_UNLOCKED;
+void logEventf(const char *fmt, ...) {
+    char buf[LOG_MSG_LEN];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    portENTER_CRITICAL(&log_mux);
+    uint8_t next = (uint8_t)((log_q_head + 1u) % LOG_Q_DEPTH);
+    if (next != log_q_tail) {
+        strncpy(log_q[log_q_head], buf, LOG_MSG_LEN - 1);
+        log_q[log_q_head][LOG_MSG_LEN - 1] = '\0';
+        log_q_head = next;
+    }
+    portEXIT_CRITICAL(&log_mux);
+}
+bool logEventPop(char *out, size_t outLen) {
+    bool got = false;
+    portENTER_CRITICAL(&log_mux);
+    if (log_q_tail != log_q_head) {
+        strncpy(out, log_q[log_q_tail], outLen - 1);
+        out[outLen - 1] = '\0';
+        log_q_tail = (uint8_t)((log_q_tail + 1u) % LOG_Q_DEPTH);
+        got = true;
+    }
+    portEXIT_CRITICAL(&log_mux);
+    return got;
+}
 float raw_mv_v0 = 0, raw_mv_v1 = 0, raw_mv_v2 = 0;
 float raw_mv_i0 = 0, raw_mv_i1 = 0, raw_mv_i2 = 0;
 float current_offset_i0 = OFFSET_I_SOLAR;
@@ -269,6 +306,7 @@ volatile bool lcd_show_ovp_alert = false;
 volatile unsigned long lcd_alert_until_ms = 0;
 void TaskSampleData(void * pvParameters);
 void TaskLCDLoop(void * pvParameters);
+void TaskSerialLog(void * pvParameters);
 void calibrateCurrentOffsetsAtBoot();
 int quantizeDutyWithDither(float duty_cmd, float *phase, int max_duty);
 void lcdPrintLineRaw(uint8_t row, const char *text);
@@ -645,8 +683,9 @@ void setup() {
         calibrateCurrentOffsetsAtBoot();
         last_adc_sample_ms = millis();
     }
-    xTaskCreatePinnedToCore(TaskSampleData, "ADC_PWM_Task", 8192, NULL, 2, NULL, 0);
+    xTaskCreatePinnedToCore(TaskSampleData, "ADC_PWM_Task", 8192, NULL, 3, NULL, 0);
     xTaskCreatePinnedToCore(TaskLCDLoop, "Button_Task", 4096, NULL, 2, NULL, 1);
+    xTaskCreatePinnedToCore(TaskSerialLog, "Serial_Log", 4096, NULL, 1, NULL, 1);
 }
 void loop() { vTaskDelay(1000); }
 void TaskSampleData(void * pvParameters) {
@@ -654,9 +693,6 @@ void TaskSampleData(void * pvParameters) {
     bool pv_is_collapsing = false;
     unsigned long ac_collapse_start_time = 0;
     bool ac_is_collapsing = false;
-    unsigned long last_csv_time = 0;
-    int last_stat_sel = (int)USER_MODE_BOOST;  // match default — no STANDBY spam until toggle
-    bool last_system_on_for_stat = false;
     unsigned long last_sensor_error_log = 0;
     unsigned long full_condition_start_ms = 0;
     unsigned long fwd_full_condition_start_ms = 0;
@@ -679,7 +715,7 @@ void TaskSampleData(void * pvParameters) {
             forceSafeShutdown();
             if (now - last_sensor_error_log >= SENSOR_ERROR_LOG_MS) {
                 last_sensor_error_log = now;
-                Serial.println("[FATAL] Waiting for manual reset: ADS1115 not detected.");
+                logEventf("%s", "[FATAL] Waiting for manual reset: ADS1115 not detected.");
             }
             vTaskDelay(100 / portTICK_PERIOD_MS);
             continue;
@@ -792,7 +828,7 @@ void TaskSampleData(void * pvParameters) {
                 (now - last_adc_glitch_log >= ADC_GLITCH_LOG_MS)) {
                 last_adc_glitch_log = now;
                 if (ENABLE_EVENT_LOG) {
-                    Serial.printf("[WARN] ADC glitch filtered: PVraw=%.1f ACraw=%.1f BATraw=%.1fmV duty=%d Ib=%.2fA%s%s%s%s\n",
+                    logEventf("[WARN] ADC glitch filtered: PVraw=%.1f ACraw=%.1f BATraw=%.1fmV duty=%d Ib=%.2fA%s%s%s%s\n",
                                   pv_raw_before, ac_raw_before, bat_raw_before, raw_duty, i_bat_charge_filt,
                                   multi_ch_bus_glitch ? " BUS!" : "",
                                   ac_brief_glitch ? " ACblip!" : "",
@@ -919,7 +955,7 @@ void TaskSampleData(void * pvParameters) {
                     bms_open_suspect_ms = 0;
                     last_lcd_soft_resync_ms = 0;
                     lcd_force_refresh = true;
-                    Serial.printf("[OVP] BMS-OPEN/preempt V=%.2f filt=%.2f I=%.2fA step=%.2f. PWM off.\n",
+                    logEventf("[OVP] BMS-OPEN/preempt V=%.2f filt=%.2f I=%.2fA step=%.2f. PWM off.\n",
                                   v_bat, v_bat_filt, i_bat_charge_filt, vbat_step);
                 }
             } else {
@@ -946,7 +982,7 @@ void TaskSampleData(void * pvParameters) {
                         ovp_trip_ms = now;
                         forceSafeShutdown();
                         hard_ovp_suspect_ms = 0;
-                        Serial.printf("[OVP] HARD TRIP V=%.2f filt=%.2f lim=%.2f. Output disabled.\n",
+                        logEventf("[OVP] HARD TRIP V=%.2f filt=%.2f lim=%.2f. Output disabled.\n",
                                       ovp_trip_voltage, v_bat_filt, HARD_OVP_TRIP_VOLTAGE);
                     }
                 } else {
@@ -973,7 +1009,7 @@ void TaskSampleData(void * pvParameters) {
                     ovp_trip_voltage = v_bat;
                     ovp_trip_ms = now;
                     forceSafeShutdown();
-                    Serial.printf("[OVP] RUNAWAY-CUT V=%.2f filt=%.2f duty=%d.\n",
+                    logEventf("[OVP] RUNAWAY-CUT V=%.2f filt=%.2f duty=%d.\n",
                                   v_bat, v_bat_filt, raw_duty);
                 } else {
                     duty_accumulator = max(0.0f, duty_accumulator - 15.0f);
@@ -989,7 +1025,7 @@ void TaskSampleData(void * pvParameters) {
                         }
                     }
                     if (ENABLE_EVENT_LOG) {
-                        Serial.printf("[WARN] Runaway soft-cut duty at %.2fV (filt=%.2fV).\n",
+                        logEventf("[WARN] Runaway soft-cut duty at %.2fV (filt=%.2fV).\n",
                                       v_bat, v_bat_filt);
                     }
                 }
@@ -1013,7 +1049,7 @@ void TaskSampleData(void * pvParameters) {
                     ovp_trip_voltage = v_bat;
                     ovp_trip_ms = now;
                     forceSafeShutdown();
-                    Serial.printf("[OVP] SPIKE-PRECUT V=%.2f step=%.2f filt=%.2f duty=%d.\n",
+                    logEventf("[OVP] SPIKE-PRECUT V=%.2f step=%.2f filt=%.2f duty=%d.\n",
                                   v_bat, vbat_step, v_bat_filt, raw_duty);
                 } else {
                     duty_accumulator = max(0.0f, duty_accumulator - 12.0f);
@@ -1029,7 +1065,7 @@ void TaskSampleData(void * pvParameters) {
                         }
                     }
                     if (ENABLE_EVENT_LOG) {
-                        Serial.printf("[WARN] Spike soft-cut duty at %.2fV (step=%.2fV filt=%.2f I=%.2fA).\n",
+                        logEventf("[WARN] Spike soft-cut duty at %.2fV (step=%.2fV filt=%.2f I=%.2fA).\n",
                                       v_bat, vbat_step, v_bat_filt, i_bat_charge_filt);
                     }
                 }
@@ -1039,7 +1075,7 @@ void TaskSampleData(void * pvParameters) {
                 v_bat_filt <= HARD_OVP_RELEASE_VOLTAGE &&
                 v_bat <= (HARD_OVP_RELEASE_VOLTAGE + 0.8f)) {
                 ovp_latched = false;
-                Serial.printf("[OVP] cleared V=%.2f (release=%.2f).\n",
+                logEventf("[OVP] cleared V=%.2f (release=%.2f).\n",
                               max(v_bat, v_bat_filt), HARD_OVP_RELEASE_VOLTAGE);
             }
             last_vbat_sample = v_bat;
@@ -1052,12 +1088,12 @@ void TaskSampleData(void * pvParameters) {
                 (now - last_sensor_error_log >= SENSOR_ERROR_LOG_MS)) {
                 last_sensor_error_log = now;
                 if (ENABLE_EVENT_LOG) {
-                    Serial.printf("[WARN] ADC bus busy/stale %lums (LCD contention?).\n", stale_ms);
+                    logEventf("[WARN] ADC bus busy/stale %lums (LCD contention?).\n", stale_ms);
                 }
             }
             if (stale_ms > ADC_STALE_TIMEOUT_MS) {
                 forceSafeShutdown();
-                Serial.println("[STOP] ADC sample timeout. Auto-shutdown.");
+                logEventf("%s", "[STOP] ADC sample timeout. Auto-shutdown.");
             }
         }
         if (system_ON) {
@@ -1069,7 +1105,7 @@ void TaskSampleData(void * pvParameters) {
                 if ((v_bat_filt <= RESTART_CHARGE_VOLTAGE) && selected_input_ok) {
                     charge_full_hold = false;
                     if (ENABLE_EVENT_LOG) {
-                        Serial.println("[INFO] Battery dropped to restart threshold. Charging resumed.");
+                        logEventf("%s", "[INFO] Battery dropped to restart threshold. Charging resumed.");
                     }
                 }
             }
@@ -1085,11 +1121,11 @@ void TaskSampleData(void * pvParameters) {
                                            : (v_ac_in >= MIN_AC_VOLTAGE);
                 if (!bat_ok) {
                     system_ON = false;
-                    Serial.printf("[STOP] Battery start window fail: Vbat=%.2f (need %.1f..%.1f).\n",
+                    logEventf("[STOP] Battery start window fail: Vbat=%.2f (need %.1f..%.1f).\n",
                                   v_bat_filt, BAT_PRESENT_MIN_V, BAT_START_MAX_V);
                 } else if (!input_ok) {
                     system_ON = false;
-                    Serial.printf("[STOP] Selected mode %s input missing (PV=%.1f AC=%.1f).\n",
+                    logEventf("[STOP] Selected mode %s input missing (PV=%.1f AC=%.1f).\n",
                                   want_boost ? "BOOST" : "FORWARD", v_solar, v_ac_in);
                 } else if (want_boost) {
                     // BOOST entry — same proven v14 sequence (unchanged control after entry).
@@ -1104,7 +1140,7 @@ void TaskSampleData(void * pvParameters) {
                     boost_dither_phase = 0.0f;
                     boostNewResetOnEntry(v_solar);
                     pv_is_collapsing = false;
-                    Serial.println("[START] BOOST SoftStart->CC_MPPT->CV");
+                    logEventf("%s", "[START] BOOST SoftStart->CC_MPPT->CV");
                 } else {
                     ledcWrite(PWM_FORWARD_PIN, 0); ledcWrite(PWM_BOOST_PIN, 0);
                     digitalWrite(RELAY_PV_PIN, LOW);
@@ -1116,7 +1152,7 @@ void TaskSampleData(void * pvParameters) {
                     duty_accumulator = 0.0f;
                     forward_dither_phase = 0.0f;
                     forwardNewResetOnEntry();
-                    Serial.println("[START] FORWARD SoftStart->CC->CV");
+                    logEventf("%s", "[START] FORWARD SoftStart->CC->CV");
                 }
             }
             else if (currentState == STATE_BOOST) {
@@ -1127,7 +1163,7 @@ void TaskSampleData(void * pvParameters) {
                     }
                     if (now - pv_collapse_start_time >= 2000) {
                         system_ON = false;
-                        Serial.println("[STOP] PV collapsed below 39V. Auto-Shutdown.");
+                        logEventf("%s", "[STOP] PV collapsed below 39V. Auto-Shutdown.");
                     }
                 } else {
                     pv_is_collapsing = false;
@@ -1144,13 +1180,13 @@ void TaskSampleData(void * pvParameters) {
                         ac_is_collapsing = true;
                         ac_collapse_start_time = now;
                         if (ENABLE_EVENT_LOG) {
-                            Serial.printf("[WARN] AC sag %.1fV - freeze duty-up. Shutdown if >%lums.\n",
+                            logEventf("[WARN] AC sag %.1fV - freeze duty-up. Shutdown if >%lums.\n",
                                           v_ac_in, FWD_AC_COLLAPSE_CONFIRM_MS);
                         }
                     }
                     if (now - ac_collapse_start_time >= FWD_AC_COLLAPSE_CONFIRM_MS) {
                         system_ON = false;
-                        Serial.println("[STOP] AC bridge lost (sustained). Auto-Shutdown.");
+                        logEventf("%s", "[STOP] AC bridge lost (sustained). Auto-Shutdown.");
                     }
                 } else {
                     ac_is_collapsing = false;
@@ -1191,7 +1227,7 @@ void TaskSampleData(void * pvParameters) {
                     if (ready) {
                         forwardMode = FWD_CC;
                         if (ENABLE_EVENT_LOG) {
-                            Serial.printf("[INFO] FORWARD SoftStart done -> CC step (I=%.2fA duty=%.0f seed=%d)\n",
+                            logEventf("[INFO] FORWARD SoftStart done -> CC step (I=%.2fA duty=%.0f seed=%d)\n",
                                           i_bat_charge_filt, duty_accumulator, seedDuty);
                         }
                     }
@@ -1230,7 +1266,7 @@ void TaskSampleData(void * pvParameters) {
                         forwardMode = FWD_CV;
                         fwdCvEnterMs = 0;
                         if (ENABLE_EVENT_LOG) {
-                            Serial.printf("[INFO] Force FORWARD CV at Vbat=%.2f / filt=%.2f\n",
+                            logEventf("[INFO] Force FORWARD CV at Vbat=%.2f / filt=%.2f\n",
                                           v_bat, v_bat_filt);
                         }
                     } else if (vBatPeak >= FWD_CV_ENTRY_VOLTAGE) {
@@ -1238,7 +1274,7 @@ void TaskSampleData(void * pvParameters) {
                         if (now - fwdCvEnterMs >= FWD_CV_ENTER_CONFIRM_MS) {
                             forwardMode = FWD_CV;
                             if (ENABLE_EVENT_LOG) {
-                                Serial.printf("[INFO] FORWARD CC -> CV at Vbat=%.2f / filt=%.2f\n",
+                                logEventf("[INFO] FORWARD CC -> CV at Vbat=%.2f / filt=%.2f\n",
                                               v_bat, v_bat_filt);
                             }
                         }
@@ -1309,7 +1345,7 @@ void TaskSampleData(void * pvParameters) {
                             disablePowerStage();
                             last_lcd_soft_resync_ms = 0;
                             lcd_force_refresh = true;
-                            Serial.printf("[FULL] FORWARD CV V=%.2f/%.2f I=%.2f/%.2fA\n",
+                            logEventf("[FULL] FORWARD CV V=%.2f/%.2f I=%.2f/%.2fA\n",
                                           v_bat, v_bat_filt, i_bat_charge_abs, i_bat_charge_filt);
                         }
                     } else {
@@ -1321,7 +1357,7 @@ void TaskSampleData(void * pvParameters) {
                         charge_full_hold = false;
                         forwardMode = FWD_CC;
                         if (ENABLE_EVENT_LOG) {
-                            Serial.println("[INFO] FORWARD resume from DONE -> CC.");
+                            logEventf("%s", "[INFO] FORWARD resume from DONE -> CC.");
                         }
                     }
                 }
@@ -1333,7 +1369,7 @@ void TaskSampleData(void * pvParameters) {
                     duty_accumulator -= 2.0f;
                     if (now - last_oc_fwd_ac_log_ms >= OC_EVENT_LOG_MS) {
                         last_oc_fwd_ac_log_ms = now;
-                        Serial.printf("[OC] FORWARD AC I=%.2fA lim=%.2fA (duty cut)\n",
+                        logEventf("[OC] FORWARD AC I=%.2fA lim=%.2fA (duty cut)\n",
                                       fabs(i_ac_in), FWD_AC_CURRENT_HARD_A);
                     }
                 }
@@ -1341,7 +1377,7 @@ void TaskSampleData(void * pvParameters) {
                     duty_accumulator -= (forwardMode == FWD_CV) ? 1.0f : 5.0f;
                     if (now - last_oc_fwd_bat_log_ms >= OC_EVENT_LOG_MS) {
                         last_oc_fwd_bat_log_ms = now;
-                        Serial.printf("[OC] FORWARD BAT I=%.2fA lim=%.2fA (duty cut)\n",
+                        logEventf("[OC] FORWARD BAT I=%.2fA lim=%.2fA (duty cut)\n",
                                       i_bat_charge_abs, FWD_BAT_CURRENT_HARD_A);
                     }
                 }
@@ -1455,7 +1491,7 @@ void TaskSampleData(void * pvParameters) {
                         boostNewIrefCvCmd = boostClampf(i_bat_charge_filt, 0.3f, 2.0f);
                         boostNewCvEnterMs = 0;
                         if (ENABLE_EVENT_LOG) {
-                            Serial.printf("[INFO] Force CV at Vbat=%.2f / filt=%.2f\n", v_bat, v_bat_filt);
+                            logEventf("[INFO] Force CV at Vbat=%.2f / filt=%.2f\n", v_bat, v_bat_filt);
                         }
                     } else if (v_bat_filt >= BOOST_CV_ENTRY_VOLTAGE) {
                         if (boostNewCvEnterMs == 0) boostNewCvEnterMs = now;
@@ -1547,7 +1583,7 @@ void TaskSampleData(void * pvParameters) {
                             disablePowerStage();
                             last_lcd_soft_resync_ms = 0;
                             lcd_force_refresh = true;
-                            Serial.println("[FULL] BOOST CV");
+                            logEventf("%s", "[FULL] BOOST CV");
                         }
                     } else {
                         full_condition_start_ms = 0;
@@ -1570,7 +1606,7 @@ void TaskSampleData(void * pvParameters) {
                     duty_accumulator -= 5.0f;
                     if (now - last_oc_boost_pv_log_ms >= OC_EVENT_LOG_MS) {
                         last_oc_boost_pv_log_ms = now;
-                        Serial.printf("[OC] BOOST PV I=%.2fA lim=%.2fA (duty cut)\n",
+                        logEventf("[OC] BOOST PV I=%.2fA lim=%.2fA (duty cut)\n",
                                       i_solar_mag, BOOST_PV_CURRENT_HARD_A);
                     }
                 }
@@ -1623,7 +1659,7 @@ void TaskSampleData(void * pvParameters) {
                     disablePowerStage();
                     last_lcd_soft_resync_ms = 0;
                     lcd_force_refresh = true;
-                    Serial.printf("[STOP] high-V FULL HOLD V=%.2f filt=%.2f\n",
+                    logEventf("[STOP] high-V FULL HOLD V=%.2f filt=%.2f\n",
                                   vStop, v_bat_filt);
                 }
             } else {
@@ -1659,48 +1695,41 @@ void TaskSampleData(void * pvParameters) {
                 }
             }
         }
-        const char* sel_label =
-            (selectedChargeMode == USER_MODE_BOOST) ? "BOOST" : "FORW";
-        const bool use_boost_in =
-            (currentState == STATE_BOOST ||
-             (!system_ON && selectedChargeMode == USER_MODE_BOOST));
-        const float vin_now = use_boost_in ? v_solar : v_ac_in;
-        const float iin_now = use_boost_in ? fabsf(i_solar) : fabsf(i_ac_in);
-
-        // Table rows always — STANDBY and charging (no need to press START).
-        if (ENABLE_DEBUG_CSV && (now - last_csv_time >= DEBUG_CSV_INTERVAL_MS)) {
-            last_csv_time = now;
+        // Telemetry: TaskSerialLog prints table + drains event queue.
+        // Do NOT Serial.printf here — USB block starved ADC/PWM and killed charge (v77).
+        vTaskDelay(20 / portTICK_PERIOD_MS);
+    }
+}
+void TaskSerialLog(void * pvParameters) {
+    // Low priority: display only. Never touch PWM / ADS / relays.
+    unsigned long last_csv_ms = 0;
+    char evt[LOG_MSG_LEN];
+    for (;;) {
+        while (logEventPop(evt, sizeof(evt))) {
+            // Formats from control may include trailing \\n — strip so we don't double-space.
+            size_t n = strlen(evt);
+            while (n > 0 && (evt[n - 1] == '\n' || evt[n - 1] == '\r')) {
+                evt[--n] = '\0';
+            }
+            if (n > 0) Serial.println(evt);
+        }
+        unsigned long now = millis();
+        if (ENABLE_DEBUG_CSV && (now - last_csv_ms >= DEBUG_CSV_INTERVAL_MS)) {
+            last_csv_ms = now;
+            const bool use_boost =
+                (currentState == STATE_BOOST) ||
+                (!system_ON && selectedChargeMode == USER_MODE_BOOST);
+            const float vin = use_boost ? v_solar : v_ac_in;
+            const float iin = use_boost ? fabsf(i_solar) : fabsf(i_ac_in);
             const unsigned long sec = now / 1000UL;
             const unsigned int hh = (unsigned int)((sec / 3600UL) % 100UL);
             const unsigned int mm = (unsigned int)((sec / 60UL) % 60UL);
             const unsigned int ss = (unsigned int)(sec % 60UL);
             Serial.printf("%02u:%02u:%02u   %6.2f    %6.1f   %5.2f   %5.2f  %4d\n",
                           hh, mm, ss,
-                          iin_now, vin_now,
+                          iin, vin,
                           i_bat_charge_filt, v_bat_filt,
                           raw_duty);
-        }
-
-        // [STAT] only on mode toggle or charge start — keep table readable.
-        if (ENABLE_DEBUG_STATUS) {
-            const int sel_now = (int)selectedChargeMode;
-            const bool mode_changed = (sel_now != last_stat_sel);
-            const bool charge_started = system_ON && !last_system_on_for_stat;
-            const unsigned long sec = now / 1000UL;
-            const unsigned int hh = (unsigned int)((sec / 3600UL) % 100UL);
-            const unsigned int mm = (unsigned int)((sec / 60UL) % 60UL);
-            const unsigned int ss = (unsigned int)(sec % 60UL);
-            if (charge_started) {
-                Serial.printf("[STAT] %02u:%02u:%02u START D=%d%% BAT %.2fV/%.2fV I=%.2fA IN=%.1fV\n",
-                              hh, mm, ss, active_duty_percent,
-                              v_bat, v_bat_filt, i_bat_charge_filt, vin_now);
-            } else if (!system_ON && mode_changed) {
-                last_stat_sel = sel_now;
-                Serial.printf("[STAT] %02u:%02u:%02u STANDBY %s BAT %.2fV PV %.1f AC %.1f\n",
-                              hh, mm, ss, sel_label, v_bat_filt, v_solar, v_ac_in);
-            }
-            if (mode_changed) last_stat_sel = sel_now;
-            last_system_on_for_stat = system_ON;
         }
         vTaskDelay(20 / portTICK_PERIOD_MS);
     }
@@ -1748,7 +1777,7 @@ void TaskLCDLoop(void * pvParameters) {
                     system_ON = false;
                     charge_full_hold = false;
                     lcd_force_refresh = true;
-                    Serial.printf("[STOP] hold %lums end (%s)\n",
+                    logEventf("[STOP] hold %lums end (%s)\n",
                                   (unsigned long)STOP_HOLD_END_MS,
                                   (currentState == STATE_FORWARD) ? "FORWARD" :
                                   (currentState == STATE_BOOST) ? "BOOST" : "ON");
@@ -1765,7 +1794,7 @@ void TaskLCDLoop(void * pvParameters) {
                 v_bat <= (HARD_OVP_RELEASE_VOLTAGE + 0.8f)) {
                 ovp_latched = false;
                 lcd_force_refresh = true;
-                Serial.printf("[OVP] cleared by STOP V=%.2f (release=%.2f).\n",
+                logEventf("[OVP] cleared by STOP V=%.2f (release=%.2f).\n",
                               max(v_bat, v_bat_filt), HARD_OVP_RELEASE_VOLTAGE);
             } else if (!ovp_latched) {
                 selectedChargeMode = (selectedChargeMode == USER_MODE_BOOST)
@@ -1773,7 +1802,7 @@ void TaskLCDLoop(void * pvParameters) {
                                          : USER_MODE_BOOST;
                 lcd_force_refresh = true;
                 // Always show mode change (even when EVENT_LOG is quiet).
-                Serial.printf("[MODE] %s (press START)\n",
+                logEventf("[MODE] %s (press START)\n",
                               (selectedChargeMode == USER_MODE_BOOST) ? "BOOST PV" : "FORWARD AC");
             }
         } else if (!stop_pressed) {
@@ -1828,7 +1857,7 @@ void TaskLCDLoop(void * pvParameters) {
                 last_lcd_draw_ms = now;
                 lcd_force_refresh = false;
                 if (ENABLE_EVENT_LOG) {
-                    Serial.println("[WARN] LCD I2C recovered (standby reinit).");
+                    logEventf("%s", "[WARN] LCD I2C recovered (standby reinit).");
                 }
             }
         }

@@ -7,6 +7,8 @@ Tim           Iin        Vin     Iout    Vout    Duty
 
 `Duty` = **raw PWM** (0–460 Forward / 0–1023 Boost scale) — ไม่ใช่ %
 
+ตารางพิมพ์โดย **TaskSerialLog** (แยกจากลูปควบคุม) — เปิด Monitor ได้โดยไม่ตัดชาร์จ (v77)
+
 แสดงทันทีหลังบูตทุก ~1 วินาที — ไม่มี `[WARN]`/`[INFO]` แทรก (v73)
 
 เหตุการณ์สำคัญยังขึ้นแยกบรรทัด (v75): `[START]` `[STOP]` `[FULL]` `[OVP]` `[OC]` `[MODE]` — อย่าคัดลอกไปพล็อต
