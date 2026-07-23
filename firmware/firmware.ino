@@ -255,7 +255,6 @@ void lcdPrintLineFmt(uint8_t row, const char *fmt, ...);
 void i2cBusSoftUnlock();
 void reinitI2CBusAndLCD();
 void drawLcdScreen();
-static inline bool lcdShouldFreeze(void);
 bool tryDrawLcdScreen();
 static inline float boostClampf(float x, float lo, float hi) {
     if (x < lo) return lo;
@@ -456,14 +455,7 @@ void drawLcdScreen() {
         lcdPrintLineFmt(2, "BATT:%5.1fV", vb);
         lcdPrintLineRaw(3, "STOP=mode START=go");
     }
-    lcd.backlight();  // re-assert when we do write (standby / low duty)
-}
-static inline bool lcdShouldFreeze(void) {
-    // Any active charge path: no LCD I2C (EMI + bus reinit were glitching PWM).
-    // Never mute PWM for display (v50). Never Wire.end while system_ON (v51 gap).
-    return system_ON &&
-           (currentState == STATE_FORWARD || currentState == STATE_BOOST ||
-            currentState == STATE_OFF);  // STARTING: duty 0 but relays about to engage
+    lcd.backlight();  // re-assert when we do write (standby only)
 }
 bool tryDrawLcdScreen() {
     if (system_ON || charge_full_hold) {
