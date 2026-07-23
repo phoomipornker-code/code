@@ -1,23 +1,21 @@
 # พล็อตกราฟจาก Serial ลง Excel
 
-ค่า**จริง** + เวลา:
+จัดวางตามตัวอย่าง:
 
 ```text
-CSV	time	Vin	Vout	Iout	Duty
-CSV	00:12:34	147.7	53.97	0.50	36
+Tim      Iin     Vin      Iout     Vout     Duty
+00:12:34 0.15    147.7    0.50     53.97    36
 ```
 
-| คอลัมน์ | ความหมาย |
-|---------|----------|
-| time | HH:MM:SS จากบูต |
-| Vin | แรงดันเข้า (V) |
-| Vout | แรงดันแบต (V) |
-| Iout | กระแสแบต (A) |
-| Duty | Duty (%) |
+Serial จะขึ้นต้นด้วย `CSV` แล้วคั่นด้วย Tab:
+
+```text
+CSV	Tim	Iin	Vin	Iout	Vout	Duty
+CSV	00:12:34	0.15	147.7	0.50	53.97	36
+```
 
 ## ขั้นตอน
 
 1. คัดลอกบรรทัดขึ้นต้น `CSV`
 2. Excel → Text to Columns → **Tab**
-3. สร้างกราฟ**แยก**ต่อค่า (แนะนำ): X = `time`, Y = `Vin` / `Vout` / `Iout` / `Duty` คนละชาร์ต  
-   หรือกราฟเดียวแล้วใช้แกนรองสำหรับ Iout/Duty
+3. พล็อตกราฟแยกต่อคอลัมน์: X = `Tim`, Y = `Iin` / `Vin` / `Iout` / `Vout` / `Duty`

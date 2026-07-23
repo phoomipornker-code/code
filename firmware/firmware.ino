@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v68";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v69";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -571,8 +571,8 @@ void setup() {
     Serial.printf("[BOOT] %s | B_CC=%.0fA F_CC=%.0fA CV=%.2fV DmaxF=%d\n",
                   FW_VERSION_TAG, TARGET_CC_CURRENT, FWD_TARGET_CC_CURRENT,
                   TARGET_CV_VOLTAGE, MAX_DUTY_FORWARD);
-    // Real values + time (no fake Y offsets). Filter lines starting with CSV.
-    Serial.println("CSV\ttime\tVin\tVout\tIout\tDuty");
+    // Layout: Tim | Iin | Vin | Iout | Vout | Duty  (tab-separated, real values)
+    Serial.println("CSV\tTim\tIin\tVin\tIout\tVout\tDuty");
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(40);
@@ -1609,13 +1609,13 @@ void TaskSampleData(void * pvParameters) {
         }
         const char* sel_label =
             (selectedChargeMode == USER_MODE_BOOST) ? "BOOST" : "FORW";
-        const float vin_now =
+        const bool use_boost_in =
             (currentState == STATE_BOOST ||
-             (!system_ON && selectedChargeMode == USER_MODE_BOOST))
-                ? v_solar
-                : v_ac_in;
+             (!system_ON && selectedChargeMode == USER_MODE_BOOST));
+        const float vin_now = use_boost_in ? v_solar : v_ac_in;
+        const float iin_now = use_boost_in ? fabsf(i_solar) : fabsf(i_ac_in);
 
-        // Excel TSV — real Vin/Vout/Iout/Duty + HH:MM:SS (only while active).
+        // Excel TSV per sketch: Tim | Iin | Vin | Iout | Vout | Duty
         const bool csvActive = system_ON || charge_full_hold || ovp_latched;
         if (ENABLE_DEBUG_CSV && csvActive &&
             (now - last_csv_time >= DEBUG_CSV_INTERVAL_MS)) {
@@ -1624,8 +1624,10 @@ void TaskSampleData(void * pvParameters) {
             const unsigned int hh = (unsigned int)((sec / 3600UL) % 100UL);
             const unsigned int mm = (unsigned int)((sec / 60UL) % 60UL);
             const unsigned int ss = (unsigned int)(sec % 60UL);
-            Serial.printf("CSV\t%02u:%02u:%02u\t%.1f\t%.2f\t%.2f\t%d\n",
-                          hh, mm, ss, vin_now, v_bat_filt, i_bat_charge_filt,
+            Serial.printf("CSV\t%02u:%02u:%02u\t%.2f\t%.1f\t%.2f\t%.2f\t%d\n",
+                          hh, mm, ss,
+                          iin_now, vin_now,
+                          i_bat_charge_filt, v_bat_filt,
                           active_duty_percent);
         }
 
