@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v51";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v52";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -169,9 +169,8 @@ const float HARD_OVP_RELEASE_VOLTAGE = 55.80;
 const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 const bool ENABLE_DEBUG_VERBOSE = true;
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 1000;
-const unsigned long LCD_REFRESH_INTERVAL_MS = 500;  // standby / low-duty only
-// Above this duty: freeze LCD I2C (no PWM mute — that caused control twitch in v50).
-const int LCD_FREEZE_DUTY = 40;
+const unsigned long DEBUG_PRINT_CHARGE_MS = 2000;       // rarer Serial while charging
+const unsigned long LCD_REFRESH_INTERVAL_MS = 500;      // standby only
 const unsigned long LCD_MUTEX_WAIT_MS = 80;
 const uint32_t I2C_CLOCK_HZ = 100000;
 const int I2C_SDA_PIN = 21;
@@ -460,14 +459,15 @@ void drawLcdScreen() {
     lcd.backlight();  // re-assert when we do write (standby / low duty)
 }
 static inline bool lcdShouldFreeze(void) {
-    // High PWM + LCD I2C = EMI blanking. Do NOT mute PWM for LCD (v50 twitch).
+    // Any active charge path: no LCD I2C (EMI + bus reinit were glitching PWM).
+    // Never mute PWM for display (v50). Never Wire.end while system_ON (v51 gap).
     return system_ON &&
-           (currentState == STATE_FORWARD || currentState == STATE_BOOST) &&
-           (raw_duty > LCD_FREEZE_DUTY);
+           (currentState == STATE_FORWARD || currentState == STATE_BOOST ||
+            currentState == STATE_OFF);  // STARTING: duty 0 but relays about to engage
 }
 bool tryDrawLcdScreen() {
-    if (lcdShouldFreeze()) {
-        return false;  // leave last frame; never glitch PWM for display
+    if (system_ON || charge_full_hold) {
+        return false;  // standby-only LCD writes
     }
     if (!xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(LCD_MUTEX_WAIT_MS))) {
         return false;
@@ -1336,8 +1336,9 @@ void TaskSampleData(void * pvParameters) {
             }
             duty_accumulator = constrain(duty_accumulator, 0.0, (float)allowed_max_duty);
             if (currentState == STATE_FORWARD) {
-                raw_duty = quantizeDutyWithDither(duty_accumulator, &forward_dither_phase, allowed_max_duty);
-                boost_dither_phase = 0.0;
+                // No dither on Forward — 1-LSB toggling looked like signal cuts on the scope.
+                raw_duty = constrain((int)lroundf(duty_accumulator), 0, allowed_max_duty);
+                forward_dither_phase = 0.0;
                 ledcWrite(PWM_FORWARD_PIN, raw_duty);
                 ledcWrite(PWM_BOOST_PIN, 0);
             } else if (currentState == STATE_BOOST) {
@@ -1366,8 +1367,8 @@ void TaskSampleData(void * pvParameters) {
         }
         last_millis = now;
         active_duty_percent = round(((float)raw_duty * 100.0) / 1023.0);
-        // LCD refresh only when PWM is quiet enough. Never gate PWM for LCD (v50 twitch).
-        if (!lcdShouldFreeze()) {
+        // LCD only in true standby — never during system_ON (avoids I2C/reinit PWM glitches).
+        if (!system_ON && !charge_full_hold) {
             if (lcd_force_refresh || (now - last_lcd_draw_ms >= LCD_REFRESH_INTERVAL_MS)) {
                 if (tryDrawLcdScreen()) {
                     last_lcd_draw_ms = now;
@@ -1375,10 +1376,13 @@ void TaskSampleData(void * pvParameters) {
                 }
             }
         } else {
-            // Keep force flag so we redraw as soon as duty drops / charge ends.
-            lcd_force_refresh = true;
+            lcd_force_refresh = true;  // redraw when back to standby
         }
-        if (ENABLE_DEBUG_VERBOSE && (now - last_debug_time >= DEBUG_PRINT_INTERVAL_MS)) {
+        const bool chargingNow =
+            system_ON && (currentState == STATE_FORWARD || currentState == STATE_BOOST);
+        const unsigned long dbgPeriod =
+            chargingNow ? DEBUG_PRINT_CHARGE_MS : DEBUG_PRINT_INTERVAL_MS;
+        if (ENABLE_DEBUG_VERBOSE && (now - last_debug_time >= dbgPeriod)) {
             last_debug_time = now;
             const char* sel_label =
                 (selectedChargeMode == USER_MODE_BOOST) ? "BOOST" : "FORWARD";
@@ -1549,8 +1553,9 @@ void TaskLCDLoop(void * pvParameters) {
             last_system_state = system_ON;
             lcd_force_refresh = true;
         }
-        const bool charge_active = system_ON && (currentState != STATE_OFF) && (raw_duty > 0);
-        if (!charge_active &&
+        // Never Wire.end / lcd.init while system_ON — even at duty=0 SoftStart entry
+        // (old charge_active required raw_duty>0 and allowed reinit during relay delay).
+        if (!system_ON && !charge_full_hold &&
             lcd_force_refresh &&
             (now - last_lcd_draw_ms > 2000) &&
             (now - last_standby_reinit_ms > 5000)) {
