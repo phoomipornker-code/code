@@ -1,7 +1,7 @@
 # เฟิร์มแวร์ ESP32 — ชาร์จเจอร์ Boost PV + Forward AC
 
 ไฟล์หลัก: [`firmware.ino`](firmware.ino)  
-แท็ก: `cv58-boost-v14-forward-v72`
+แท็ก: `cv58-boost-v14-forward-v73`
 
 ## นโยบายเวอร์ชันนี้
 
@@ -18,9 +18,9 @@
    - `LiquidCrystal I2C` (Frank de Brabander หรือเทียบเท่า)
 4. เปิดโฟลเดอร์ `firmware` (ไฟล์ `firmware.ino` ต้องอยู่ในโฟลเดอร์ชื่อเดียวกัน)
 5. Upload ลง ESP32
-6. เปิด Serial Monitor **115200 baud** — ควรเห็น `[BOOT] cv58-boost-v14-forward-v72`  
-   ตาราง `Tim Iin Vin Iout Vout Duty` แสดงทันทีทุก ~1 s (ไม่ต้องกด START)  
-   `[STAT]` เฉพาะสลับโหมด / START — ดู [`EXCEL_PLOT.md`](EXCEL_PLOT.md)
+6. เปิด Serial Monitor **115200 baud** — ควรเห็น `[BOOT] cv58-boost-v14-forward-v73`  
+   ตาราง `Tim Iin Vin Iout Vout Duty` ทุก ~1 s (เงียบ — ไม่มี WARN/INFO รบกวน)  
+   ดู [`EXCEL_PLOT.md`](EXCEL_PLOT.md)
 
 ## ปุ่มใช้งาน
 
