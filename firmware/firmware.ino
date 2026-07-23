@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v54";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v55";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -78,6 +78,7 @@ const float FWD_STEP_DOWN_CV = 0.80f;
 const float FWD_STEP_DOWN_CV_FINE = 0.35f;
 const float FWD_STEP_DOWN_CV_OVER = 1.50f;
 const float FWD_CV_HOLD_BAND_V = 0.05f;    // tighter hold around 55.9 V
+const float FWD_CV_TAPER_I_A = 0.40f;      // near-full: freeze duty-up (prevents fly-up→BATspike)
 const float FWD_CC_HOLD_BAND_A = 0.10f;
 const float FWD_CC_FAR_BAND_A = 0.60f;
 const float FWD_AC_HOLD_CLIMB_V = 115.0f; // freeze duty-up if bus dips (Cin stress)
@@ -680,30 +681,25 @@ void TaskSampleData(void * pvParameters) {
                                       (power_stage_active ||
                                        i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
                                        multi_ch_bus_glitch);
-            // Field: BAT read jumped to ~91.6 V (= AC bridge mV * BAT scale) while Vfilt~53.8
-            // and I=0 → HARD OVP false trip. Hold last valid on any sudden up-spike.
-            bool bat_raw_high_spike =
-                !isnan(last_plausible_bat_mv) &&
-                (raw_mv_v2 > (last_plausible_bat_mv + ADC_BAT_HIGH_SPIKE_MV)) &&
-                (power_stage_active || system_ON ||
-                 i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
-                 i_bat_charge_abs > ADC_GLITCH_CURRENT_GATE_A);
-            // Field: BATraw=104 mV → 4.37 V while I≈3 A / duty~40% (passed MIN=80).
+            // Field: BAT jumped to ~91.6 V / ~100 V (BATraw~2408) — always reject out-of-range
+            // when we already have a plausible pack reading (including after STOP).
             bool bat_mv_in_pack_range =
                 (raw_mv_v2 >= ADC_BAT_MIN_PLAUSIBLE_MV) &&
                 (raw_mv_v2 <= ADC_BAT_MAX_PLAUSIBLE_MV);
+            bool bat_raw_high_spike =
+                !isnan(last_plausible_bat_mv) &&
+                (raw_mv_v2 > (last_plausible_bat_mv + ADC_BAT_HIGH_SPIKE_MV));
             bool bat_raw_low_spike =
                 !isnan(last_plausible_bat_mv) &&
-                (raw_mv_v2 < (last_plausible_bat_mv - ADC_BAT_LOW_SPIKE_MV)) &&
-                (power_stage_active || system_ON ||
-                 i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
-                 i_bat_charge_abs > ADC_GLITCH_CURRENT_GATE_A);
+                (raw_mv_v2 < (last_plausible_bat_mv - ADC_BAT_LOW_SPIKE_MV));
+            // Always implausible if outside 16S window once we know a good pack reading.
             bool bat_raw_implausible =
-                (power_stage_active || system_ON) &&
-                (raw_duty > 20 ||
-                 i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
-                 i_bat_charge_abs > ADC_GLITCH_CURRENT_GATE_A) &&
-                !bat_mv_in_pack_range;
+                !bat_mv_in_pack_range &&
+                (!isnan(last_plausible_bat_mv) ||
+                 ((power_stage_active || system_ON) &&
+                  (raw_duty > 20 ||
+                   i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
+                   i_bat_charge_abs > ADC_GLITCH_CURRENT_GATE_A)));
             bool bat_raw_glitch = bat_raw_low_glitch || bat_raw_high_spike ||
                                  bat_raw_low_spike || bat_raw_implausible;
             if (solar_raw_glitch && !isnan(last_valid_raw_mv_v0)) {
@@ -757,20 +753,16 @@ void TaskSampleData(void * pvParameters) {
             if (fabs(i_solar) < NOISE_I_THRESHOLD) i_solar = 0.0;
             if (fabs(i_ac_in) < NOISE_I_THRESHOLD) i_ac_in = 0.0;
             if (fabs(i_bat)   < NOISE_I_THRESHOLD) i_bat   = 0.0;
-            // Refuse to poison Vbat filter with 4.x V while still delivering charge current.
-            const bool bat_v_implausible_now =
-                (system_ON || power_stage_active) &&
-                (fabsf(i_bat) > ADC_GLITCH_CURRENT_GATE_A ||
-                 i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
-                 raw_duty > 20) &&
-                (v_bat < 35.0f || v_bat > 62.0f);
+            // Refuse to poison Vbat filter with out-of-range samples (4.4 V or ~100 V spikes).
+            // Always — including after STOP (field: OVP at filt=74 after spike leaked in).
+            const bool bat_v_implausible_now = (v_bat < 35.0f || v_bat > 62.0f);
             if (bat_v_implausible_now) {
                 if (!isnan(last_good_v_bat)) {
                     v_bat = last_good_v_bat;
                 } else if (v_bat_filt >= 35.0f && v_bat_filt <= 62.0f) {
                     v_bat = v_bat_filt;
                 }
-            } else if (v_bat >= 35.0f && v_bat <= 62.0f) {
+            } else {
                 last_good_v_bat = v_bat;
             }
             vbat_filter_sum -= vbat_filter_buf[filter_index];
@@ -783,6 +775,14 @@ void TaskSampleData(void * pvParameters) {
             if (filter_count < 8) filter_count++;
             v_bat_filt = vbat_filter_sum / (float)filter_count;
             i_bat_filt = ibat_filter_sum / (float)filter_count;
+            // Heal filter if it was already poisoned by a prior spike leak.
+            if ((v_bat_filt < 35.0f || v_bat_filt > 62.0f) && !isnan(last_good_v_bat)) {
+                for (int i = 0; i < 8; i++) vbat_filter_buf[i] = last_good_v_bat;
+                vbat_filter_sum = last_good_v_bat * 8.0f;
+                filter_count = 8;
+                v_bat_filt = last_good_v_bat;
+                v_bat = last_good_v_bat;
+            }
             i_solar_mag = fabs(i_solar);
             i_bat_charge_filt = fabs(i_bat_filt);
             i_bat_charge_abs = fabs(i_bat);
@@ -821,11 +821,15 @@ void TaskSampleData(void * pvParameters) {
             }
             if (!ovp_latched &&
                 (v_bat >= HARD_OVP_TRIP_VOLTAGE || v_bat_filt >= HARD_OVP_TRIP_VOLTAGE)) {
-                // Field: single raw sample 91.61 V with filt still ~53–58 must not latch.
-                // Prefer filt; raw-only needs confirm and filt not wildly below.
-                bool filt_trip = (v_bat_filt >= HARD_OVP_TRIP_VOLTAGE);
+                // Field after STOP: spike leaked → filt=74 / trip 80.52 — not a real pack OVP.
+                // Only latch when readings stay inside a physical 16S window.
+                const bool filt_pack_ok = (v_bat_filt >= 35.0f && v_bat_filt <= 62.0f);
+                const bool raw_pack_ok = (v_bat >= 35.0f && v_bat <= 62.0f);
+                bool filt_trip = filt_pack_ok && (v_bat_filt >= HARD_OVP_TRIP_VOLTAGE);
                 bool raw_trip_plausible =
+                    raw_pack_ok &&
                     (v_bat >= HARD_OVP_TRIP_VOLTAGE) &&
+                    filt_pack_ok &&
                     (v_bat_filt >= (HARD_OVP_TRIP_VOLTAGE - 1.5f)) &&
                     (vbat_step < 8.0f);
                 if (filt_trip || raw_trip_plausible) {
@@ -1118,14 +1122,18 @@ void TaskSampleData(void * pvParameters) {
                         float over = vPeak - TARGET_CV_VOLTAGE;
                         duty_accumulator -= (FWD_STEP_DOWN_CV_OVER + over * 1.5f);
                     } else if (vErr > FWD_CV_HOLD_BAND_V) {
-                        // Below 56 V — fine up-steps; do not climb if already at/over CC current.
+                        // Below target — raise duty, but freeze climb when current has already
+                        // tapered (near full). Field: duty ran to Dmax@I≈0.16A → sense fly-up spikes.
                         if (!freezeDutyUp && i_bat_charge_abs < FWD_TARGET_CC_CURRENT) {
-                            float step = (vErr > FWD_CV_NEAR_BAND_V) ? FWD_STEP_UP_CV
-                                                                     : FWD_STEP_UP_CV_NEAR;
-                            duty_accumulator += step;
+                            if (i_bat_charge_filt <= FWD_CV_TAPER_I_A && vErr < 0.60f) {
+                                // hold duty — do not open toward Dmax into a tapering pack
+                            } else {
+                                float step = (vErr > FWD_CV_NEAR_BAND_V) ? FWD_STEP_UP_CV
+                                                                         : FWD_STEP_UP_CV_NEAR;
+                                duty_accumulator += step;
+                            }
                         } else if (i_bat_charge_abs > (FWD_TARGET_CC_CURRENT + 0.15f) &&
                                    vErr < FWD_CV_NEAR_BAND_V) {
-                            // Near target with I already high — nudge down to settle V, not dump.
                             duty_accumulator -= FWD_STEP_DOWN_CV_FINE;
                         }
                     } else if (vErr < -FWD_CV_HOLD_BAND_V) {

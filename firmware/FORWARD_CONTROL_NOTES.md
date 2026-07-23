@@ -1,6 +1,6 @@
 # โน้ตส่วน STATE_FORWARD
 
-แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v54`
+แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v55`
 
 ## ค่าคงที่สำคัญ
 
@@ -18,6 +18,7 @@ FWD_CC_HOLD_BAND_A    = 0.10;       // hold เมื่อ |I−Iref| ในแ
 FWD_STEP_UP_CV        = 0.40;       // near: 0.20
 FWD_STEP_DOWN_CV      = 0.80;       // fine: 0.35 / over: 1.50
 FWD_CV_HOLD_BAND_V    = 0.05;       // hold เมื่อ |V−55.9| ในแบนด์
+FWD_CV_TAPER_I_A      = 0.40;       // I ต่ำใกล้เป้า → freeze duty-up (กันบินไป Dmax)
 FWD_AC_HOLD_CLIMB_V   = 115.0;      // freeze เพิ่ม duty ถ้าบัสดิป
 ```
 
@@ -36,6 +37,7 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
                     เข้า CV เมื่อ Vbat≥**55.00** (confirm) / force **55.30**
   → FWD_CV        : **รักษาระดับแรงดันคงที่ ~55.9 V** (ขั้นละเอียด)
                     V ต่ำ → +duty; ในแบนด์ → hold; V สูง → −duty (กระแสถดเองเมื่อแบตเต็ม)
+                    ถ้า I≤0.40 A และใกล้เป้า → **freeze duty-up** (ไม่ปีนไป Dmax)
                     ไม่ slam duty ที่ BMS_PREEMPT ~55.95 (hard cap เฉพาะใกล้ BMS open 56.30)
                     FULL เมื่อ V≥55.8 และ I≤0.5A นาน 60s
   → FWD_DONE
@@ -45,11 +47,11 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 
 - AC sag/blip: **freeze duty-up เท่านั้น** (ไม่ dump duty); AC=0 ขณะ Ibat ยังไหล = glitch (ไม่เข้า sag); shutdown ถ้าหายจริง ≥ 15 s
 - Duty open ช้า (Cin); freeze climb ถ้า AC&lt;115 V
-- ADC mutex / bus-glitch / ACblip / **BATspike** (รวมตอน I=0 — กัน HARD OVP ปลอม เช่น 91 V)
+- ADC mutex / bus-glitch / ACblip / **BATspike** / **BATbad!** — เกตเสมอเมื่อมี last-plausible (รวมหลัง STOP)
+- Filter heal ถ้า `Vf` หลุดนอก 35–62 V
 - BMS-OPEN จริง: V สูง + กระแสยุบ + confirm ~120 ms
-- HARD OVP: confirm สั้น ๆ ไม่ latch จาก raw ตัวอย่างเดียว
+- HARD OVP: confirm สั้น ๆ + ต้องอยู่ในช่วง 16S จริง (ไม่ latch จาก filt≈74 / raw≈80)
 - LCD/I2C: ตอนชาร์จแสดง **SOC แบต** (อัปเดตทุก ~2 s, ไม่ปิด PWM / ไม่ reinit บัส)
-- ADC: ปฏิเสธ BAT ที่ไม่สมเหตุสมผลตอนมีกระแส (เช่น 4.4 V / raw≈104 mV → `BATbad!`)
 - Soft over-current / OVP ตามเดิม (CV ใช้ขั้นละเอียด ไม่ตัดแรง)
 - ตอนชาร์จ: **กด STOP ค้าง ~350 ms** เพื่อหยุด (กัน EMI ปลอม) — จะมี log `STOP held`
 
