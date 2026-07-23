@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v56";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v57";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -258,6 +258,8 @@ void calibrateCurrentOffsetsAtBoot();
 int quantizeDutyWithDither(float duty_cmd, float *phase, int max_duty);
 void lcdPrintLineRaw(uint8_t row, const char *text);
 void lcdPrintLineFmt(uint8_t row, const char *fmt, ...);
+void loadLcdBatteryChars();
+void lcdDrawBatteryIconLine(uint8_t row, int socPct, bool charging);
 void i2cBusSoftUnlock();
 void reinitI2CBusAndLCD();
 int estimatePackSocPct(float vPack);
@@ -387,6 +389,93 @@ void lcdPrintLineFmt(uint8_t row, const char *fmt, ...) {
     va_end(args);
     lcdPrintLineRaw(row, tmp);
 }
+// HD44780 CGRAM slots for battery icon while charging.
+enum {
+    LCD_CH_BAT_L = 0,  // left body wall
+    LCD_CH_BAT_E = 1,  // empty segment
+    LCD_CH_BAT_F = 2,  // filled segment
+    LCD_CH_BAT_R = 3,  // right body + terminal nub
+    LCD_CH_BOLT  = 4   // charging indicator
+};
+void loadLcdBatteryChars() {
+    // Horizontal battery outline; fill segments show SOC.
+    uint8_t batL[8] = {
+        0b00000,
+        0b01111,
+        0b01000,
+        0b01000,
+        0b01000,
+        0b01000,
+        0b01111,
+        0b00000
+    };
+    uint8_t batE[8] = {
+        0b00000,
+        0b11111,
+        0b00000,
+        0b00000,
+        0b00000,
+        0b00000,
+        0b11111,
+        0b00000
+    };
+    uint8_t batF[8] = {
+        0b00000,
+        0b11111,
+        0b11111,
+        0b11111,
+        0b11111,
+        0b11111,
+        0b11111,
+        0b00000
+    };
+    uint8_t batR[8] = {
+        0b00000,
+        0b11110,
+        0b00010,
+        0b00011,
+        0b00011,
+        0b00010,
+        0b11110,
+        0b00000
+    };
+    uint8_t bolt[8] = {
+        0b00100,
+        0b00100,
+        0b01110,
+        0b00100,
+        0b01000,
+        0b11100,
+        0b01000,
+        0b10000
+    };
+    lcd.createChar(LCD_CH_BAT_L, batL);
+    lcd.createChar(LCD_CH_BAT_E, batE);
+    lcd.createChar(LCD_CH_BAT_F, batF);
+    lcd.createChar(LCD_CH_BAT_R, batR);
+    lcd.createChar(LCD_CH_BOLT, bolt);
+}
+void lcdDrawBatteryIconLine(uint8_t row, int socPct, bool charging) {
+    // "▮▮▮▮▮ ⚡  78%" style on one 20-col line (custom glyphs + percent).
+    int fill = (socPct * 5 + 50) / 100;  // 0..5 segments
+    if (fill < 0) fill = 0;
+    if (fill > 5) fill = 5;
+    lcd.setCursor(0, row);
+    lcd.write((uint8_t)LCD_CH_BAT_L);
+    for (int i = 0; i < 5; i++) {
+        lcd.write((uint8_t)(i < fill ? LCD_CH_BAT_F : LCD_CH_BAT_E));
+    }
+    lcd.write((uint8_t)LCD_CH_BAT_R);
+    lcd.print(' ');
+    if (charging) lcd.write((uint8_t)LCD_CH_BOLT);
+    else lcd.print(' ');
+    char pct[12];
+    snprintf(pct, sizeof(pct), " %3d%%", socPct);
+    lcd.print(pct);
+    // Pad remainder of the 20-col row so old glyphs do not linger.
+    // Used: L+5seg+R(7) + sp(1) + bolt(1) + " NNN%"(5) = 14
+    for (int c = 14; c < 20; c++) lcd.print(' ');
+}
 void i2cBusSoftUnlock() {
     // Clock out stuck slave (SDA low) before Wire.begin — common after EMI.
     Wire.end();
@@ -409,6 +498,7 @@ void reinitI2CBusAndLCD() {
     lcd.init();
     lcd.backlight();
     lcd.clear();
+    loadLcdBatteryChars();
 }
 // 16S LFP voltage→SOC (display estimate). Charging V is a bit high vs rest.
 int estimatePackSocPct(float vPack) {
@@ -462,12 +552,11 @@ void drawLcdScreen() {
     float vSoc = vbf;
     if (on && (ibf > 0.3f)) vSoc = vbf - (ibf * 0.04f);
     const int soc = estimatePackSocPct(vSoc);
-    char socBar[13];
-    formatSocBar(socBar, sizeof(socBar), soc);
+    const bool chargingNow = on && (fabsf(ibf) > 0.15f);
 
     if (on && full) {
         lcdPrintLineRaw(0, "BATTERY FULL HOLD");
-        lcdPrintLineFmt(1, "SOC:%3d%%  %s", soc, socBar);
+        lcdDrawBatteryIconLine(1, soc, false);
         lcdPrintLineFmt(2, "BAT:%5.1fV I:%4.2fA", vbf, ibf);
         lcdPrintLineRaw(3, "Hold STOP to end");
     } else if (on) {
@@ -486,8 +575,8 @@ void drawLcdScreen() {
         } else {
             phase = "WAIT";
         }
-        lcdPrintLineFmt(0, "%s %s SOC:%3d%%", path, phase, soc);
-        lcdPrintLineFmt(1, "%s", socBar);
+        lcdPrintLineFmt(0, "%s %s  CHARGE", path, phase);
+        lcdDrawBatteryIconLine(1, soc, chargingNow);
         lcdPrintLineFmt(2, "BAT:%5.1fV I:%4.2fA", vbf, fabsf(ibf));
         lcdPrintLineFmt(3, "IN:%5.1fV D:%3d%%",
                         (st == STATE_BOOST) ? vs : vac, dutyPct);
