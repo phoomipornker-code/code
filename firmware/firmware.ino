@@ -377,6 +377,7 @@ static inline void forceSafeShutdown() {
     system_ON = false;
     charge_full_hold = false;
     disablePowerStage();
+    lcd_force_refresh = true;  // restore LCD (standby / OVP) after charge blank
 }
 void lcdPrintLineRaw(uint8_t row, const char *text) {
     char line[21];
