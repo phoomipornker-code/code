@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v57";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v58";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -112,7 +112,7 @@ const float NOISE_V_THRESHOLD = 0.5;
 const float NOISE_I_THRESHOLD = 0.08;
 const float ADC_RAW_MIN_VALID_MV = 80.0;
 const float ADC_GLITCH_CURRENT_GATE_A = 0.35;
-const unsigned long ADC_GLITCH_LOG_MS = 1000;
+const unsigned long ADC_GLITCH_LOG_MS = 5000;  // rate-limit glitch WARN spam
 // Sudden BAT sense jump up (~3.3 V/sample) ⇒ ADS mux/glitch (field: 53.8→91.6 = AC channel).
 const float ADC_BAT_HIGH_SPIKE_MV = 80.0f;
 // 16S pack while charging must stay ~40–57 V ⇒ ADS mV ~955–1362. Field showed
@@ -172,9 +172,9 @@ const float BOOST_VBAT_SPIKE_PRECUT_RAW_ABOVE_FILT_V = 1.0;
 const float HARD_OVP_TRIP_VOLTAGE = 57.80;
 const float HARD_OVP_RELEASE_VOLTAGE = 55.80;
 const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
-const bool ENABLE_DEBUG_VERBOSE = true;
-const unsigned long DEBUG_PRINT_INTERVAL_MS = 1000;
-const unsigned long DEBUG_PRINT_CHARGE_MS = 2000;       // rarer Serial while charging
+const bool ENABLE_DEBUG_STATUS = true;         // one-line status (no RAW dump)
+const unsigned long DEBUG_PRINT_INTERVAL_MS = 5000;  // standby
+const unsigned long DEBUG_PRINT_CHARGE_MS = 3000;    // while charging
 const unsigned long LCD_REFRESH_INTERVAL_MS = 500;      // standby
 const unsigned long LCD_CHARGE_REFRESH_MS = 2000;       // sparse SOC update while charging
 const unsigned long LCD_MUTEX_WAIT_MS = 80;
@@ -263,7 +263,6 @@ void lcdDrawBatteryIconLine(uint8_t row, int socPct, bool charging);
 void i2cBusSoftUnlock();
 void reinitI2CBusAndLCD();
 int estimatePackSocPct(float vPack);
-void formatSocBar(char *out, size_t outLen, int socPct);
 void drawLcdScreen();
 bool tryDrawLcdScreen();
 static inline float boostClampf(float x, float lo, float hi) {
@@ -519,19 +518,6 @@ int estimatePackSocPct(float vPack) {
     }
     return 100;
 }
-void formatSocBar(char *out, size_t outLen, int socPct) {
-    if (outLen < 12) {
-        if (outLen) out[0] = '\0';
-        return;
-    }
-    int fill = (socPct * 10 + 50) / 100;  // 0..10
-    if (fill < 0) fill = 0;
-    if (fill > 10) fill = 10;
-    out[0] = '[';
-    for (int i = 0; i < 10; i++) out[1 + i] = (i < fill) ? '#' : '-';
-    out[11] = ']';
-    out[12] = '\0';
-}
 void drawLcdScreen() {
     // Caller holds i2c_Mutex. Snapshot locals to keep I2C burst short/consistent.
     const bool on = system_ON;
@@ -635,12 +621,9 @@ void calibrateCurrentOffsetsAtBoot() {
 }
 void setup() {
     Serial.begin(115200);
-    Serial.printf("[BOOT] Firmware: %s\n", FW_VERSION_TAG);
-    Serial.printf("[BOOT] CFG BOOST_CC=%.2fA FWD_CC=%.2fA CV=%.2fV FWD_CVentry=%.2fV DmaxF=%d fBoost=%dHz fFwd=%dHz\n",
-                  TARGET_CC_CURRENT, FWD_TARGET_CC_CURRENT, TARGET_CV_VOLTAGE, FWD_CV_ENTRY_VOLTAGE,
-                  MAX_DUTY_FORWARD, PWM_FREQ_BOOST, PWM_FREQ_FORWARD);
-    Serial.println("[BOOT] UI: STOP toggles BOOST/FORWARD in STANDBY; hold STOP ~350ms to end charge.");
-    Serial.println("[BOOT] Forward AC sense: diode-bridge DC, AC110V (MIN_AC post-bridge).");
+    Serial.printf("[BOOT] %s | B_CC=%.0fA F_CC=%.0fA CV=%.2fV DmaxF=%d\n",
+                  FW_VERSION_TAG, TARGET_CC_CURRENT, FWD_TARGET_CC_CURRENT,
+                  TARGET_CV_VOLTAGE, MAX_DUTY_FORWARD);
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(40);
@@ -1568,67 +1551,40 @@ void TaskSampleData(void * pvParameters) {
             system_ON && (currentState == STATE_FORWARD || currentState == STATE_BOOST);
         const unsigned long dbgPeriod =
             chargingNow ? DEBUG_PRINT_CHARGE_MS : DEBUG_PRINT_INTERVAL_MS;
-        if (ENABLE_DEBUG_VERBOSE && (now - last_debug_time >= dbgPeriod)) {
+        if (ENABLE_DEBUG_STATUS && (now - last_debug_time >= dbgPeriod)) {
             last_debug_time = now;
-            const char* sel_label =
-                (selectedChargeMode == USER_MODE_BOOST) ? "BOOST" : "FORWARD";
             const char* run_label = "STANDBY";
             if (charge_full_hold) {
-                run_label = "FULL_HOLD";
+                run_label = "FULL";
             } else if (ovp_latched) {
-                run_label = "OVP_LOCK";
+                run_label = "OVP";
             } else if (!system_ON) {
                 run_label = "STANDBY";
             } else if (currentState == STATE_BOOST) {
-                if (boostNewMode == BOOST_NEW_SOFTSTART) run_label = "BOOST_SOFT";
-                else if (boostNewMode == BOOST_NEW_CC_MPPT) run_label = "BOOST_CCMP";
-                else if (boostNewMode == BOOST_NEW_CV) run_label = "BOOST_CV";
-                else run_label = "BOOST_DONE";
+                if (boostNewMode == BOOST_NEW_SOFTSTART) run_label = "B_SOFT";
+                else if (boostNewMode == BOOST_NEW_CC_MPPT) run_label = "B_CC";
+                else if (boostNewMode == BOOST_NEW_CV) run_label = "B_CV";
+                else run_label = "B_DONE";
             } else if (currentState == STATE_FORWARD) {
-                if (forwardMode == FWD_SOFTSTART) run_label = "FWD_SOFT";
-                else if (forwardMode == FWD_CC) run_label = "FWD_CC";
-                else if (forwardMode == FWD_CV) run_label = "FWD_CV";
-                else run_label = "FWD_DONE";
+                if (forwardMode == FWD_SOFTSTART) run_label = "F_SOFT";
+                else if (forwardMode == FWD_CC) run_label = "F_CC";
+                else if (forwardMode == FWD_CV) run_label = "F_CV";
+                else run_label = "F_DONE";
             } else if (system_ON) {
-                run_label = "STARTING";  // ON but still STATE_OFF, entering selected path
+                run_label = "START";
             }
-            Serial.println("=========================================================================================");
-            Serial.printf("[DEBUG] System: %s | Mode: %s | Run: %s | Duty: %d%% (raw=%d)\n",
-                          (system_ON ? "ON " : "OFF"), sel_label, run_label, active_duty_percent, raw_duty);
-            // All calibrated sensors
-            Serial.printf("  [PV ] V:%6.2fV  I:%6.2fA  |P|:%6.1fW  (mag I:%5.2fA)\n",
-                          v_solar, i_solar, (v_solar * i_solar_mag), i_solar_mag);
-            Serial.printf("  [AC ] V:%6.2fV  I:%6.2fA  |P|:%6.1fW  (bridge DC)\n",
-                          v_ac_in, i_ac_in, fabsf(v_ac_in * i_ac_in));
-            Serial.printf("  [BAT] V:%6.2fV  I:%6.2fA  Vf:%6.2fV  If:%6.2fA  Iabs:%5.2fA\n",
-                          v_bat, i_bat, v_bat_filt, i_bat_filt, i_bat_charge_abs);
-            // ADS raw (mV) — volt ADS 0x48 / curr ADS 0x49
-            Serial.printf("  [RAW V mV] PV(ch0):%7.1f  AC(ch2):%7.1f  BAT(ch1):%7.1f\n",
-                          raw_mv_v0, raw_mv_v1, raw_mv_v2);
-            Serial.printf("  [RAW I mV] PV(ch0):%7.1f  AC(ch1):%7.1f  BAT(ch2):%7.1f\n",
-                          raw_mv_i0, raw_mv_i1, raw_mv_i2);
-            Serial.printf("  [I ZERO]   PV:%7.1f  AC:%7.1f  BAT:%7.1f  (boot offset mV)\n",
-                          current_offset_i0, current_offset_i1, current_offset_i2);
-            if (selectedChargeMode == USER_MODE_BOOST || currentState == STATE_BOOST) {
-                Serial.printf("  [BOOST] Vref:%.2fV Iref_mppt:%.2fA Iref_cv:%.2fA Pavail:%.1fW\n",
-                              boostNewPvRef, boostNewIrefMppt, boostNewIrefCvCmd, boostNewPAvailFilt);
+            // Compact one-liner — no RAW mV / offset spam.
+            if (system_ON || charge_full_hold || ovp_latched) {
+                Serial.printf("[STAT] %s D=%d%% BAT %.2fV/%.2fV I=%.2fA IN=%.1fV%s\n",
+                              run_label, active_duty_percent,
+                              v_bat, v_bat_filt, i_bat_charge_filt,
+                              (currentState == STATE_BOOST) ? v_solar : v_ac_in,
+                              ac_is_collapsing ? " AC_SAG" : "");
+            } else {
+                Serial.printf("[STAT] STANDBY %s BAT %.2fV PV %.1f AC %.1f\n",
+                              (selectedChargeMode == USER_MODE_BOOST) ? "BOOST" : "FORW",
+                              v_bat_filt, v_solar, v_ac_in);
             }
-            if (selectedChargeMode == USER_MODE_FORWARD || currentState == STATE_FORWARD) {
-                if (forwardMode == FWD_CV) {
-                    Serial.printf("  [FWD ] phase=CV hold Vcv:%.2fV Vf:%.2fV Ibat:%.2fA duty_acc:%.1f Dmax=%d (constV)%s\n",
-                                  TARGET_CV_VOLTAGE, v_bat_filt, i_bat_charge_filt,
-                                  duty_accumulator, MAX_DUTY_FORWARD,
-                                  ac_is_collapsing ? " AC_SAG!" : "");
-                } else {
-                    Serial.printf("  [FWD ] phase=%s step Iref_cc:%.2fA Ibat:%.2fA duty_acc:%.1f Dmax=%d (CC=%.0fA)%s\n",
-                                  (forwardMode == FWD_SOFTSTART) ? "SOFT" :
-                                  (forwardMode == FWD_CC) ? "CC" : "DONE",
-                                  fwdIrefCcCmd, i_bat_charge_filt, duty_accumulator, MAX_DUTY_FORWARD,
-                                  FWD_TARGET_CC_CURRENT,
-                                  ac_is_collapsing ? " AC_SAG!" : "");
-                }
-            }
-            Serial.println("=========================================================================================");
         }
         vTaskDelay(20 / portTICK_PERIOD_MS);
     }
