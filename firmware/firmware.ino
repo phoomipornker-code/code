@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v50";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v51";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -169,13 +169,11 @@ const float HARD_OVP_RELEASE_VOLTAGE = 55.80;
 const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 const bool ENABLE_DEBUG_VERBOSE = true;
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 1000;
-const unsigned long LCD_REFRESH_INTERVAL_MS = 500;       // standby / softstart
-const unsigned long LCD_CHARGE_REFRESH_MS = 2000;        // sparse redraw while PWM loud
-const unsigned long LCD_BACKLIGHT_KEEPALIVE_MS = 1000;   // EMI often clears PCF8574 backlight
-const int LCD_CHARGE_QUIET_DUTY = 50;                    // above this → quiet-window LCD I2C
+const unsigned long LCD_REFRESH_INTERVAL_MS = 500;  // standby / low-duty only
+// Above this duty: freeze LCD I2C (no PWM mute — that caused control twitch in v50).
+const int LCD_FREEZE_DUTY = 40;
 const unsigned long LCD_MUTEX_WAIT_MS = 80;
 const uint32_t I2C_CLOCK_HZ = 100000;
-const uint32_t I2C_CLOCK_LCD_HZ = 50000;                 // slower during charge LCD writes
 const int I2C_SDA_PIN = 21;
 const int I2C_SCL_PIN = 22;
 // =========================================================================
@@ -246,7 +244,6 @@ float last_vbat_sample = 0.0;
 float last_vbat_filt_sample = 0.0;
 volatile bool lcd_force_refresh = true;
 volatile unsigned long last_lcd_draw_ms = 0;
-volatile unsigned long last_lcd_backlight_ms = 0;
 volatile bool lcd_show_no_power = false;
 volatile bool lcd_show_ovp_alert = false;
 volatile unsigned long lcd_alert_until_ms = 0;
@@ -259,11 +256,8 @@ void lcdPrintLineFmt(uint8_t row, const char *fmt, ...);
 void i2cBusSoftUnlock();
 void reinitI2CBusAndLCD();
 void drawLcdScreen();
-static inline bool lcdChargeNoisy(void);
-static inline void lcdPwmQuietBegin(int *savedFwd, int *savedBoost);
-static inline void lcdPwmQuietEnd(int savedFwd, int savedBoost);
-bool tryDrawLcdScreen(bool fullDraw);
-bool tryLcdBacklightKeepalive();
+static inline bool lcdShouldFreeze(void);
+bool tryDrawLcdScreen();
 static inline float boostClampf(float x, float lo, float hi) {
     if (x < lo) return lo;
     if (x > hi) return hi;
@@ -463,54 +457,24 @@ void drawLcdScreen() {
         lcdPrintLineFmt(2, "BATT:%5.1fV", vb);
         lcdPrintLineRaw(3, "STOP=mode START=go");
     }
-    lcd.backlight();  // always re-assert — EMI often clears backpack backlight bit
+    lcd.backlight();  // re-assert when we do write (standby / low duty)
 }
-static inline bool lcdChargeNoisy(void) {
+static inline bool lcdShouldFreeze(void) {
+    // High PWM + LCD I2C = EMI blanking. Do NOT mute PWM for LCD (v50 twitch).
     return system_ON &&
            (currentState == STATE_FORWARD || currentState == STATE_BOOST) &&
-           (raw_duty > LCD_CHARGE_QUIET_DUTY);
+           (raw_duty > LCD_FREEZE_DUTY);
 }
-static inline void lcdPwmQuietBegin(int *savedFwd, int *savedBoost) {
-    *savedFwd = 0;
-    *savedBoost = 0;
-    if (!lcdChargeNoisy()) return;
-    if (currentState == STATE_FORWARD) {
-        *savedFwd = raw_duty;
-        ledcWrite(PWM_FORWARD_PIN, 0);
-    } else if (currentState == STATE_BOOST) {
-        *savedBoost = raw_duty;
-        ledcWrite(PWM_BOOST_PIN, 0);
+bool tryDrawLcdScreen() {
+    if (lcdShouldFreeze()) {
+        return false;  // leave last frame; never glitch PWM for display
     }
-    delayMicroseconds(800);  // let switching EMI settle before LCD I2C
-}
-static inline void lcdPwmQuietEnd(int savedFwd, int savedBoost) {
-    if (savedFwd > 0) ledcWrite(PWM_FORWARD_PIN, savedFwd);
-    if (savedBoost > 0) ledcWrite(PWM_BOOST_PIN, savedBoost);
-}
-bool tryDrawLcdScreen(bool fullDraw) {
     if (!xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(LCD_MUTEX_WAIT_MS))) {
         return false;
     }
-    int savedFwd = 0, savedBoost = 0;
-    const bool quiet = lcdChargeNoisy();
-    if (quiet) {
-        Wire.setClock(I2C_CLOCK_LCD_HZ);
-        lcdPwmQuietBegin(&savedFwd, &savedBoost);
-    }
-    if (fullDraw) {
-        drawLcdScreen();
-    } else {
-        lcd.backlight();
-    }
-    if (quiet) {
-        lcdPwmQuietEnd(savedFwd, savedBoost);
-        Wire.setClock(I2C_CLOCK_HZ);
-    }
+    drawLcdScreen();
     xSemaphoreGive(i2c_Mutex);
     return true;
-}
-bool tryLcdBacklightKeepalive() {
-    return tryDrawLcdScreen(false);
 }
 void calibrateCurrentOffsetsAtBoot() {
     const int CAL_SAMPLES = 80;
@@ -1402,21 +1366,17 @@ void TaskSampleData(void * pvParameters) {
         }
         last_millis = now;
         active_duty_percent = round(((float)raw_duty * 100.0) / 1023.0);
-        // LCD: standby = normal refresh. While PWM is loud, EMI blanks I2C backlight —
-        // use sparse full redraws in a brief PWM-off quiet window + backlight keepalive.
-        const bool noisy = lcdChargeNoisy();
-        const unsigned long lcdPeriod =
-            noisy ? LCD_CHARGE_REFRESH_MS : LCD_REFRESH_INTERVAL_MS;
-        if (lcd_force_refresh || (now - last_lcd_draw_ms >= lcdPeriod)) {
-            if (tryDrawLcdScreen(true)) {
-                last_lcd_draw_ms = now;
-                last_lcd_backlight_ms = now;
-                lcd_force_refresh = false;
+        // LCD refresh only when PWM is quiet enough. Never gate PWM for LCD (v50 twitch).
+        if (!lcdShouldFreeze()) {
+            if (lcd_force_refresh || (now - last_lcd_draw_ms >= LCD_REFRESH_INTERVAL_MS)) {
+                if (tryDrawLcdScreen()) {
+                    last_lcd_draw_ms = now;
+                    lcd_force_refresh = false;
+                }
             }
-        } else if (noisy && (now - last_lcd_backlight_ms >= LCD_BACKLIGHT_KEEPALIVE_MS)) {
-            if (tryLcdBacklightKeepalive()) {
-                last_lcd_backlight_ms = now;
-            }
+        } else {
+            // Keep force flag so we redraw as soon as duty drops / charge ends.
+            lcd_force_refresh = true;
         }
         if (ENABLE_DEBUG_VERBOSE && (now - last_debug_time >= DEBUG_PRINT_INTERVAL_MS)) {
             last_debug_time = now;
