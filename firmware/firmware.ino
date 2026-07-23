@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v47";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v48";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -168,8 +168,9 @@ const float HARD_OVP_TRIP_VOLTAGE = 57.80;
 const float HARD_OVP_RELEASE_VOLTAGE = 55.80;
 const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 const bool ENABLE_DEBUG_VERBOSE = true;
-const unsigned long DEBUG_PRINT_INTERVAL_MS = 500;
-const unsigned long LCD_REFRESH_INTERVAL_MS = 180;
+const unsigned long DEBUG_PRINT_INTERVAL_MS = 1000;  // was 500 — less Serial starvation of LCD
+const unsigned long LCD_REFRESH_INTERVAL_MS = 400;   // was 180 — fewer I2C bursts while charging
+const unsigned long LCD_MUTEX_WAIT_MS = 120;
 const uint32_t I2C_CLOCK_HZ = 100000;
 // =========================================================================
 // Runtime variables
@@ -326,6 +327,7 @@ int quantizeDutyWithDither(float duty_cmd, float *phase, int max_duty) {
     return constrain(base, 0, max_duty);
 }
 static inline int16_t readADCStable(Adafruit_ADS1115 &adc, uint8_t channel, bool discard_first = false) {
+    // Prefer no discard in the hot loop — each conversion ~1.2 ms @ 860 SPS and holds I2C.
     if (discard_first) {
         (void)adc.readADC_SingleEnded(channel);
     }
@@ -463,15 +465,22 @@ void TaskSampleData(void * pvParameters) {
             continue;
         }
         bool sample_ok = false;
-        // Hold I2C mutex only for ADS reads — not through Serial/BMS (false ADC timeouts).
-        if (xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(200))) {
-            raw_mv_v0 = readADCStable(ads_volt, 0, true) * 0.1875;
-            raw_mv_v1 = readADCStable(ads_volt, 2, true) * 0.1875;
-            raw_mv_v2 = readADCStable(ads_volt, 1, true) * 0.1875;
-            raw_mv_i0 = readADCStable(ads_curr, 0) * 0.1875;
-            raw_mv_i1 = readADCStable(ads_curr, 1) * 0.1875;
-            raw_mv_i2 = readADCStable(ads_curr, 2) * 0.1875;
+        // Hold I2C mutex only for short ADS bursts; release between chips so LCD can run.
+        // (Long single hold + EMI reinit was freezing the display while Forward charged.)
+        if (xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(80))) {
+            raw_mv_v0 = readADCStable(ads_volt, 0) * 0.1875;
+            raw_mv_v1 = readADCStable(ads_volt, 2) * 0.1875;
+            raw_mv_v2 = readADCStable(ads_volt, 1) * 0.1875;
             xSemaphoreGive(i2c_Mutex);
+            if (xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(80))) {
+                raw_mv_i0 = readADCStable(ads_curr, 0) * 0.1875;
+                raw_mv_i1 = readADCStable(ads_curr, 1) * 0.1875;
+                raw_mv_i2 = readADCStable(ads_curr, 2) * 0.1875;
+                xSemaphoreGive(i2c_Mutex);
+                sample_ok = true;
+            }
+        }
+        if (sample_ok) {
 
             bool power_stage_active = (raw_duty > 0);
             // FORWARD leaves PV sense open/zero — not an ADC glitch.
@@ -714,7 +723,6 @@ void TaskSampleData(void * pvParameters) {
             last_vbat_sample = v_bat;
             last_vbat_filt_sample = v_bat_filt;
             last_adc_sample_ms = now;
-            sample_ok = true;
         }
         if (!sample_ok && system_ON) {
             unsigned long stale_ms = now - last_adc_sample_ms;
@@ -1417,8 +1425,9 @@ void TaskLCDLoop(void * pvParameters) {
             }
         }
         last_start_state = current_start; last_stop_state = current_stop;
+        const bool charge_active = system_ON && (currentState != STATE_OFF) && (raw_duty > 0);
         if (system_ON != last_system_state) {
-            if (xSemaphoreTake(i2c_Mutex, 50)) {
+            if (xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(LCD_MUTEX_WAIT_MS))) {
                 lcd.clear();
                 xSemaphoreGive(i2c_Mutex);
                 lcd_mutex_fail_count = 0;
@@ -1432,7 +1441,7 @@ void TaskLCDLoop(void * pvParameters) {
         }
         if (show_no_power_alert && (now - alert_millis > 3000)) {
             show_no_power_alert = false;
-            if (xSemaphoreTake(i2c_Mutex, 50)) {
+            if (xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(LCD_MUTEX_WAIT_MS))) {
                 lcd.clear();
                 xSemaphoreGive(i2c_Mutex);
                 lcd_mutex_fail_count = 0;
@@ -1442,7 +1451,7 @@ void TaskLCDLoop(void * pvParameters) {
         }
         if (show_ovp_alert && (now - alert_millis > 3000)) {
             show_ovp_alert = false;
-            if (xSemaphoreTake(i2c_Mutex, 50)) {
+            if (xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(LCD_MUTEX_WAIT_MS))) {
                 lcd.clear();
                 xSemaphoreGive(i2c_Mutex);
                 lcd_mutex_fail_count = 0;
@@ -1451,7 +1460,7 @@ void TaskLCDLoop(void * pvParameters) {
             }
         }
         if (now - last_lcd_refresh >= LCD_REFRESH_INTERVAL_MS) {
-            if (xSemaphoreTake(i2c_Mutex, 50)) {
+            if (xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(LCD_MUTEX_WAIT_MS))) {
                 if (system_ON && charge_full_hold) {
                     lcdPrintLineRaw(0, "BATTERY FULL HOLD");
                     lcdPrintLineFmt(1, "BAT:%5.1fV I:%4.2fA", v_bat_filt, i_bat_filt);
@@ -1491,15 +1500,20 @@ void TaskLCDLoop(void * pvParameters) {
                 lcd_mutex_fail_count++;
             }
         }
-        if (lcd_mutex_fail_count >= 12 && (now - last_lcd_recover > 5000)) {
+        // Never Wire.end()/lcd.init while power stage is live — EMI + reinit freezes display
+        // and can stall ADS. Recover only in standby / after stop.
+        if (!charge_active &&
+            lcd_mutex_fail_count >= 12 &&
+            (now - last_lcd_recover > 5000)) {
             last_lcd_recover = now;
-            if (xSemaphoreTake(i2c_Mutex, 50)) {
+            if (xSemaphoreTake(i2c_Mutex, pdMS_TO_TICKS(200))) {
                 reinitI2CBusAndLCD();
                 xSemaphoreGive(i2c_Mutex);
                 lcd_mutex_fail_count = 0;
                 last_lcd_refresh = 0;
+                Serial.println("[WARN] LCD I2C recovered (standby reinit).");
             }
         }
-        vTaskDelay(100 / portTICK_PERIOD_MS);
+        vTaskDelay(50 / portTICK_PERIOD_MS);
     }
 }

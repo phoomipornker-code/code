@@ -1,6 +1,6 @@
 # โน้ตส่วน STATE_FORWARD
 
-แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v47`
+แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v48`
 
 ## ค่าคงที่สำคัญ
 
