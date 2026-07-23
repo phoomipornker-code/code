@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v46";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v47";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -112,10 +112,12 @@ const float NOISE_I_THRESHOLD = 0.08;
 const float ADC_RAW_MIN_VALID_MV = 80.0;
 const float ADC_GLITCH_CURRENT_GATE_A = 0.35;
 const unsigned long ADC_GLITCH_LOG_MS = 1000;
-// Sudden BAT sense jump up (~3.3 V) while still charging ⇒ ADS glitch, not BMS open.
+// Sudden BAT sense jump up (~3.3 V/sample) ⇒ ADS mux/glitch (field: 53.8→91.6 = AC channel).
+// Do NOT require charge current — I=0 is when the old filter missed and HARD OVP false-tripped.
 const float ADC_BAT_HIGH_SPIKE_MV = 80.0f;
 const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 const unsigned long BMS_OPEN_CONFIRM_MS = 120;  // ignore single-sample V spikes
+const unsigned long HARD_OVP_CONFIRM_MS = 80;   // ignore single-sample HARD OVP
 // While charging, require sustained STOP to end (EMI on GPIO can false-edge).
 const unsigned long STOP_HOLD_END_MS = 350;
 // =========================================================================
@@ -448,6 +450,7 @@ void TaskSampleData(void * pvParameters) {
     unsigned long ac_brief_low_since_ms = 0;
     unsigned long last_adc_glitch_log = 0;
     unsigned long bms_open_suspect_ms = 0;
+    unsigned long hard_ovp_suspect_ms = 0;
     for(;;) {
         unsigned long now = millis();
         if (!sensor_init_ok) {
@@ -512,14 +515,14 @@ void TaskSampleData(void * pvParameters) {
                                       (power_stage_active ||
                                        i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
                                        multi_ch_bus_glitch);
-            // Field: BAT raw jumped ~1338→1520+ mV → Vbat≈63 V / step≈7.8 V while I≈1.1 A
-            // still flowing → false BMS-OPEN trip. Hold last valid while charge current present.
+            // Field: BAT read jumped to ~91.6 V (= AC bridge mV * BAT scale) while Vfilt~53.8
+            // and I=0 → HARD OVP false trip. Hold last valid on any sudden up-spike.
             bool bat_raw_high_spike =
-                power_stage_active &&
                 !isnan(last_valid_raw_mv_v2) &&
                 (last_valid_raw_mv_v2 >= ADC_RAW_MIN_VALID_MV) &&
                 (raw_mv_v2 > (last_valid_raw_mv_v2 + ADC_BAT_HIGH_SPIKE_MV)) &&
-                (i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
+                (power_stage_active || system_ON ||
+                 i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A ||
                  i_bat_charge_abs > ADC_GLITCH_CURRENT_GATE_A);
             bool bat_raw_glitch = bat_raw_low_glitch || bat_raw_high_spike;
             if (solar_raw_glitch && !isnan(last_valid_raw_mv_v0)) {
@@ -612,12 +615,29 @@ void TaskSampleData(void * pvParameters) {
             }
             if (!ovp_latched &&
                 (v_bat >= HARD_OVP_TRIP_VOLTAGE || v_bat_filt >= HARD_OVP_TRIP_VOLTAGE)) {
-                ovp_latched = true;
-                ovp_trip_voltage = max(v_bat, v_bat_filt);
-                ovp_trip_ms = now;
-                forceSafeShutdown();
-                Serial.printf("[CRITICAL] HARD OVP TRIP at %.2fV (trip=%.2fV). Output disabled.\n",
-                              ovp_trip_voltage, HARD_OVP_TRIP_VOLTAGE);
+                // Field: single raw sample 91.61 V with filt still ~53–58 must not latch.
+                // Prefer filt; raw-only needs confirm and filt not wildly below.
+                bool filt_trip = (v_bat_filt >= HARD_OVP_TRIP_VOLTAGE);
+                bool raw_trip_plausible =
+                    (v_bat >= HARD_OVP_TRIP_VOLTAGE) &&
+                    (v_bat_filt >= (HARD_OVP_TRIP_VOLTAGE - 1.5f)) &&
+                    (vbat_step < 8.0f);
+                if (filt_trip || raw_trip_plausible) {
+                    if (hard_ovp_suspect_ms == 0) hard_ovp_suspect_ms = now;
+                    if (now - hard_ovp_suspect_ms >= HARD_OVP_CONFIRM_MS) {
+                        ovp_latched = true;
+                        ovp_trip_voltage = max(v_bat, v_bat_filt);
+                        ovp_trip_ms = now;
+                        forceSafeShutdown();
+                        hard_ovp_suspect_ms = 0;
+                        Serial.printf("[CRITICAL] HARD OVP TRIP at %.2fV (filt=%.2f trip=%.2fV). Output disabled.\n",
+                                      ovp_trip_voltage, v_bat_filt, HARD_OVP_TRIP_VOLTAGE);
+                    }
+                } else {
+                    hard_ovp_suspect_ms = 0;
+                }
+            } else {
+                hard_ovp_suspect_ms = 0;
             }
             // Near CV runaway soft-cut — proven Boost logic, also applied to Forward.
             if (!ovp_latched &&

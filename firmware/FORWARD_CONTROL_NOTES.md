@@ -1,6 +1,6 @@
 # โน้ตส่วน STATE_FORWARD
 
-แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v46`
+แท็กเฟิร์มแวร์: `cv58-boost-v14-forward-v47`
 
 ## ค่าคงที่สำคัญ
 
@@ -45,8 +45,9 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 
 - AC sag/blip: **freeze duty-up เท่านั้น** (ไม่ dump duty); AC=0 ขณะ Ibat ยังไหล = glitch (ไม่เข้า sag); shutdown ถ้าหายจริง ≥ 15 s
 - Duty open ช้า (Cin); freeze climb ถ้า AC&lt;115 V
-- ADC mutex / bus-glitch / ACblip / **BATspike** (V พุ่งขณะ I ยังไหล → ไม่ตัด BMS-OPEN)
+- ADC mutex / bus-glitch / ACblip / **BATspike** (รวมตอน I=0 — กัน HARD OVP ปลอม เช่น 91 V)
 - BMS-OPEN จริง: V สูง + กระแสยุบ + confirm ~120 ms
+- HARD OVP: confirm สั้น ๆ ไม่ latch จาก raw ตัวอย่างเดียว
 - Soft over-current / OVP ตามเดิม (CV ใช้ขั้นละเอียด ไม่ตัดแรง)
 - ตอนชาร์จ: **กด STOP ค้าง ~350 ms** เพื่อหยุด (กัน EMI ปลอม) — จะมี log `STOP held`
 
