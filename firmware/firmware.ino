@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v66";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v67";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
@@ -625,6 +625,7 @@ void TaskSampleData(void * pvParameters) {
     bool ac_is_collapsing = false;
     unsigned long last_debug_time = 0;
     unsigned long last_csv_time = 0;
+    int last_stat_sel = (int)USER_MODE_BOOST;  // match default — no STANDBY spam until toggle
     unsigned long last_sensor_error_log = 0;
     unsigned long full_condition_start_ms = 0;
     unsigned long fwd_full_condition_start_ms = 0;
@@ -1621,8 +1622,10 @@ void TaskSampleData(void * pvParameters) {
                 ? v_solar
                 : v_ac_in;
 
-        // Excel TSV — spaced Y bands so each series is visually separate on one chart.
-        if (ENABLE_DEBUG_CSV && (now - last_csv_time >= DEBUG_CSV_INTERVAL_MS)) {
+        // Excel TSV — only while active (not idle STANDBY spam).
+        const bool csvActive = system_ON || charge_full_hold || ovp_latched;
+        if (ENABLE_DEBUG_CSV && csvActive &&
+            (now - last_csv_time >= DEBUG_CSV_INTERVAL_MS)) {
             last_csv_time = now;
             const float iplot = (i_bat_charge_filt * CSV_IOUT_SCALE) + CSV_IOUT_OFFSET;
             const float dplot = (float)active_duty_percent + CSV_DUTY_OFFSET;
@@ -1631,15 +1634,21 @@ void TaskSampleData(void * pvParameters) {
                           now / 1000.0f, v_bat_filt, iplot, dplot, vplot);
         }
 
-        if (ENABLE_DEBUG_STATUS && (now - last_debug_time >= dbgPeriod)) {
-            last_debug_time = now;
+        // [STAT]: periodic while charging/FULL/OVP; STANDBY only on mode change.
+        if (ENABLE_DEBUG_STATUS) {
+            const int sel_now = (int)selectedChargeMode;
+            const bool mode_changed = (sel_now != last_stat_sel);
             if (system_ON || charge_full_hold || ovp_latched) {
-                Serial.printf("[STAT] %s D=%d%% BAT %.2fV/%.2fV I=%.2fA IN=%.1fV%s\n",
-                              run_label, active_duty_percent,
-                              v_bat, v_bat_filt, i_bat_charge_filt,
-                              vin_now,
-                              ac_is_collapsing ? " AC_SAG" : "");
-            } else {
+                if (now - last_debug_time >= dbgPeriod) {
+                    last_debug_time = now;
+                    Serial.printf("[STAT] %s D=%d%% BAT %.2fV/%.2fV I=%.2fA IN=%.1fV%s\n",
+                                  run_label, active_duty_percent,
+                                  v_bat, v_bat_filt, i_bat_charge_filt,
+                                  vin_now,
+                                  ac_is_collapsing ? " AC_SAG" : "");
+                }
+            } else if (mode_changed) {
+                last_stat_sel = sel_now;
                 Serial.printf("[STAT] STANDBY %s BAT %.2fV PV %.1f AC %.1f\n",
                               sel_label, v_bat_filt, v_solar, v_ac_in);
             }
