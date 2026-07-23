@@ -48,7 +48,7 @@ enum ForwardMode { FWD_SOFTSTART, FWD_CC, FWD_CV, FWD_DONE };
 - ADC mutex / bus-glitch / ACblip / **BATspike** (รวมตอน I=0 — กัน HARD OVP ปลอม เช่น 91 V)
 - BMS-OPEN จริง: V สูง + กระแสยุบ + confirm ~120 ms
 - HARD OVP: confirm สั้น ๆ ไม่ latch จาก raw ตัวอย่างเดียว
-- LCD/I2C: วาดจาก ADC task; **ไม่ปิด PWM เพื่อเขียนจอ**; duty สูง → แช่เฟรมจอ (กันกระตุกควบคุม)
+- LCD/I2C: **ไม่แตะจอ/ไม่ reinit บัส ทั้งตอน system_ON** (กันตัด PWM); Forward ไม่ใช้ duty dither
 - Soft over-current / OVP ตามเดิม (CV ใช้ขั้นละเอียด ไม่ตัดแรง)
 - ตอนชาร์จ: **กด STOP ค้าง ~350 ms** เพื่อหยุด (กัน EMI ปลอม) — จะมี log `STOP held`
 
