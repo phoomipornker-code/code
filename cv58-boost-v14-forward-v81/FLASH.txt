@@ -1,0 +1,8 @@
+ZIP ทั้ง repo:
+https://github.com/phoomipornker-code/code/archive/refs/heads/cursor/fix-forward-keep-boost-1b21.zip
+
+แตกแล้วเปิดโฟลเดอร์:
+  cv58-boost-v14-forward-v81/cv58-boost-v14-forward-v81.ino
+
+Arduino IDE → Upload
+ต้องเห็น: [BOOT] cv58-boost-v14-forward-v81 | …

@@ -1,7 +1,9 @@
 # เฟิร์มแวร์ ESP32 — ชาร์จเจอร์ Boost PV + Forward AC
 
 ไฟล์หลัก: [`firmware.ino`](firmware.ino)  
-แท็ก: `cv58-boost-v14-forward-v81` (= ควบคุม v75 · ตาราง Serial ทุก 20 วินาที)
+แท็ก: `cv58-boost-v14-forward-v81`  
+
+> **โฟลเดอร์ sketch แยก (แนะนำ):** [`../cv58-boost-v14-forward-v81/`](../cv58-boost-v14-forward-v81/) — เปิด `.ino` ในโฟลเดอร์นั้นได้เลย (= ควบคุม v75 · ตาราง Serial ทุก 20 วินาที)
 
 > Branch: `cursor/fix-forward-keep-boost-1b21`  
 > ZIP: https://github.com/phoomipornker-code/code/archive/refs/heads/cursor/fix-forward-keep-boost-1b21.zip  
