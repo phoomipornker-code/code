@@ -1562,7 +1562,7 @@ void TaskSampleData(void * pvParameters) {
                     // CV-only Ppv cap — stops I/V hunting when sun can't support iReq.
                     // (CC intentionally does NOT use this; it caused low-current stuck.)
                     if (boostNewPAvailFilt > 5.0f) {
-                        float vBatUse = max(v_bat_filt, 40.0f);
+                        float vBatUse = max((float)v_bat_filt, 40.0f);
                         float iPvCap = (boostNewPAvailFilt * BOOST_EFF_EST * BOOST_CV_PAVAIL_MARGIN) / vBatUse;
                         iPvCap = boostClampf(iPvCap, 0.15f, BOOST_VOLT_OUT_MAX);
                         if (iReq > iPvCap) iReq = iPvCap;
