@@ -1,0 +1,2 @@
+Flash folder: cv58-boost-v14-forward-v83/
+Boot: [BOOT] cv58-boost-v14-forward-v83
