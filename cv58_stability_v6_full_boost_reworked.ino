@@ -244,6 +244,10 @@ static inline float boostClampf(float x, float lo, float hi) {
     return x;
 }
 
+// Avoid Arduino/std::max(volatile float&, float) deduction failures on ESP32.
+static inline float boostMaxf(float a, float b) { return (a > b) ? a : b; }
+static inline float boostMinf(float a, float b) { return (a < b) ? a : b; }
+
 static inline float boostApplySlew(float target, float current, float upStep, float downStep) {
     float d = target - current;
     if (d > upStep) return current + upStep;
@@ -554,7 +558,7 @@ void TaskSampleData(void * pvParameters) {
                  (v_bat > (v_bat_filt + 1.8f)) ||
                  (v_bat_filt >= BMS_OPEN_DETECT_V && i_bat_charge_filt <= BMS_OPEN_CURRENT_MAX_A))) {
                 ovp_latched = true;
-                ovp_trip_voltage = max(v_bat, v_bat_filt);
+                ovp_trip_voltage = boostMaxf((float)v_bat, (float)v_bat_filt);
                 ovp_trip_ms = now;
                 forceSafeShutdown();
                 charge_full_hold = true;
@@ -565,7 +569,7 @@ void TaskSampleData(void * pvParameters) {
             if (!ovp_latched &&
                 (v_bat >= HARD_OVP_TRIP_VOLTAGE || v_bat_filt >= HARD_OVP_TRIP_VOLTAGE)) {
                 ovp_latched = true;
-                ovp_trip_voltage = max(v_bat, v_bat_filt);
+                ovp_trip_voltage = boostMaxf((float)v_bat, (float)v_bat_filt);
                 ovp_trip_ms = now;
                 forceSafeShutdown();
                 Serial.printf("[CRITICAL] HARD OVP TRIP at %.2fV (trip=%.2fV). Output disabled.\n",
@@ -589,7 +593,7 @@ void TaskSampleData(void * pvParameters) {
                     Serial.printf("[CRITICAL] RUNAWAY-CUT at %.2fV (filt=%.2fV, duty=%d).\n",
                                   v_bat, v_bat_filt, raw_duty);
                 } else {
-                    duty_accumulator = max(0.0f, duty_accumulator - 15.0f);
+                    duty_accumulator = boostMaxf(0.0f, duty_accumulator - 15.0f);
                     boostNewCurrIntegrator = 0.0f;
                     if (boostNewMode != BOOST_NEW_CV) {
                         boostNewMode = BOOST_NEW_CV;
@@ -616,7 +620,7 @@ void TaskSampleData(void * pvParameters) {
                     Serial.printf("[CRITICAL] SPIKE-PRECUT at %.2fV (step=%.2fV, filt=%.2fV, duty=%d).\n",
                                   v_bat, vbat_step, v_bat_filt, raw_duty);
                 } else {
-                    duty_accumulator = max(0.0f, duty_accumulator - 12.0f);
+                    duty_accumulator = boostMaxf(0.0f, duty_accumulator - 12.0f);
                     boostNewCurrIntegrator = 0.0f;
                     if (boostNewMode != BOOST_NEW_CV) {
                         boostNewMode = BOOST_NEW_CV;
@@ -633,7 +637,7 @@ void TaskSampleData(void * pvParameters) {
                 v_bat <= (HARD_OVP_RELEASE_VOLTAGE + 0.8f)) {
                 ovp_latched = false;
                 Serial.printf("[INFO] OVP latch cleared at %.2fV (release=%.2fV).\n",
-                              max(v_bat, v_bat_filt), HARD_OVP_RELEASE_VOLTAGE);
+                              boostMaxf((float)v_bat, (float)v_bat_filt), HARD_OVP_RELEASE_VOLTAGE);
             }
 
             last_vbat_sample = v_bat;
@@ -749,7 +753,7 @@ void TaskSampleData(void * pvParameters) {
                 float pid_out_cv = (Kp_cv * pid_error_cv) + (Ki_cv * pid_integral_cv) + (Kd_cv * delta_error_cv);
                 pid_last_error_cv = pid_error_cv;
 
-                float final_battery_pid = min(pid_out_cc, pid_out_cv);
+                float final_battery_pid = boostMinf(pid_out_cc, pid_out_cv);
                 if (final_battery_pid > 1.5) final_battery_pid = 1.5;
                 if (final_battery_pid < -4.0) final_battery_pid = -4.0;
                 duty_accumulator += final_battery_pid;
@@ -763,7 +767,7 @@ void TaskSampleData(void * pvParameters) {
                     boostNewVoltIntegrator = 0.0f;
                 } else if (boostNewMode == BOOST_NEW_SOFTSTART) {
                     // Seed toward present battery voltage (CC entry), not CV target.
-                    float seedVout = max(v_bat_filt + 1.5f, v_solar + 2.0f);
+                    float seedVout = boostMaxf((float)v_bat_filt + 1.5f, (float)v_solar + 2.0f);
                     int seedDuty = boostEstimateDutyRaw(v_solar, seedVout, allowed_max_duty);
                     // Cap softstart seed so we do not slam into high duty before CC loop owns it.
                     seedDuty = min(seedDuty, 120);
@@ -807,7 +811,7 @@ void TaskSampleData(void * pvParameters) {
                         boostNewLastVpv = v_solar;
                     }
 
-                    float iRef = min(TARGET_CC_CURRENT, boostNewIrefMppt);
+                    float iRef = boostMinf(TARGET_CC_CURRENT, boostNewIrefMppt);
                     // Collapse backoff only: if PV sags hard, pull Iref down.
                     // Never use measured Ppv as a hard current ceiling in CC.
                     if (v_solar < BOOST_PV_COLLAPSE_BACKOFF_V) {
@@ -818,7 +822,7 @@ void TaskSampleData(void * pvParameters) {
 
                     // Pre-CV current taper: reduce Iref as battery approaches BMS CV
                     if (v_bat_filt >= BOOST_CC_TAPER_START_V) {
-                        float span = max(0.20f, BOOST_CV_TARGET_VOLTAGE - BOOST_CC_TAPER_START_V);
+                        float span = boostMaxf(0.20f, BOOST_CV_TARGET_VOLTAGE - BOOST_CC_TAPER_START_V);
                         float rem = BOOST_CV_TARGET_VOLTAGE - v_bat_filt;
                         float taper = boostClampf(rem / span, 0.10f, 1.0f);
                         iRef *= taper;
@@ -830,7 +834,7 @@ void TaskSampleData(void * pvParameters) {
                                              &boostNewCurrIntegrator, BOOST_CURR_OUT_MIN, BOOST_CURR_OUT_MAX);
                     // Mild assist only when PV has headroom (avoid slamming into floor).
                     if (iErr > 1.0f && duty_accumulator < 220.0f && v_solar >= (BOOST_PV_NEAR_FLOOR_V + 0.5f)) {
-                        dDuty = max(dDuty, 1.5f);
+                        dDuty = boostMaxf(dDuty, 1.5f);
                     }
                     // Near PV floor: never command duty up — let voltage recover first.
                     if (v_solar < BOOST_PV_NEAR_FLOOR_V && dDuty > 0.0f) {
@@ -844,7 +848,7 @@ void TaskSampleData(void * pvParameters) {
                     duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, slewUp, BOOST_DUTY_SLEW_DOWN);
 
                     // Force CV immediately near BMS threshold; short confirm for soft entry
-                    if (v_bat_filt >= BOOST_CV_FORCE_VOLTAGE || max(v_bat, v_bat_filt) >= BOOST_CV_FORCE_VOLTAGE) {
+                    if (v_bat_filt >= BOOST_CV_FORCE_VOLTAGE || boostMaxf((float)v_bat, (float)v_bat_filt) >= BOOST_CV_FORCE_VOLTAGE) {
                         boostNewMode = BOOST_NEW_CV;
                         boostNewCurrIntegrator = 0.0f;
                         boostNewVoltIntegrator = 0.0f;
@@ -877,15 +881,15 @@ void TaskSampleData(void * pvParameters) {
                     // Scope/log sawtooth: IrefCv~4A while plant only sustains ~1.5–2A →
                     // duty climbs to ~23–25% then collapses. Match Iref to deliverable.
                     float iFromPv = (boostNewPAvailFilt * BOOST_EFF_EST) /
-                                    max(v_bat_filt, 40.0f);
+                                    boostMaxf((float)v_bat_filt, 40.0f);
                     // Ipv can under-read on this hardware — also track observed Ibat peaks.
                     if (i_bat_charge_filt > boostNewIbatPeak) {
                         boostNewIbatPeak = i_bat_charge_filt;
                     } else {
                         boostNewIbatPeak *= 0.997f;  // slow decay when sun/load changes
                     }
-                    float iDeliverable = max(iFromPv, boostNewIbatPeak * 0.90f);
-                    iDeliverable = max(iDeliverable, i_bat_charge_filt);
+                    float iDeliverable = boostMaxf(iFromPv, boostNewIbatPeak * 0.90f);
+                    iDeliverable = boostMaxf(iDeliverable, (float)i_bat_charge_filt);
                     float iAvailTarget = iDeliverable + BOOST_CV_IAVAIL_MARGIN_A;
                     if (boostNewIAvailFilt <= 0.01f) boostNewIAvailFilt = iAvailTarget;
                     else {
@@ -944,7 +948,7 @@ void TaskSampleData(void * pvParameters) {
                     float irefSlewUp = nearTarget ? BOOST_CV_IREF_SLEW_A : BOOST_CV_IREF_SLEW_FAR_A;
                     // Pull Iref down fast when above deliverable (adapt to sun immediately).
                     float irefSlewDown = (boostNewIrefCvCmd > (iSunCap + 0.2f))
-                                            ? max(irefSlewUp * 2.5f, 0.35f)
+                                            ? boostMaxf(irefSlewUp * 2.5f, 0.35f)
                                             : (irefSlewUp * 1.5f);
                     boostNewIrefCvCmd = boostApplySlew(iReq, boostNewIrefCvCmd, irefSlewUp, irefSlewDown);
                     float iRef = boostNewIrefCvCmd;
@@ -971,7 +975,7 @@ void TaskSampleData(void * pvParameters) {
                     if (v_solar < BOOST_PV_NEAR_FLOOR_V) {
                         if (dDuty > 0.0f) dDuty = 0.0f;
                         if (v_solar < (BOOST_VOLTAGE_FLOOR - 0.2f)) {
-                            dDuty = min(dDuty, -0.8f);
+                            dDuty = boostMinf(dDuty, -0.8f);
                         }
                         boostNewCurrIntegrator *= 0.94f;
                     }
@@ -989,8 +993,8 @@ void TaskSampleData(void * pvParameters) {
                         boostNewVoltIntegrator *= 0.88f;
                     }
                     if (v_bat > (v_bat_filt + 1.5f)) {
-                        dutyTarget = min(dutyTarget, duty_accumulator - 4.0f);
-                        dutyTarget = max(0.0f, dutyTarget);
+                        dutyTarget = boostMinf(dutyTarget, duty_accumulator - 4.0f);
+                        dutyTarget = boostMaxf(0.0f, dutyTarget);
                     }
 
                     dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
@@ -1075,13 +1079,13 @@ void TaskSampleData(void * pvParameters) {
 
                 // Above CV / BMS-open zone only: soft bleed, never hard-assign ~14% duty.
                 // Hard assign to raw 140 was the 22%→14% sawtooth during climb.
-                if (max(v_bat, v_bat_filt) >= BMS_PREEMPT_ZONE_V) {
+                if (boostMaxf((float)v_bat, (float)v_bat_filt) >= BMS_PREEMPT_ZONE_V) {
                     bool openLike = (i_bat_charge_filt <= BMS_OPEN_CURRENT_MAX_A) ||
                                     (v_bat > (v_bat_filt + 1.0f)) ||
-                                    (max(v_bat, v_bat_filt) >= (BOOST_CV_TARGET_VOLTAGE + 0.25f));
+                                    (boostMaxf((float)v_bat, (float)v_bat_filt) >= (BOOST_CV_TARGET_VOLTAGE + 0.25f));
                     if (openLike) {
                         float before = duty_accumulator;
-                        duty_accumulator = min(duty_accumulator, BMS_PREEMPT_DUTY_CAP_RAW);
+                        duty_accumulator = boostMinf(duty_accumulator, BMS_PREEMPT_DUTY_CAP_RAW);
                         if (duty_accumulator < before - 1.0f) {
                             static unsigned long last_preempt_cap_log = 0;
                             if (now - last_preempt_cap_log >= 500) {
@@ -1096,7 +1100,7 @@ void TaskSampleData(void * pvParameters) {
                 // Mild energy limit only when clearly above CV target.
                 if (v_bat_filt >= (BOOST_CV_TARGET_VOLTAGE + 0.20f) ||
                     v_bat >= (BOOST_CV_TARGET_VOLTAGE + 0.30f)) {
-                    duty_accumulator = min(duty_accumulator, 280.0f);  // ~27%, not 14%
+                    duty_accumulator = boostMinf(duty_accumulator, 280.0f);  // ~27%, not 14%
                 }
 
                 duty_accumulator = boostClampf(duty_accumulator, 0.0f, (float)allowed_max_duty);
