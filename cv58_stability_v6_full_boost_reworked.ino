@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-stability-v18-bms-preempt";
+const char* FW_VERSION_TAG = "cv58-stability-v19-pv-adapt";
 
 // =========================================================================
 // Hardware
@@ -100,32 +100,31 @@ const float BOOST_CC_TAPER_START_V = 54.80;
 const float BMS_OPEN_DETECT_V = 56.30;
 const float BMS_OPEN_JUMP_DELTA_V = 1.2;
 const float BMS_OPEN_CURRENT_MAX_A = 1.20;
-// Preempt must sit ABOVE CV target (56.0). Old 55.95 snapped duty to ~14%
-// during normal CV climb (field log: 22% → 14% exactly at BMS_PREEMPT_DUTY_CAP).
-const float BMS_PREEMPT_DUTY_CAP_RAW = 200.0;
-const float BMS_PREEMPT_ZONE_V = 56.20;
-const float BOOST_CV_IREF_SLEW_A = 0.12;      // faster IrefCv track when climbing to 56V
-const float BOOST_CV_IREF_SLEW_FAR_A = 0.25;  // even faster when well below target
+// Preempt must sit ABOVE CV target (56.0). Never hard-snap duty during CV climb.
+const float BMS_PREEMPT_DUTY_CAP_RAW = 260.0;  // ~25% — only used above CV on open-like
+const float BMS_PREEMPT_ZONE_V = 56.25;
+const float BOOST_CV_IREF_SLEW_A = 0.10;
+const float BOOST_CV_IREF_SLEW_FAR_A = 0.20;
 const float BOOST_CV_NEAR_BAND_V = 0.40;
-const float BOOST_CV_DUTY_STEP_NEAR = 0.8;
-const float BOOST_CV_DUTY_STEP_FAR = 3.0;
-const float BOOST_CV_VFB_ALPHA = 0.12;        // a bit less lag so climb sees real Vbat
-const float BOOST_CV_R_WIRE_OHM = 0.06;       // milder IR comp (0.12 made Vfb chronically low)
-const float BOOST_CV_CLIMB_IREF_MAX_A = 4.5;  // was 2.8 — too low, caused CV hunt under ~65W+
-const float BOOST_CV_NEAR_IREF_MAX_A = 2.2;
+const float BOOST_CV_DUTY_STEP_NEAR = 0.6;
+const float BOOST_CV_DUTY_STEP_FAR = 1.5;     // was 3.0 — smaller steps stop sawtooth
+const float BOOST_CV_VFB_ALPHA = 0.15;
+const float BOOST_CV_R_WIRE_OHM = 0.06;
+const float BOOST_CV_CLIMB_IREF_MAX_A = 3.5;  // absolute ceiling; PV-adapt usually lower
+const float BOOST_CV_NEAR_IREF_MAX_A = 1.8;
+const float BOOST_CV_IAVAIL_MARGIN_A = 0.30;  // above measured deliverable
+const float BOOST_CV_IAVAIL_ALPHA = 0.12;     // LPF for available-current estimate
 
 const float BOOST_PV_POWER_LIMIT_W = 650.0;
 const float BOOST_PV_CURRENT_HARD_A = 16.3;
 const float BOOST_EFF_EST = 0.90;
-// Do NOT cap Iref from measured Ppv (causes CC stuck at low current).
-// Back off only when PV voltage collapses below this floor.
+// Do NOT cap Iref from measured Ppv in CC (causes CC stuck at low current).
+// In CV, DO match Iref to deliverable current so duty does not sawtooth.
 const float BOOST_PV_COLLAPSE_BACKOFF_V = 41.0;
-// Near-floor: stop climbing duty (Iref stays at CC target — do not bleed Iref).
-const float BOOST_PV_NEAR_FLOOR_V = 42.3;     // was 42.5 — allow slightly more headroom before freeze
-// Keep a usable CC floor unless true PV collapse; prevents Iref→0 hunt.
+const float BOOST_PV_NEAR_FLOOR_V = 42.5;
 const float BOOST_CC_IREF_FLOOR_A = 2.5;
-const float BOOST_CC_IREF_RECOVER_A = 0.15;   // A per MPPT tick toward CC when PV healthy
-const float BOOST_CC_IREF_COLLAPSE_A = 0.20;  // A per MPPT tick down only in true collapse
+const float BOOST_CC_IREF_RECOVER_A = 0.15;
+const float BOOST_CC_IREF_COLLAPSE_A = 0.20;
 const float ACS712_MID_EXPECT_MV = 1650.0;
 const float ACS712_MID_WARN_DELTA_MV = 400.0;
 
@@ -134,23 +133,22 @@ const float BOOST_MPPT_VREF_MIN = 40.0;
 const float BOOST_MPPT_VREF_MAX = 45.0;
 const unsigned long BOOST_MPPT_PERIOD_MS = 150;
 const unsigned long BOOST_SOFTSTART_MS = 2500;
-const unsigned long BOOST_CV_ENTER_CONFIRM_MS = 200;   // was 8000ms (too late)
+const unsigned long BOOST_CV_ENTER_CONFIRM_MS = 200;
 
-// Mid gains: v16 too soft for CV climb; v15 too harsh for CC.
-const float BOOST_CURR_KP = 9.0;
-const float BOOST_CURR_KI = 30.0;
-const float BOOST_CURR_OUT_MIN = -22.0;
-const float BOOST_CURR_OUT_MAX = 24.0;
+const float BOOST_CURR_KP = 8.0;
+const float BOOST_CURR_KI = 24.0;
+const float BOOST_CURR_OUT_MIN = -16.0;
+const float BOOST_CURR_OUT_MAX = 16.0;
 
-const float BOOST_VOLT_KP = 1.0;
-const float BOOST_VOLT_KI = 0.55;
+const float BOOST_VOLT_KP = 0.9;
+const float BOOST_VOLT_KI = 0.40;
 const float BOOST_VOLT_OUT_MIN = 0.0;
-const float BOOST_VOLT_OUT_MAX = 4.5;   // allow climb toward 56V (was 3.5 / hard-capped 2.8)
+const float BOOST_VOLT_OUT_MAX = 3.5;
 const unsigned long BOOST_CV_EXIT_CONFIRM_MS = 5000;
 
-const float BOOST_DUTY_SLEW_UP = 2.5;
-const float BOOST_DUTY_SLEW_DOWN = 3.0;
-const float BOOST_DUTY_SLEW_UP_NEAR_FLOOR = 0.6;
+const float BOOST_DUTY_SLEW_UP = 1.8;
+const float BOOST_DUTY_SLEW_DOWN = 2.2;
+const float BOOST_DUTY_SLEW_UP_NEAR_FLOOR = 0.4;
 const float BOOST_EST_DUTY_MARGIN = 0.03;
 
 const float BOOST_VBAT_SPIKE_PRECUT_DELTA_V = 0.7;
@@ -206,6 +204,10 @@ float boostNewIrefMppt = 1.0f;
 float boostNewIrefCvCmd = 0.0f;
 float boostNewCvVfb = 0.0f;
 float boostNewPAvailFilt = 0.0f;
+float boostNewIAvailFilt = 0.0f;   // deliverable Ibat estimate (adapts to sun)
+float boostNewIbatPeak = 0.0f;
+float boostNewLastVpvCv = 0.0f;
+float boostNewDutyPrev = 0.0f;
 unsigned long boostNewLastMpptMs = 0;
 unsigned long boostNewCvEnterMs = 0;
 unsigned long boostNewCvExitMs = 0;
@@ -281,6 +283,10 @@ static inline void boostNewResetOnEntry(float vpvNow) {
     boostNewIrefCvCmd = 0.5f;
     boostNewCvVfb = 0.0f;
     boostNewPAvailFilt = 0.0f;
+    boostNewIAvailFilt = 0.0f;
+    boostNewIbatPeak = 0.0f;
+    boostNewLastVpvCv = 0.0f;
+    boostNewDutyPrev = 0.0f;
     boostNewLastMpptMs = 0;
     boostNewCvEnterMs = 0;
     boostNewCvExitMs = 0;
@@ -860,13 +866,35 @@ void TaskSampleData(void * pvParameters) {
                     }
                 } else if (boostNewMode == BOOST_NEW_CV) {
                     // Freeze MPPT Iref hunting in CV — voltage loop owns current request.
+                    float pPv = v_solar * i_solar_mag;
                     if (now - boostNewLastMpptMs >= BOOST_MPPT_PERIOD_MS) {
                         boostNewLastMpptMs = now;
-                        float pPv = v_solar * i_solar_mag;
-                        boostNewPAvailFilt = (boostNewPAvailFilt <= 0.01f) ? pPv : (0.22f * pPv + 0.78f * boostNewPAvailFilt);
+                        boostNewPAvailFilt = (boostNewPAvailFilt <= 0.01f) ? pPv
+                                            : (0.22f * pPv + 0.78f * boostNewPAvailFilt);
                     }
 
-                    // Prefer terminal voltage for climb authority; light IR only near target.
+                    // --- Adapt Iref to what the sun can actually deliver ---
+                    // Scope/log sawtooth: IrefCv~4A while plant only sustains ~1.5–2A →
+                    // duty climbs to ~23–25% then collapses. Match Iref to deliverable.
+                    float iFromPv = (boostNewPAvailFilt * BOOST_EFF_EST) /
+                                    max(v_bat_filt, 40.0f);
+                    // Ipv can under-read on this hardware — also track observed Ibat peaks.
+                    if (i_bat_charge_filt > boostNewIbatPeak) {
+                        boostNewIbatPeak = i_bat_charge_filt;
+                    } else {
+                        boostNewIbatPeak *= 0.997f;  // slow decay when sun/load changes
+                    }
+                    float iDeliverable = max(iFromPv, boostNewIbatPeak * 0.90f);
+                    iDeliverable = max(iDeliverable, i_bat_charge_filt);
+                    float iAvailTarget = iDeliverable + BOOST_CV_IAVAIL_MARGIN_A;
+                    if (boostNewIAvailFilt <= 0.01f) boostNewIAvailFilt = iAvailTarget;
+                    else {
+                        // Fast down / slower up — track sun drop quickly, avoid Iref overshoot on rise.
+                        float a = (iAvailTarget < boostNewIAvailFilt) ? 0.28f : BOOST_CV_IAVAIL_ALPHA;
+                        boostNewIAvailFilt = a * iAvailTarget + (1.0f - a) * boostNewIAvailFilt;
+                    }
+
+                    // Prefer terminal voltage for climb; light IR only near target.
                     float vTermComp = v_bat_filt;
                     if (v_bat_filt >= (BOOST_CV_TARGET_VOLTAGE - 1.0f)) {
                         vTermComp = v_bat_filt - (i_bat_charge_filt * BOOST_CV_R_WIRE_OHM);
@@ -884,20 +912,26 @@ void TaskSampleData(void * pvParameters) {
                     float iReq = boostRunPI(vErr, BOOST_VOLT_KP, BOOST_VOLT_KI, dt,
                                             &boostNewVoltIntegrator, BOOST_VOLT_OUT_MIN, BOOST_VOLT_OUT_MAX);
 
-                    // Near target: keep Iref modest. Far below: allow climb up to 4.5A.
                     if (nearTarget) {
-                        float nearCap = 0.8f + boostClampf(vErr / BOOST_CV_NEAR_BAND_V, 0.0f, 1.0f) * (BOOST_CV_NEAR_IREF_MAX_A - 0.8f);
+                        float nearCap = 0.6f + boostClampf(vErr / BOOST_CV_NEAR_BAND_V, 0.0f, 1.0f) *
+                                        (BOOST_CV_NEAR_IREF_MAX_A - 0.6f);
                         if (iReq > nearCap) iReq = nearCap;
                     } else if (vErr > 0.4f) {
-                        // Scale climb current with voltage error (was hard-capped 2.8A — too low).
-                        float climbCap = boostClampf(2.0f + vErr * 1.5f, 2.0f, BOOST_CV_CLIMB_IREF_MAX_A);
+                        float climbCap = boostClampf(1.2f + vErr * 1.2f, 1.2f, BOOST_CV_CLIMB_IREF_MAX_A);
                         if (iReq > climbCap) iReq = climbCap;
                     }
 
-                    // PV headroom: taper Iref before slamming into floor (prevents 25%→14% chop).
+                    // Hard rule: never ask for more current than sun can deliver.
+                    float iSunCap = boostClampf(boostNewIAvailFilt, 0.35f, BOOST_CV_CLIMB_IREF_MAX_A);
+                    if (iReq > iSunCap) {
+                        iReq = iSunCap;
+                        boostNewVoltIntegrator *= 0.92f;  // anti-windup when power-limited
+                    }
+
+                    // PV headroom: taper before floor slam.
                     if (v_solar < BOOST_PV_NEAR_FLOOR_V) {
                         float sag = BOOST_PV_NEAR_FLOOR_V - v_solar;
-                        float headroomScale = boostClampf(1.0f - sag * 0.55f, 0.35f, 1.0f);
+                        float headroomScale = boostClampf(1.0f - sag * 0.60f, 0.30f, 1.0f);
                         iReq *= headroomScale;
                     }
                     if (v_solar < BOOST_PV_COLLAPSE_BACKOFF_V) {
@@ -907,55 +941,72 @@ void TaskSampleData(void * pvParameters) {
                     }
                     iReq = boostClampf(iReq, 0.0f, BOOST_VOLT_OUT_MAX);
 
-                    // Slew-limit CV current command; faster when climbing from far below.
-                    float irefSlew = nearTarget ? BOOST_CV_IREF_SLEW_A : BOOST_CV_IREF_SLEW_FAR_A;
-                    boostNewIrefCvCmd = boostApplySlew(iReq, boostNewIrefCvCmd,
-                                                       irefSlew, irefSlew * 1.4f);
+                    float irefSlewUp = nearTarget ? BOOST_CV_IREF_SLEW_A : BOOST_CV_IREF_SLEW_FAR_A;
+                    // Pull Iref down fast when above deliverable (adapt to sun immediately).
+                    float irefSlewDown = (boostNewIrefCvCmd > (iSunCap + 0.2f))
+                                            ? max(irefSlewUp * 2.5f, 0.35f)
+                                            : (irefSlewUp * 1.5f);
+                    boostNewIrefCvCmd = boostApplySlew(iReq, boostNewIrefCvCmd, irefSlewUp, irefSlewDown);
                     float iRef = boostNewIrefCvCmd;
 
                     float iErr = iRef - i_bat_charge_filt;
-                    float dDuty = boostRunPI(iErr, BOOST_CURR_KP * (nearTarget ? 0.45f : 0.85f),
-                                             BOOST_CURR_KI * (nearTarget ? 0.35f : 0.65f),
+                    float dDuty = boostRunPI(iErr, BOOST_CURR_KP * (nearTarget ? 0.40f : 0.70f),
+                                             BOOST_CURR_KI * (nearTarget ? 0.30f : 0.50f),
                                              dt, &boostNewCurrIntegrator,
-                                             nearTarget ? -6.0f : -10.0f,
-                                             nearTarget ? 6.0f : 16.0f);
+                                             nearTarget ? -5.0f : -8.0f,
+                                             nearTarget ? 5.0f : 10.0f);
 
                     float dutyStepLimit = nearTarget ? BOOST_CV_DUTY_STEP_NEAR : BOOST_CV_DUTY_STEP_FAR;
                     if (dDuty > dutyStepLimit) dDuty = dutyStepLimit;
                     if (dDuty < -dutyStepLimit) dDuty = -dutyStepLimit;
 
-                    // Near PV floor in CV: do not command duty up; bleed gently instead of hard cut.
+                    // If PV voltage is falling, freeze duty-up (panel being over-pulled).
+                    float dVpv = (boostNewLastVpvCv > 1.0f) ? (v_solar - boostNewLastVpvCv) : 0.0f;
+                    boostNewLastVpvCv = v_solar;
+                    if (dVpv < -0.12f && dDuty > 0.0f) {
+                        dDuty = 0.0f;
+                        boostNewCurrIntegrator *= 0.90f;
+                    }
+
                     if (v_solar < BOOST_PV_NEAR_FLOOR_V) {
                         if (dDuty > 0.0f) dDuty = 0.0f;
-                        if (v_solar < (BOOST_VOLTAGE_FLOOR - 0.2f) && dDuty > -1.5f) {
-                            dDuty = min(dDuty, -1.0f);
+                        if (v_solar < (BOOST_VOLTAGE_FLOOR - 0.2f)) {
+                            dDuty = min(dDuty, -0.8f);
                         }
                         boostNewCurrIntegrator *= 0.94f;
                     }
 
                     float dutyTarget = duty_accumulator + dDuty;
 
-                    // Hold gently inside deadband of compensated voltage.
                     if (fabsf(BOOST_CV_TARGET_VOLTAGE - boostNewCvVfb) <= CV_DEADBAND_V) {
-                        dutyTarget = duty_accumulator;  // freeze duty
+                        dutyTarget = duty_accumulator;
                         boostNewCurrIntegrator *= 0.96f;
                     }
 
-                    // Above target: bleed duty gently (not a hard chop).
                     if (boostNewCvVfb > BOOST_CV_TARGET_VOLTAGE) {
                         float over = boostNewCvVfb - BOOST_CV_TARGET_VOLTAGE;
                         dutyTarget -= (0.5f + over * 3.0f);
                         boostNewVoltIntegrator *= 0.88f;
                     }
                     if (v_bat > (v_bat_filt + 1.5f)) {
-                        dutyTarget = min(dutyTarget, duty_accumulator - 6.0f);
+                        dutyTarget = min(dutyTarget, duty_accumulator - 4.0f);
                         dutyTarget = max(0.0f, dutyTarget);
                     }
 
                     dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
-                    float cvSlewUp = nearTarget ? 1.0f : 2.8f;
-                    float cvSlewDown = nearTarget ? 1.8f : 2.5f;  // was 3.5 — softer down stops 25→14 chop
+                    float cvSlewUp = nearTarget ? 0.8f : 1.6f;
+                    float cvSlewDown = nearTarget ? 1.4f : 2.0f;
                     duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, cvSlewUp, cvSlewDown);
+
+                    // Diagnose sudden duty collapses (scope sawtooth).
+                    float dutyDrop = boostNewDutyPrev - duty_accumulator;
+                    if (dutyDrop > 40.0f) {
+                        Serial.printf("[WARN] Duty drop %.0f→%.0f Vpv=%.1f Vbat=%.2f Ibat=%.2f IrefCv=%.2f Iavail=%.2f\n",
+                                      boostNewDutyPrev, duty_accumulator,
+                                      v_solar, v_bat_filt, i_bat_charge_filt,
+                                      boostNewIrefCvCmd, boostNewIAvailFilt);
+                    }
+                    boostNewDutyPrev = duty_accumulator;
 
                     if (v_bat_filt <= BOOST_CV_EXIT_VOLTAGE) {
                         if (boostNewCvExitMs == 0) boostNewCvExitMs = now;
@@ -965,6 +1016,7 @@ void TaskSampleData(void * pvParameters) {
                             boostNewVoltIntegrator = 0.0f;
                             boostNewIrefCvCmd = 0.5f;
                             boostNewCvVfb = 0.0f;
+                            boostNewIAvailFilt = 0.0f;
                         }
                     } else {
                         boostNewCvExitMs = 0;
@@ -1021,27 +1073,30 @@ void TaskSampleData(void * pvParameters) {
                     if (boostNewMode != BOOST_NEW_CV) boostNewCurrIntegrator = 0.0f;
                 }
 
-                // Near BMS open zone (above CV): soft-cap duty only on open-like signature.
-                // Never hard-cap during normal CV climb below 56V (that caused 22%→14% hunt).
-                if (v_bat_filt >= BMS_PREEMPT_ZONE_V || v_bat >= BMS_PREEMPT_ZONE_V) {
+                // Above CV / BMS-open zone only: soft bleed, never hard-assign ~14% duty.
+                // Hard assign to raw 140 was the 22%→14% sawtooth during climb.
+                if (max(v_bat, v_bat_filt) >= BMS_PREEMPT_ZONE_V) {
                     bool openLike = (i_bat_charge_filt <= BMS_OPEN_CURRENT_MAX_A) ||
                                     (v_bat > (v_bat_filt + 1.0f)) ||
-                                    (max(v_bat, v_bat_filt) >= (BOOST_CV_TARGET_VOLTAGE + 0.20f));
-                    if (openLike && duty_accumulator > BMS_PREEMPT_DUTY_CAP_RAW) {
-                        static unsigned long last_preempt_cap_log = 0;
-                        if (now - last_preempt_cap_log >= 500) {
-                            last_preempt_cap_log = now;
-                            Serial.printf("[WARN] BMS preempt duty-cap %.0f→%.0f at V=%.2f/filt=%.2f I=%.2fA\n",
-                                          duty_accumulator, BMS_PREEMPT_DUTY_CAP_RAW,
-                                          v_bat, v_bat_filt, i_bat_charge_filt);
+                                    (max(v_bat, v_bat_filt) >= (BOOST_CV_TARGET_VOLTAGE + 0.25f));
+                    if (openLike) {
+                        float before = duty_accumulator;
+                        duty_accumulator = min(duty_accumulator, BMS_PREEMPT_DUTY_CAP_RAW);
+                        if (duty_accumulator < before - 1.0f) {
+                            static unsigned long last_preempt_cap_log = 0;
+                            if (now - last_preempt_cap_log >= 500) {
+                                last_preempt_cap_log = now;
+                                Serial.printf("[WARN] BMS preempt soft-cap %.0f→%.0f at V=%.2f/filt=%.2f I=%.2fA\n",
+                                              before, duty_accumulator,
+                                              v_bat, v_bat_filt, i_bat_charge_filt);
+                            }
                         }
-                        duty_accumulator = BMS_PREEMPT_DUTY_CAP_RAW;
                     }
-                    // Above CV target: gently limit energy; CV loop still owns fine control.
-                    if (v_bat_filt >= (BOOST_CV_TARGET_VOLTAGE + 0.15f) ||
-                        v_bat >= (BOOST_CV_TARGET_VOLTAGE + 0.25f)) {
-                        duty_accumulator = min(duty_accumulator, 160.0f);
-                    }
+                }
+                // Mild energy limit only when clearly above CV target.
+                if (v_bat_filt >= (BOOST_CV_TARGET_VOLTAGE + 0.20f) ||
+                    v_bat >= (BOOST_CV_TARGET_VOLTAGE + 0.30f)) {
+                    duty_accumulator = min(duty_accumulator, 280.0f);  // ~27%, not 14%
                 }
 
                 duty_accumulator = boostClampf(duty_accumulator, 0.0f, (float)allowed_max_duty);
@@ -1107,7 +1162,8 @@ void TaskSampleData(void * pvParameters) {
             Serial.printf("  [BAT] V:%5.2fV I:%5.2fA (abs:%5.2fA)",
                           v_bat_filt, i_bat_filt, i_bat_charge_filt);
             if (currentState == STATE_BOOST && boostNewMode == BOOST_NEW_CV) {
-                Serial.printf(" | Vfb:%.2f IrefCv:%.2fA", boostNewCvVfb, boostNewIrefCvCmd);
+                Serial.printf(" | Vfb:%.2f IrefCv:%.2fA Iavail:%.2fA",
+                              boostNewCvVfb, boostNewIrefCvCmd, boostNewIAvailFilt);
             }
             Serial.println();
             Serial.printf("  [AC ] V:%5.1fV I:%5.2fA\n", v_ac_in, i_ac_in);

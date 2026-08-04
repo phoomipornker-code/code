@@ -43,3 +43,6 @@ Recent control update:
   instead of hard chop; mid PI gains; milder IR comp while climbing to 56V.
 - v18: BMS preempt zone was 55.95 (below CV 56V) hard-capping duty to ~14% during
   normal climb — moved zone to 56.20 and only cap on open-like signature.
+- v19: CV sawtooth when sun rises — IrefCv asked 4A but plant only delivers ~2A.
+  Match Iref to PV/Ibat deliverable (Iavail), freeze duty-up on falling Vpv,
+  remove hard ~14% duty snaps below CV.
