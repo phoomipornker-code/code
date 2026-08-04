@@ -41,3 +41,5 @@ Recent control update:
   hold CC Iref with floor 2.5A, softer PI/slew, freeze duty-up near PV floor 42.5V.
 - v17 CV climb: raise far-CV IrefCap 2.8→4.5A, softer duty-down, PV-headroom taper
   instead of hard chop; mid PI gains; milder IR comp while climbing to 56V.
+- v18: BMS preempt zone was 55.95 (below CV 56V) hard-capping duty to ~14% during
+  normal climb — moved zone to 56.20 and only cap on open-like signature.

@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-stability-v17-cv-climb";
+const char* FW_VERSION_TAG = "cv58-stability-v18-bms-preempt";
 
 // =========================================================================
 // Hardware
@@ -100,8 +100,10 @@ const float BOOST_CC_TAPER_START_V = 54.80;
 const float BMS_OPEN_DETECT_V = 56.30;
 const float BMS_OPEN_JUMP_DELTA_V = 1.2;
 const float BMS_OPEN_CURRENT_MAX_A = 1.20;
-const float BMS_PREEMPT_DUTY_CAP_RAW = 140.0;
-const float BMS_PREEMPT_ZONE_V = 55.95;
+// Preempt must sit ABOVE CV target (56.0). Old 55.95 snapped duty to ~14%
+// during normal CV climb (field log: 22% → 14% exactly at BMS_PREEMPT_DUTY_CAP).
+const float BMS_PREEMPT_DUTY_CAP_RAW = 200.0;
+const float BMS_PREEMPT_ZONE_V = 56.20;
 const float BOOST_CV_IREF_SLEW_A = 0.12;      // faster IrefCv track when climbing to 56V
 const float BOOST_CV_IREF_SLEW_FAR_A = 0.25;  // even faster when well below target
 const float BOOST_CV_NEAR_BAND_V = 0.40;
@@ -1019,13 +1021,26 @@ void TaskSampleData(void * pvParameters) {
                     if (boostNewMode != BOOST_NEW_CV) boostNewCurrIntegrator = 0.0f;
                 }
 
-                // Near BMS zone: hard-cap duty so open-FET fly-up has less energy.
+                // Near BMS open zone (above CV): soft-cap duty only on open-like signature.
+                // Never hard-cap during normal CV climb below 56V (that caused 22%→14% hunt).
                 if (v_bat_filt >= BMS_PREEMPT_ZONE_V || v_bat >= BMS_PREEMPT_ZONE_V) {
-                    if (duty_accumulator > BMS_PREEMPT_DUTY_CAP_RAW) {
+                    bool openLike = (i_bat_charge_filt <= BMS_OPEN_CURRENT_MAX_A) ||
+                                    (v_bat > (v_bat_filt + 1.0f)) ||
+                                    (max(v_bat, v_bat_filt) >= (BOOST_CV_TARGET_VOLTAGE + 0.20f));
+                    if (openLike && duty_accumulator > BMS_PREEMPT_DUTY_CAP_RAW) {
+                        static unsigned long last_preempt_cap_log = 0;
+                        if (now - last_preempt_cap_log >= 500) {
+                            last_preempt_cap_log = now;
+                            Serial.printf("[WARN] BMS preempt duty-cap %.0f→%.0f at V=%.2f/filt=%.2f I=%.2fA\n",
+                                          duty_accumulator, BMS_PREEMPT_DUTY_CAP_RAW,
+                                          v_bat, v_bat_filt, i_bat_charge_filt);
+                        }
                         duty_accumulator = BMS_PREEMPT_DUTY_CAP_RAW;
                     }
-                    if (v_bat_filt >= BOOST_CV_TARGET_VOLTAGE) {
-                        duty_accumulator = min(duty_accumulator, 80.0f);
+                    // Above CV target: gently limit energy; CV loop still owns fine control.
+                    if (v_bat_filt >= (BOOST_CV_TARGET_VOLTAGE + 0.15f) ||
+                        v_bat >= (BOOST_CV_TARGET_VOLTAGE + 0.25f)) {
+                        duty_accumulator = min(duty_accumulator, 160.0f);
                     }
                 }
 
