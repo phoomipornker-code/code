@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-stability-v15-cv-ir-lpf";
+const char* FW_VERSION_TAG = "cv58-stability-v16-cc-stable";
 
 // =========================================================================
 // Hardware
@@ -115,18 +115,27 @@ const float BOOST_EFF_EST = 0.90;
 // Do NOT cap Iref from measured Ppv (causes CC stuck at low current).
 // Back off only when PV voltage collapses below this floor.
 const float BOOST_PV_COLLAPSE_BACKOFF_V = 41.0;
+// Near-floor: stop climbing duty (Iref stays at CC target — do not bleed Iref).
+const float BOOST_PV_NEAR_FLOOR_V = 42.5;
+// Keep a usable CC floor unless true PV collapse; prevents Iref→0 hunt.
+const float BOOST_CC_IREF_FLOOR_A = 2.5;
+const float BOOST_CC_IREF_RECOVER_A = 0.15;   // A per MPPT tick toward CC when PV healthy
+const float BOOST_CC_IREF_COLLAPSE_A = 0.20;  // A per MPPT tick down only in true collapse
+const float ACS712_MID_EXPECT_MV = 1650.0;
+const float ACS712_MID_WARN_DELTA_MV = 400.0;
 
 const float BOOST_MPPT_STEP_V = 0.10;
 const float BOOST_MPPT_VREF_MIN = 40.0;
 const float BOOST_MPPT_VREF_MAX = 45.0;
-const unsigned long BOOST_MPPT_PERIOD_MS = 100;
+const unsigned long BOOST_MPPT_PERIOD_MS = 150;
 const unsigned long BOOST_SOFTSTART_MS = 2500;
 const unsigned long BOOST_CV_ENTER_CONFIRM_MS = 200;   // was 8000ms (too late)
 
-const float BOOST_CURR_KP = 14.0;
-const float BOOST_CURR_KI = 55.0;
-const float BOOST_CURR_OUT_MIN = -35.0;
-const float BOOST_CURR_OUT_MAX = 45.0;
+// Softer CC current loop — v15 gains caused duty/Ibat hunting on field log.
+const float BOOST_CURR_KP = 7.0;
+const float BOOST_CURR_KI = 22.0;
+const float BOOST_CURR_OUT_MIN = -18.0;
+const float BOOST_CURR_OUT_MAX = 18.0;
 
 const float BOOST_VOLT_KP = 0.85;
 const float BOOST_VOLT_KI = 0.45;
@@ -134,8 +143,9 @@ const float BOOST_VOLT_OUT_MIN = 0.0;
 const float BOOST_VOLT_OUT_MAX = 3.5;   // CV should not demand high current near full
 const unsigned long BOOST_CV_EXIT_CONFIRM_MS = 5000;
 
-const float BOOST_DUTY_SLEW_UP = 4.0;
-const float BOOST_DUTY_SLEW_DOWN = 6.0;
+const float BOOST_DUTY_SLEW_UP = 2.0;
+const float BOOST_DUTY_SLEW_DOWN = 3.5;
+const float BOOST_DUTY_SLEW_UP_NEAR_FLOOR = 0.4;
 const float BOOST_EST_DUTY_MARGIN = 0.03;
 
 const float BOOST_VBAT_SPIKE_PRECUT_DELTA_V = 0.7;
@@ -363,6 +373,13 @@ void calibrateCurrentOffsetsAtBoot() {
 
     Serial.printf("[CAL] Current zero offsets (mV): I0=%.2f I1=%.2f I2=%.2f\n",
                   current_offset_i0, current_offset_i1, current_offset_i2);
+
+    // ACS712 midrail is ~1.65V. Far-off I0 makes Ppv/MPPT unreliable (CC still uses Ibat).
+    if (fabsf(current_offset_i0 - ACS712_MID_EXPECT_MV) > ACS712_MID_WARN_DELTA_MV) {
+        Serial.printf("[WARN] PV current zero I0=%.1fmV looks abnormal (expect ~%.0fmV). "
+                      "CC uses Ibat; MPPT power from Ipv may be unreliable.\n",
+                      current_offset_i0, ACS712_MID_EXPECT_MV);
+    }
 }
 
 void setup() {
@@ -734,14 +751,19 @@ void TaskSampleData(void * pvParameters) {
                     boostNewCurrIntegrator = 0.0f;
                     boostNewVoltIntegrator = 0.0f;
                 } else if (boostNewMode == BOOST_NEW_SOFTSTART) {
-                    int seedDuty = boostEstimateDutyRaw(v_solar, BOOST_CV_TARGET_VOLTAGE, allowed_max_duty);
-                    duty_accumulator = boostApplySlew((float)seedDuty, duty_accumulator, 2.0f, 5.0f);
+                    // Seed toward present battery voltage (CC entry), not CV target.
+                    float seedVout = max(v_bat_filt + 1.5f, v_solar + 2.0f);
+                    int seedDuty = boostEstimateDutyRaw(v_solar, seedVout, allowed_max_duty);
+                    // Cap softstart seed so we do not slam into high duty before CC loop owns it.
+                    seedDuty = min(seedDuty, 120);
+                    duty_accumulator = boostApplySlew((float)seedDuty, duty_accumulator, 1.5f, 4.0f);
 
-                    bool ready = (i_bat_charge_filt >= 0.4f) ||
+                    bool ready = (i_bat_charge_filt >= 0.35f) ||
                                  (now - boost_mode_enter_ms >= BOOST_SOFTSTART_MS);
                     if (ready) {
                         boostNewMode = BOOST_NEW_CC_MPPT;
                         boostNewCurrIntegrator = 0.0f;
+                        boostNewIrefMppt = TARGET_CC_CURRENT;
                     }
                 } else if (boostNewMode == BOOST_NEW_CC_MPPT) {
                     if (now - boostNewLastMpptMs >= BOOST_MPPT_PERIOD_MS) {
@@ -749,16 +771,25 @@ void TaskSampleData(void * pvParameters) {
                         float pPv = v_solar * i_solar_mag;
                         float dP = pPv - boostNewLastPower;
                         float dV = v_solar - boostNewLastVpv;
-                        if (fabsf(dP) > 0.2f) {
+                        // P&O only moves Vref for logging / future use.
+                        // Do NOT map (Vpv-Vref) into Iref — that bled Iref→0 on field logs
+                        // whenever duty climb briefly sagged Vpv below Vref.
+                        if (fabsf(dP) > 1.0f) {
                             if (dP > 0.0f) boostNewMpptDir = (dV >= 0.0f) ? 1 : -1;
                             else           boostNewMpptDir = (dV >= 0.0f) ? -1 : 1;
                         }
                         boostNewPvRef += (float)boostNewMpptDir * BOOST_MPPT_STEP_V;
                         boostNewPvRef = boostClampf(boostNewPvRef, BOOST_MPPT_VREF_MIN, BOOST_MPPT_VREF_MAX);
 
-                        float pvErr = v_solar - boostNewPvRef;
-                        boostNewIrefMppt += 0.08f * pvErr;
-                        boostNewIrefMppt = boostClampf(boostNewIrefMppt, 0.0f, TARGET_CC_CURRENT);
+                        // Iref policy: hold CC target when PV is healthy; only collapse
+                        // when Vpv is truly below collapse floor; recover slowly otherwise.
+                        if (v_solar < BOOST_PV_COLLAPSE_BACKOFF_V) {
+                            boostNewIrefMppt -= BOOST_CC_IREF_COLLAPSE_A;
+                        } else if (v_solar >= BOOST_VOLTAGE_FLOOR) {
+                            boostNewIrefMppt += BOOST_CC_IREF_RECOVER_A;
+                        }
+                        float irefMin = (v_solar < BOOST_PV_COLLAPSE_BACKOFF_V) ? 0.5f : BOOST_CC_IREF_FLOOR_A;
+                        boostNewIrefMppt = boostClampf(boostNewIrefMppt, irefMin, TARGET_CC_CURRENT);
 
                         boostNewPAvailFilt = (boostNewPAvailFilt <= 0.01f) ? pPv : (0.22f * pPv + 0.78f * boostNewPAvailFilt);
                         boostNewLastPower = pPv;
@@ -786,13 +817,20 @@ void TaskSampleData(void * pvParameters) {
                     float iErr = iRef - i_bat_charge_filt;
                     float dDuty = boostRunPI(iErr, BOOST_CURR_KP, BOOST_CURR_KI, dt,
                                              &boostNewCurrIntegrator, BOOST_CURR_OUT_MIN, BOOST_CURR_OUT_MAX);
-                    // Help CC climb out of low-duty region when far below target.
-                    if (iErr > 0.8f && duty_accumulator < 280.0f && v_solar >= BOOST_VOLTAGE_FLOOR) {
-                        dDuty = max(dDuty, 3.0f);
+                    // Mild assist only when PV has headroom (avoid slamming into floor).
+                    if (iErr > 1.0f && duty_accumulator < 220.0f && v_solar >= (BOOST_PV_NEAR_FLOOR_V + 0.5f)) {
+                        dDuty = max(dDuty, 1.5f);
+                    }
+                    // Near PV floor: never command duty up — let voltage recover first.
+                    if (v_solar < BOOST_PV_NEAR_FLOOR_V && dDuty > 0.0f) {
+                        dDuty = 0.0f;
+                        boostNewCurrIntegrator *= 0.92f;
                     }
                     float dutyTarget = duty_accumulator + dDuty;
                     dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
-                    duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, BOOST_DUTY_SLEW_UP, BOOST_DUTY_SLEW_DOWN);
+                    float slewUp = (v_solar < BOOST_PV_NEAR_FLOOR_V) ? BOOST_DUTY_SLEW_UP_NEAR_FLOOR
+                                                                     : BOOST_DUTY_SLEW_UP;
+                    duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, slewUp, BOOST_DUTY_SLEW_DOWN);
 
                     // Force CV immediately near BMS threshold; short confirm for soft entry
                     if (v_bat_filt >= BOOST_CV_FORCE_VOLTAGE || max(v_bat, v_bat_filt) >= BOOST_CV_FORCE_VOLTAGE) {

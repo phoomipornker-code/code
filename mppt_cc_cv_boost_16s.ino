@@ -73,16 +73,21 @@ static const uint32_t PV_LOW_SHUTDOWN_MS = 2000;
 // Control tuning
 // --------------------------
 static const float MPPT_STEP_V = 0.10f;
-static const float MPPT_TRACK_K = 0.08f;           // converts PV-V error to Iref adaptation
-static const float DUTY_SLEW_UP_RAW = 4.0f;
-static const float DUTY_SLEW_DOWN_RAW = 6.0f;
+static const float CC_IREF_FLOOR_A = 2.5f;
+static const float CC_IREF_RECOVER_A = 0.15f;
+static const float CC_IREF_COLLAPSE_A = 0.20f;
+static const float PV_NEAR_FLOOR_V = 42.5f;
+static const float PV_COLLAPSE_V = 41.0f;
+static const float DUTY_SLEW_UP_RAW = 2.0f;
+static const float DUTY_SLEW_DOWN_RAW = 3.5f;
+static const float DUTY_SLEW_UP_NEAR_FLOOR = 0.4f;
 static const float CV_MIN_DUTY_MARGIN = 0.03f;     // +3%
 
-// Current PI (controls Ibat via duty)
-static const float CURR_KP = 14.0f;
-static const float CURR_KI = 55.0f;
-static const float CURR_OUT_MIN = -35.0f;
-static const float CURR_OUT_MAX = 45.0f;
+// Current PI (controls Ibat via duty) — softened for CC hunt
+static const float CURR_KP = 7.0f;
+static const float CURR_KI = 22.0f;
+static const float CURR_OUT_MIN = -18.0f;
+static const float CURR_OUT_MAX = 18.0f;
 
 // Voltage PI (in CV, outputs current reference)
 static const float VOLT_KP = 1.2f;
@@ -345,11 +350,11 @@ static void updateButtons() {
 }
 
 static void runMpptTask(const SensorSample& s) {
-  // P&O updates PV voltage reference
+  // P&O updates PV voltage reference only (display / future use).
   float dP = s.pPv - g_mpptLastPower;
   float dV = s.vPv - g_mpptLastVpv;
 
-  if (fabsf(dP) > 0.2f) {
+  if (fabsf(dP) > 1.0f) {
     if (dP > 0.0f) {
       g_mpptDir = (dV >= 0.0f) ? 1 : -1;
     } else {
@@ -360,10 +365,14 @@ static void runMpptTask(const SensorSample& s) {
   g_vpvRef += (float)g_mpptDir * MPPT_STEP_V;
   g_vpvRef = clampf(g_vpvRef, PV_VREF_MIN_V, PV_VREF_MAX_V);
 
-  // Track current cap from PV voltage error
-  float pvErr = s.vPv - g_vpvRef;
-  g_iRefMppt += MPPT_TRACK_K * pvErr;
-  g_iRefMppt = clampf(g_iRefMppt, 0.0f, CC_CURRENT_A);
+  // Hold CC Iref when PV healthy; only collapse below PV_COLLAPSE_V.
+  if (s.vPv < PV_COLLAPSE_V) {
+    g_iRefMppt -= CC_IREF_COLLAPSE_A;
+  } else if (s.vPv >= PV_MIN_START_V) {
+    g_iRefMppt += CC_IREF_RECOVER_A;
+  }
+  float irefMin = (s.vPv < PV_COLLAPSE_V) ? 0.5f : CC_IREF_FLOOR_A;
+  g_iRefMppt = clampf(g_iRefMppt, irefMin, CC_CURRENT_A);
 
   g_pAvailFilt = (g_pAvailFilt <= 0.01f) ? s.pPv : ema(s.pPv, g_pAvailFilt, 0.22f);
   g_mpptLastPower = s.pPv;
@@ -374,6 +383,11 @@ static void applyCurrentControl(const SensorSample& s, float iRef, float dtSec, 
   float currErr = iRef - s.iBatAbs;
   float deltaDuty = runPI(g_currPi, currErr, dtSec);
 
+  if (!cvMode && s.vPv < PV_NEAR_FLOOR_V && deltaDuty > 0.0f) {
+    deltaDuty = 0.0f;
+    g_currPi.integrator *= 0.92f;
+  }
+
   float targetDuty = g_dutyCmd + deltaDuty;
 
   // Keep duty above physics-based minimum when CV still below target.
@@ -383,7 +397,8 @@ static void applyCurrentControl(const SensorSample& s, float iRef, float dtSec, 
   }
 
   targetDuty = clampf(targetDuty, (float)BOOST_DUTY_RAW_MIN, (float)BOOST_DUTY_RAW_MAX);
-  g_dutyCmd = applySlew(targetDuty, g_dutyCmd, DUTY_SLEW_UP_RAW, DUTY_SLEW_DOWN_RAW);
+  float slewUp = (!cvMode && s.vPv < PV_NEAR_FLOOR_V) ? DUTY_SLEW_UP_NEAR_FLOOR : DUTY_SLEW_UP_RAW;
+  g_dutyCmd = applySlew(targetDuty, g_dutyCmd, slewUp, DUTY_SLEW_DOWN_RAW);
   setBoostDutyRaw((int)roundf(g_dutyCmd));
 }
 
@@ -442,12 +457,14 @@ static void controlLoopStep(uint32_t nowMs) {
     }
 
     case SOFTSTART: {
-      int targetRaw = estimateBoostDutyRaw(s.vPv, CV_VOLTAGE_V);
-      float nextDuty = min(g_dutyCmd + 2.0f, (float)targetRaw);
+      float seedVout = max(s.vBat + 1.5f, s.vPv + 2.0f);
+      int targetRaw = min(estimateBoostDutyRaw(s.vPv, seedVout), 120);
+      float nextDuty = min(g_dutyCmd + 1.5f, (float)targetRaw);
       g_dutyCmd = nextDuty;
       setBoostDutyRaw((int)roundf(g_dutyCmd));
 
-      if ((nowMs - g_stateEnterMs >= SOFTSTART_MS) || (s.iBatAbs > 0.4f)) {
+      if ((nowMs - g_stateEnterMs >= SOFTSTART_MS) || (s.iBatAbs > 0.35f)) {
+        g_iRefMppt = CC_CURRENT_A;
         enterState(CC_MPPT, nowMs);
       }
       break;
@@ -461,7 +478,6 @@ static void controlLoopStep(uint32_t nowMs) {
 
       float iRefByPower = mpptCurrentCapFromPower(s);
       float iRef = min(CC_CURRENT_A, min(g_iRefMppt, iRefByPower));
-      iRef = min(iRef, PV_CURRENT_SOFT_A);
       iRef = clampf(iRef, 0.0f, CC_CURRENT_A);
 
       applyCurrentControl(s, iRef, dtSec, false);
