@@ -48,3 +48,5 @@ Recent control update:
   remove hard ~14% duty snaps below CV.
 - v20: PV current skew (Ipv~5A/Ppv~220W vs Ibat~1.6A/Pout~87W) — live power-balance
   trim on Ipv + Iavail from Ibat, not inflated Ppv. Debug shows I raw/trim.
+- v21: PV current sensor declared broken (`PV_CURRENT_SENSOR_OK=false`) — estimate Ipv
+  from Pbat, ignore ADC Ipv for control/OC. Set true after replacing the sensor.
