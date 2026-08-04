@@ -37,3 +37,5 @@ Recent control update:
 - fixed CC low-current lock: removed measured-Ppv Iref ceiling; CC now seeks 6A and backs off only on PV collapse.
 - stabilized CV loop: wider hysteresis, Iref slew, near-target gentle duty steps, freeze in deadband.
 - CV IR-compensation + heavy Vfb LPF to reduce current/voltage chatter near 56V.
+- v16 CC stability: stop mapping (Vpv−Vref)→Iref (that bled Iref→0 when duty sagged PV);
+  hold CC Iref with floor 2.5A, softer PI/slew, freeze duty-up near PV floor 42.5V.
