@@ -46,3 +46,5 @@ Recent control update:
 - v19: CV sawtooth when sun rises — IrefCv asked 4A but plant only delivers ~2A.
   Match Iref to PV/Ibat deliverable (Iavail), freeze duty-up on falling Vpv,
   remove hard ~14% duty snaps below CV.
+- v20: PV current skew (Ipv~5A/Ppv~220W vs Ibat~1.6A/Pout~87W) — live power-balance
+  trim on Ipv + Iavail from Ibat, not inflated Ppv. Debug shows I raw/trim.

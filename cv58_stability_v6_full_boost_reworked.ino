@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-stability-v19-pv-adapt";
+const char* FW_VERSION_TAG = "cv58-stability-v20-ipv-trim";
 
 // =========================================================================
 // Hardware
@@ -80,6 +80,11 @@ const float CAL_SCALE_V_BAT   = 41.85;
 const float CAL_SCALE_I_SOLAR = 42.46;
 const float CAL_SCALE_I_AC    = 42.46;
 const float CAL_SCALE_I_BAT   = 42.46;
+// Manual PV current trim (1.0 = use CAL_SCALE as-is). Live power-balance trim overlays this.
+const float FIELD_TRIM_I_SOLAR = 1.0f;
+// If |Ppv - Pbat/eff| disagrees beyond this ratio, treat Ipv as skewed.
+const float IPV_POWER_BALANCE_MAX_RATIO = 1.35f;
+const float IPV_POWER_BALANCE_MIN_RATIO = 0.55f;
 
 const float NOISE_V_THRESHOLD = 0.5;
 const float NOISE_I_THRESHOLD = 0.08;
@@ -169,8 +174,11 @@ volatile float v_solar = 0, v_ac_in = 0, v_bat = 0;
 volatile float i_solar = 0, i_ac_in = 0, i_bat = 0;
 volatile float v_bat_filt = 0, i_bat_filt = 0;
 volatile float i_solar_mag = 0;
+volatile float i_solar_raw_mag = 0;   // before live trim (for debug)
 volatile float i_bat_charge_filt = 0;
 volatile float i_bat_charge_abs = 0;
+float iSolarLiveTrim = 1.0f;         // learns from V*I power balance while charging
+unsigned long last_ipv_skew_log_ms = 0;
 volatile bool ovp_latched = false;
 volatile float ovp_trip_voltage = 0.0;
 volatile unsigned long ovp_trip_ms = 0;
@@ -518,7 +526,7 @@ void TaskSampleData(void * pvParameters) {
             v_ac_in = (mv_pure_v1 / 1000.0) * CAL_SCALE_V_AC;
             v_bat   = (mv_pure_v2 / 1000.0) * CAL_SCALE_V_BAT;
 
-            i_solar = (mv_pure_i0 / 1000.0) * CAL_SCALE_I_SOLAR;
+            i_solar = (mv_pure_i0 / 1000.0) * CAL_SCALE_I_SOLAR * FIELD_TRIM_I_SOLAR;
             i_ac_in = (mv_pure_i1 / 1000.0) * CAL_SCALE_I_AC;
             i_bat   = (mv_pure_i2 / 1000.0) * CAL_SCALE_I_BAT;
 
@@ -541,9 +549,38 @@ void TaskSampleData(void * pvParameters) {
 
             v_bat_filt = vbat_filter_sum / (float)filter_count;
             i_bat_filt = ibat_filter_sum / (float)filter_count;
-            i_solar_mag = fabs(i_solar);
+            i_solar_raw_mag = fabsf(i_solar);
             i_bat_charge_filt = fabs(i_bat_filt);
             i_bat_charge_abs = fabs(i_bat);
+
+            // Live Ipv trim from boost power balance: Pin ≈ Pout/eff.
+            // Field: Ipv~5.1A/Ppv~220W vs Ibat~1.6A/Pout~87W → Ipv ~2.3× high.
+            if (raw_duty > 40 &&
+                i_bat_charge_filt > 0.70f &&
+                v_solar > 40.0f &&
+                i_solar_raw_mag > 0.35f) {
+                float pOut = (float)v_bat_filt * (float)i_bat_charge_filt;
+                float iPvExpect = pOut / boostMaxf((float)v_solar * BOOST_EFF_EST, 1.0f);
+                float ratio = iPvExpect / i_solar_raw_mag;
+                if (ratio >= 0.25f && ratio <= 2.8f) {
+                    iSolarLiveTrim = 0.04f * ratio + 0.96f * iSolarLiveTrim;
+                    iSolarLiveTrim = boostClampf(iSolarLiveTrim, 0.30f, 2.50f);
+                }
+                float bal = ((float)v_solar * i_solar_raw_mag) /
+                            boostMaxf(pOut / BOOST_EFF_EST, 1.0f);
+                if ((bal > IPV_POWER_BALANCE_MAX_RATIO || bal < IPV_POWER_BALANCE_MIN_RATIO) &&
+                    (now - last_ipv_skew_log_ms >= 2000)) {
+                    last_ipv_skew_log_ms = now;
+                    Serial.printf("[WARN] PV current skew: Iraw=%.2fA Iexpect≈%.2fA trim=%.3f Ppv=%.0fW Pbat=%.0fW\n",
+                                  i_solar_raw_mag, iPvExpect, iSolarLiveTrim,
+                                  (float)v_solar * i_solar_raw_mag, pOut);
+                }
+            }
+            i_solar_mag = i_solar_raw_mag * iSolarLiveTrim;
+            if (i_solar_raw_mag > 0.001f) {
+                i_solar = (i_solar >= 0.0f ? 1.0f : -1.0f) * i_solar_mag;
+            }
+
             float vbat_step = (last_vbat_sample > 0.0f) ? (v_bat - last_vbat_sample) : 0.0f;
             float vbat_filt_step = (last_vbat_filt_sample > 0.0f) ? (v_bat_filt - last_vbat_filt_sample) : 0.0f;
 
@@ -869,31 +906,37 @@ void TaskSampleData(void * pvParameters) {
                         boostNewCvEnterMs = 0;
                     }
                 } else if (boostNewMode == BOOST_NEW_CV) {
-                    // Freeze MPPT Iref hunting in CV — voltage loop owns current request.
-                    float pPv = v_solar * i_solar_mag;
-                    if (now - boostNewLastMpptMs >= BOOST_MPPT_PERIOD_MS) {
-                        boostNewLastMpptMs = now;
-                        boostNewPAvailFilt = (boostNewPAvailFilt <= 0.01f) ? pPv
-                                            : (0.22f * pPv + 0.78f * boostNewPAvailFilt);
-                    }
-
-                    // --- Adapt Iref to what the sun can actually deliver ---
-                    // Scope/log sawtooth: IrefCv~4A while plant only sustains ~1.5–2A →
-                    // duty climbs to ~23–25% then collapses. Match Iref to deliverable.
-                    float iFromPv = (boostNewPAvailFilt * BOOST_EFF_EST) /
-                                    boostMaxf((float)v_bat_filt, 40.0f);
-                    // Ipv can under-read on this hardware — also track observed Ibat peaks.
+                    // --- Adapt Iref to deliverable current (Ibat-primary) ---
+                    // Do NOT trust inflated Ppv when Ipv sensor is skewed (field: 220W PV vs 87W bat).
                     if (i_bat_charge_filt > boostNewIbatPeak) {
                         boostNewIbatPeak = i_bat_charge_filt;
                     } else {
-                        boostNewIbatPeak *= 0.997f;  // slow decay when sun/load changes
+                        boostNewIbatPeak *= 0.997f;
                     }
-                    float iDeliverable = boostMaxf(iFromPv, boostNewIbatPeak * 0.90f);
-                    iDeliverable = boostMaxf(iDeliverable, (float)i_bat_charge_filt);
+                    float pBat = (float)v_bat_filt * (float)i_bat_charge_filt;
+                    float pPvUse = (float)v_solar * (float)i_solar_mag;  // already live-trimmed
+                    float pinExpect = pBat / BOOST_EFF_EST;
+                    bool pvPowerPlausible =
+                        (pBat > 20.0f) &&
+                        (pPvUse <= pinExpect * IPV_POWER_BALANCE_MAX_RATIO) &&
+                        (pPvUse >= pinExpect * IPV_POWER_BALANCE_MIN_RATIO);
+                    if (now - boostNewLastMpptMs >= BOOST_MPPT_PERIOD_MS) {
+                        boostNewLastMpptMs = now;
+                        float pForAvail = pvPowerPlausible ? pPvUse : pinExpect;
+                        boostNewPAvailFilt = (boostNewPAvailFilt <= 0.01f) ? pForAvail
+                                            : (0.22f * pForAvail + 0.78f * boostNewPAvailFilt);
+                    }
+                    // Iavail follows observed battery current, with tiny margin — not raw Ppv.
+                    float iDeliverable = boostMaxf(boostNewIbatPeak * 0.95f, (float)i_bat_charge_filt);
+                    if (pvPowerPlausible) {
+                        float iFromPv = boostNewPAvailFilt * BOOST_EFF_EST /
+                                        boostMaxf((float)v_bat_filt, 40.0f);
+                        // Blend gently only when PV power agrees with battery power.
+                        iDeliverable = 0.65f * iDeliverable + 0.35f * iFromPv;
+                    }
                     float iAvailTarget = iDeliverable + BOOST_CV_IAVAIL_MARGIN_A;
                     if (boostNewIAvailFilt <= 0.01f) boostNewIAvailFilt = iAvailTarget;
                     else {
-                        // Fast down / slower up — track sun drop quickly, avoid Iref overshoot on rise.
                         float a = (iAvailTarget < boostNewIAvailFilt) ? 0.28f : BOOST_CV_IAVAIL_ALPHA;
                         boostNewIAvailFilt = a * iAvailTarget + (1.0f - a) * boostNewIAvailFilt;
                     }
@@ -1161,8 +1204,9 @@ void TaskSampleData(void * pvParameters) {
             Serial.println("=========================================================================================");
             Serial.printf("[DEBUG] System: %s | State: %s | Duty: %d%%\n",
                           (system_ON ? "ON " : "OFF"), state_label, active_duty_percent);
-            Serial.printf("  [PV ] V:%5.1fV I:%5.2fA P:%6.1fW | Vref:%.2fV Iref_mppt:%.2fA\n",
-                          v_solar, i_solar_mag, (v_solar * i_solar_mag), boostNewPvRef, boostNewIrefMppt);
+            Serial.printf("  [PV ] V:%5.1fV I:%5.2fA (raw:%4.2fA trim:%.2f) P:%6.1fW | Vref:%.2fV Iref_mppt:%.2fA\n",
+                          v_solar, i_solar_mag, i_solar_raw_mag, iSolarLiveTrim,
+                          (v_solar * i_solar_mag), boostNewPvRef, boostNewIrefMppt);
             Serial.printf("  [BAT] V:%5.2fV I:%5.2fA (abs:%5.2fA)",
                           v_bat_filt, i_bat_filt, i_bat_charge_filt);
             if (currentState == STATE_BOOST && boostNewMode == BOOST_NEW_CV) {
