@@ -39,3 +39,5 @@ Recent control update:
 - CV IR-compensation + heavy Vfb LPF to reduce current/voltage chatter near 56V.
 - v16 CC stability: stop mapping (Vpv−Vref)→Iref (that bled Iref→0 when duty sagged PV);
   hold CC Iref with floor 2.5A, softer PI/slew, freeze duty-up near PV floor 42.5V.
+- v17 CV climb: raise far-CV IrefCap 2.8→4.5A, softer duty-down, PV-headroom taper
+  instead of hard chop; mid PI gains; milder IR comp while climbing to 56V.
