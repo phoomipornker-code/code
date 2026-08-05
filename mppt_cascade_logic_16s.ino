@@ -1,110 +1,148 @@
 /**
  * =============================================================================
- *  MPPT Cascade Logic (ศึกษาจาก Simulink)
- *  โครง:  ModINC → ลูปแรงดันแผง → จำกัดกระแส(CC/CV) → ลูปกระแส → Duty
+ *  MPPT Cascade — โครงสร้างตรงแผนภาพ Simulink
  *
- *  เป้าหมายเครื่องคุณ (16S LiFePO4):
- *    CC = 6.0 A
- *    CV = 56.0 V
- *    แผง ~ Vmp 42.3 V
+ *  Vpv,Ipv ──┐
+ *  Ipv ───────┼──► ModINC ──► Vr (= Vpv,ref)
+ *  Vb ────────┘
+ *                   │
+ *                   ▼
+ *         Hv=1/5    Vr
+ *         Hv=1/5    Vpv
+ *              e_v = Hv*(Vr - Vpv)
+ *                   │
+ *                   ▼
+ *              Cvi(z) = (35z - 34.77)/(z - 1)
+ *                   │
+ *                   ▼
+ *                 ×(-1) ──► IL_star
+ *                   │
+ *                   ▼
+ *   Battery_Charging_Current_Control(IL_ref, IL_star) ──► IL_max
+ *                   │
+ *                   ▼
+ *         Hi=1/25   IL_max
+ *         Hi=1/25   iL
+ *              e_i = Hi*(IL_max - iL)
+ *                   │
+ *                   ▼
+ *              Cid(z) = (5.5z - 5.413)/(z - 1)
+ *                   │
+ *                   ▼
+ *                   d  (duty / PWM)
  *
- *  หมายเหตุ:
- *    - นี่คือโครงลอจิกให้อ่าน/ทดลอง ไม่ใช่ดรอปอินแทนสเก็ตช์ LCD เต็ม
- *    - เซ็นเซอร์ Ipv พัง: ตั้ง PV_CURRENT_SENSOR_OK = false จะประมาณ Ipv จาก Pbat
+ *  หมายเหตุสเกล:
+ *    - ค่า Hv/Hi/Cvi/Cid มาจากโมเดลในรูป (แพ็กเล็ก ~12V, IL_ref=12)
+ *    - เครื่องคุณ 16S: ใช้ USE_FIELD_16S=true จะเปลี่ยนเฉพาะขอบเขต Vr / IL_ref / CV
+ *      แต่เกน Cvi/Cid ยังต้องจูนบนฮาร์ดจริง (อย่าคาดหวังเลขเปเปอร์เสถียรทันที)
  * =============================================================================
  */
 
 #include <Arduino.h>
 #include <math.h>
 
-// -----------------------------
-// ฮาร์ดแวร์ (ปรับตามบอร์ดจริง)
-// -----------------------------
-static const int PIN_PWM_BOOST = 27;
-static const uint32_t PWM_FREQ_HZ = 50000;
-static const uint8_t  PWM_RES_BITS = 10;
-static const int PWM_RAW_MAX = (1 << PWM_RES_BITS) - 1;  // 1023
-static const int DUTY_RAW_MAX = 760;
+// =============================================================================
+// โปรไฟล์
+// =============================================================================
+// false = ตัวเลขตามแผนภาพเปเปอร์, true = ขอบเขตเข้าเครื่อง 16S ของคุณ
+static const bool USE_FIELD_16S = true;
 
-// -----------------------------
-// เป้าชาร์จ
-// -----------------------------
-static const float CC_A = 6.0f;
-static const float CV_V = 56.0f;
-static const float CV_ENTER_V = 55.50f;
-static const float CV_EXIT_V  = 54.80f;
-
-// -----------------------------
-// ขอบเขต MPPT (Vr)
-// -----------------------------
-static const float VR_INIT = 42.3f;
-static const float VR_MIN  = 40.0f;
-static const float VR_MAX  = 45.0f;
-static const float DELTA_V = 0.08f;     // ก้าวฐาน (ของเปเปอร์เล็กเกินสำหรับฮาร์ดแวร์จริง)
-static const float DP_DEADBAND_W = 0.5f;
-
-// เซ็นเซอร์กระแส PV พัง → ใช้ค่าประมาณ
+// เซ็นเซอร์ Ipv พัง → ประมาณจากกำลังแบต
 static const bool PV_CURRENT_SENSOR_OK = false;
 static const float EFF_EST = 0.90f;
 
 // -----------------------------
-// คาบเวลา (ms)
+// PWM
 // -----------------------------
-static const uint32_t CTRL_MS = 20;    // ลูปแรงดัน+กระแส  50 Hz
-static const uint32_t MPPT_MS = 100;   // ModINC ช้ากว่าชั้นใน
-static const uint32_t LOG_MS  = 500;
+static const int PIN_PWM_BOOST = 27;
+static const uint32_t PWM_FREQ_HZ = 50000;
+static const uint8_t  PWM_RES_BITS = 10;
+static const int PWM_RAW_MAX = 1023;
+static const int DUTY_RAW_MAX = 760;   // เผื่อฮาร์ดแวร์; ในซิมพอร์ต d เป็น 0..1
 
 // -----------------------------
-// เกนคอนโทรลเลอร์ (รูปแบบเดียวกับ Cvi/Cid: u+= a*e - b*e_prev)
-// ค่าเริ่มต้นต้องจูนบนฮาร์ดแวร์จริง — เริ่มอ่อนก่อน
+// สเกลตามแผนภาพ
 // -----------------------------
-// ลูปแรงดันแผง: error = Vr - Vpv  → ออกเป็น I_star (แอมป์)
-static const float CVI_A = 0.40f;
-static const float CVI_B = 0.38f;
-static const float I_STAR_MIN = 0.0f;
-static const float I_STAR_MAX = CC_A;
+static const float Hv = 1.0f / 5.0f;     // บล็อก Hv
+static const float Hi = 1.0f / 25.0f;    // บล็อก Hi
 
-// ลูปกระแส: error = I_max - Ibat → ออกเป็น delta-duty (raw)
-static const float CID_A = 8.0f;
-static const float CID_B = 7.6f;
-static const float DUTY_SLEW_UP = 2.0f;
-static const float DUTY_SLEW_DOWN = 3.0f;
+// Cvi(z) = (35z - 34.77)/(z - 1)
+// u[k] = u[k-1] + 35*e[k] - 34.77*e[k-1]
+static const float CVI_B0 = 35.0f;
+static const float CVI_B1 = 34.77f;
 
-// =============================================================================
-// สถานะ
-// =============================================================================
-struct Sensors {
-  float vPv;
-  float iPv;      // วัดหรือประมาณ
-  float iPvRaw;   // ค่าดิบ ADC (ถ้ามี)
-  float vBat;
-  float iBat;     // |Ibat|
+// Cid(z) = (5.5z - 5.413)/(z - 1)
+// u[k] = u[k-1] + 5.5*e[k] - 5.413*e[k-1]
+static const float CID_B0 = 5.5f;
+static const float CID_B1 = 5.413f;
+
+// -----------------------------
+// ขอบเขตตามโปรไฟล์
+// -----------------------------
+struct Profile {
+  float vrInit, vrMin, vrMax, deltaV, dpDeadW;
+  float ilRef;          // เพดาน CC (= ค่าคงที่ 12 ในรูป)
+  float vbMaxReset;     // เกณฑ์รีเซ็ตใน ModINC (เปเปอร์ = 14.4)
+  float cvV, cvEnter, cvExit;
+  bool  enableCvExtra;  // เพิ่มชั้น CV นอกเหนือจากแผนภาพ
 };
 
-static float g_vr = VR_INIT;
-static float g_iStar = 0.0f;
-static float g_iMax = 0.0f;
-static float g_duty = 0.0f;
-static bool  g_inCv = false;
+static Profile PRO_PAPER = {
+  18.1f, 16.4f, 18.122f, 0.0001f, 0.007f,
+  12.0f,
+  14.4f,
+  14.4f, 14.2f, 13.8f,
+  false
+};
 
-// Cvi state
-static float g_cviU = 0.0f;
-static float g_cviEprev = 0.0f;
+static Profile PRO_16S = {
+  42.3f, 40.0f, 45.0f, 0.08f, 0.5f,
+  6.0f,             // CC ของคุณ
+  56.0f,            // แทน Vbmax 14.4
+  56.0f, 55.50f, 54.80f,
+  true              // เพิ่ม CV limit
+};
 
-// Cid state
-static float g_cidU = 0.0f;
-static float g_cidEprev = 0.0f;
+static Profile& P() { return USE_FIELD_16S ? PRO_16S : PRO_PAPER; }
+
+// -----------------------------
+// จังหวะ
+// -----------------------------
+static const uint32_t CTRL_MS = 20;
+static const uint32_t MPPT_MS = 100;
+static const uint32_t LOG_MS  = 500;
+
+// =============================================================================
+// สถานะบล็อก
+// =============================================================================
+struct Sensors {
+  float Vpv;
+  float Ipv;
+  float IpvRaw;
+  float Vb;
+  float iL;     // กระแสเหนี่ยวนำ/ชาร์จ (ในเครื่องคุณใช้ |Ibat|)
+};
 
 // ModINC persistent
-static float g_vOld = VR_INIT;
-static float g_iOld = 0.0f;
-static float g_pOld = 0.0f;
-static float g_vrOld = VR_INIT;
-static bool  g_mpptInit = false;
+static float Vold = 0, Iold = 0, Pold = 0, Vrold = 0;
+static bool  mpptInit = false;
 
-static uint32_t g_lastCtrl = 0;
-static uint32_t g_lastMppt = 0;
-static uint32_t g_lastLog = 0;
+// Cvi state
+static float cvi_u = 0.0f;
+static float cvi_e_prev = 0.0f;
+
+// Cid state
+static float cid_u = 0.0f;
+static float cid_e_prev = 0.0f;
+
+// outputs (สำหรับ log)
+static float g_Vr = 0.0f;
+static float g_IL_star = 0.0f;
+static float g_IL_max = 0.0f;
+static float g_d = 0.0f;          // 0..1 ตามพอร์ต d ในรูป
+static bool  g_inCv = false;
+
+static uint32_t tCtrl = 0, tMppt = 0, tLog = 0;
 
 // =============================================================================
 // ยูทิล
@@ -114,239 +152,224 @@ static float clampf(float x, float lo, float hi) {
   if (x > hi) return hi;
   return x;
 }
-
 static float maxf(float a, float b) { return (a > b) ? a : b; }
 static float minf(float a, float b) { return (a < b) ? a : b; }
 
-static float slew(float target, float cur, float upStep, float downStep) {
-  float d = target - cur;
-  if (d > upStep) return cur + upStep;
-  if (d < -downStep) return cur - downStep;
-  return target;
-}
-
-static void setDutyRaw(int raw) {
-  raw = (int)clampf((float)raw, 0.0f, (float)DUTY_RAW_MAX);
+static void setDutyFromUnit(float d_unit) {
+  // ในซิมพอร์ต d เป็นสัดส่วน; แปลงเป็น raw PWM
+  d_unit = clampf(d_unit, 0.0f, 1.0f);
+  int raw = (int)lroundf(d_unit * (float)PWM_RAW_MAX);
+  if (raw > DUTY_RAW_MAX) raw = DUTY_RAW_MAX;
   ledcWrite(PIN_PWM_BOOST, raw);
 }
 
 // =============================================================================
-// (1) ModINC — แก้บั๊ก Pold ไม่ได้เซฟ + สเกลเข้าแผงคุณ
-//     เอาต์พุต: Vr
+// บล็อก 1: ModINC  (ตรงฟังก์ชัน MATLAB + แก้ Pold=P)
 // =============================================================================
-static float modInc(float V, float I, float Vb) {
-  if (!g_mpptInit) {
-    g_vOld = V;
-    g_iOld = I;
-    g_pOld = V * I;
-    g_vrOld = clampf(V, VR_MIN, VR_MAX);
-    g_vr = g_vrOld;
-    g_mpptInit = true;
-    return g_vr;
+static float Mod_INC(float V, float I, float Vb) {
+  const float Vrinit = P().vrInit;
+  const float Vrmax  = P().vrMax;
+  const float Vrmin  = P().vrMin;
+  const float deltaV = P().deltaV;
+
+  if (!mpptInit) {
+    Vold = V;
+    Iold = 0.0f;
+    Pold = 0.0f;
+    Vrold = Vrinit;
+    mpptInit = true;
   }
 
-  // ใกล้/เกิน CV: หยุดไล่ MPP แรงๆ (แทน Vb>14.4 ในเปเปอร์)
-  if (Vb >= (CV_V - 0.3f)) {
-    g_vr = g_vrOld;
-    g_vOld = V;
-    g_iOld = I;
-    g_pOld = V * I;
-    return g_vr;
+  // ของเปเปอร์: if Vb > 14.4 → รีเซ็ต
+  if (Vb > P().vbMaxReset) {
+    Iold = 0.0f;
+    Vrold = USE_FIELD_16S ? clampf(V, Vrmin, Vrmax) : 22.1f;
   }
 
-  float P = V * I;
-  float dP = P - g_pOld;
-  float dV = V - g_vOld;
-  float dI = I - g_iOld;
+  float Pnow = V * I;
+  float dP = Pnow - Pold;
+  float dV = V - Vold;
+  float dI = I - Iold;
   float M = fabsf(dP);
 
-  float Vr = g_vrOld;
+  float Vr;
 
-  if (M < DP_DEADBAND_W) {
-    Vr = g_vrOld;  // กำลังนิ่ง — ค้าง Vr
-  } else if (fabsf(dV) < 1e-4f) {
-    // dV ≈ 0
-    if (fabsf(dI) < 1e-4f) {
-      Vr = g_vrOld;
-    } else if (dI > 0.0f) {
-      Vr = g_vrOld + (M * DELTA_V * 0.02f);
-    } else {
-      Vr = g_vrOld - (M * DELTA_V * 0.02f);
-    }
+  if (M < P().dpDeadW) {
+    Vr = Vrold;
   } else {
-    // Incremental conductance: sign(V*dI + I*dV)
-    float inc = V * dI + I * dV;
-    if (fabsf(inc) < 1e-4f) {
-      Vr = g_vrOld;  // ที่ MPP
-    } else if (inc > 0.0f) {
-      // ยังอยู่ฝั่งกำลังขึ้นตามทิศ dV
-      if (dV > 0.0f) Vr = g_vrOld + (M * DELTA_V * 0.02f);
-      else           Vr = g_vrOld - (M * DELTA_V * 0.02f);
+    if (dV == 0.0f) {
+      if (dI == 0.0f) {
+        Vr = Vrold;
+      } else if (dI > 0.0f) {
+        Vr = Vrold + (M * deltaV);
+      } else {
+        Vr = Vrold - (M * deltaV);
+      }
     } else {
-      // เลย MPP — กลับทิศ
-      if (dV > 0.0f) Vr = g_vrOld - DELTA_V;
-      else           Vr = g_vrOld + (M * DELTA_V * 0.02f);
+      float cond = V * dI + I * dV;   // IncCond
+      if (cond == 0.0f) {
+        Vr = Vrold;
+      } else if (cond > 0.0f) {
+        if (dV > 0.0f) Vr = Vrold + (M * deltaV);
+        else           Vr = Vrold - (M * deltaV);
+      } else {
+        if (dV > 0.0f) Vr = Vrold - deltaV;
+        else           Vr = Vrold + (M * deltaV);
+      }
     }
   }
 
-  // ถ้าหลุดกรอบ ให้ค้างค่าเดิม (ตามลอจิกเปเปอร์)
-  if (Vr >= VR_MAX || Vr <= VR_MIN) {
-    Vr = g_vrOld;
+  if (Vr >= Vrmax || Vr <= Vrmin) {
+    Vr = Vrold;
   }
-  Vr = clampf(Vr, VR_MIN, VR_MAX);
 
-  // ★ สำคัญ: เซฟประวัติ (ใน MATLAB ต้นฉบับลืม Pold=P)
-  g_vrOld = Vr;
-  g_vOld = V;
-  g_iOld = I;
-  g_pOld = P;
-  g_vr = Vr;
+  // ★ แก้บั๊กต้นฉบับ: ต้องเซฟ Pold
+  Vrold = Vr;
+  Vold = V;
+  Iold = I;
+  Pold = Pnow;
+
+  g_Vr = Vr;
   return Vr;
 }
 
 // =============================================================================
-// (2) ลูปแรงดันแผง Cvi — รูปแบบเดียวกับ (35z-34.77)/(z-1)
-//     u[k] = u[k-1] + A*e[k] - B*e[k-1]
-//     หมายเหตุ: ใน Simulink มีคูณ -1 เพราะ duty↑ มักดึง Vpv ลง
-//     ที่นี่นิยาม e = Vr - Vpv แล้วให้ I_star เพิ่มเมื่อ Vpv ต่ำกว่า Vr
+// บล็อก 2: ลูปแรงดันแผง
+//   e = Hv*Vr - Hv*Vpv
+//   y = Cvi(e)
+//   IL_star = -y
 // =============================================================================
-static float runCvi(float Vr, float Vpv) {
-  float e = Vr - Vpv;   // ต้องการให้ Vpv ตาม Vr
-  g_cviU = g_cviU + CVI_A * e - CVI_B * g_cviEprev;
-  g_cviEprev = e;
-  g_cviU = clampf(g_cviU, I_STAR_MIN, I_STAR_MAX);
-  g_iStar = g_cviU;
-  return g_iStar;
+static float Cvi_block(float Vr, float Vpv) {
+  float e = Hv * Vr - Hv * Vpv;   // เหมือนแผนภาพ: ทั้งคู่ผ่าน Hv แล้วลบกัน
+  // Cvi(z)=(35z-34.77)/(z-1)
+  cvi_u = cvi_u + CVI_B0 * e - CVI_B1 * cvi_e_prev;
+  cvi_e_prev = e;
+
+  float IL_star = -1.0f * cvi_u;  // บล็อก Gain = -1
+  g_IL_star = IL_star;
+  return IL_star;
 }
 
 // =============================================================================
-// (3) Battery Charging Current Control (+ ขยายเป็น CV)
-//     ต้นฉบับ: IL_max = min(IL_star, IL_ref)
-//     ของเรา:  IL_max = min(IL_star, CC, I_cv)
+// บล็อก 3: Battery_Charging_Current_Control  (ตรง MATLAB)
+//   + ชั้น CV เสริมเมื่อ USE_FIELD_16S
 // =============================================================================
-static float batteryCurrentLimit(float iStar, float vBat, float iBat) {
-  // เข้า/ออก CV
-  if (!g_inCv && vBat >= CV_ENTER_V) g_inCv = true;
-  if (g_inCv && vBat <= CV_EXIT_V)  g_inCv = false;
+static float Battery_Charging_Current_Control(float IL_ref, float IL_star, float Vb) {
+  float IL;
+  if (IL_star >= IL_ref) IL = IL_ref;
+  else                   IL = IL_star;
 
-  float iCc = CC_A;
-  float iCv = CC_A;
-
-  if (g_inCv) {
-    // ยิ่งใกล้/เกิน CV ยิ่งลดเพดานกระแส
-    float vErr = CV_V - vBat;
-    if (vErr <= 0.0f) {
-      iCv = 0.2f;  // เกินเป้า — เหลือกระแสจิ๋ว
-    } else {
-      // เชิงเส้นหยาบ: ไกล 1V → ได้เกือบ CC, ใกล้ 0V → กระแสต่ำ
-      iCv = clampf(vErr * 4.0f, 0.3f, CC_A);
+  // แผนภาพเดิมไม่มี CV — เพิ่มเฉพาะโปรไฟล์สนาม
+  if (P().enableCvExtra) {
+    if (!g_inCv && Vb >= P().cvEnter) g_inCv = true;
+    if (g_inCv && Vb <= P().cvExit)  g_inCv = false;
+    if (g_inCv) {
+      float vErr = P().cvV - Vb;
+      float iCv;
+      if (vErr <= 0.0f) iCv = 0.2f;
+      else              iCv = clampf(vErr * 4.0f, 0.3f, IL_ref);
+      if (iCv < IL) IL = iCv;
     }
   }
 
-  // ลอจิกเดียวกับ MATLAB + ชั้น CV
-  float iLim = iCc;
-  if (iStar < iLim) iLim = iStar;
-  if (iCv < iLim) iLim = iCv;
-
-  // กันกระแทก: ถ้าวัดได้เกิน CC มาก ให้ตัดลง
-  if (iBat > (CC_A + 0.4f)) {
-    iLim = minf(iLim, CC_A * 0.7f);
-  }
-
-  g_iMax = maxf(iLim, 0.0f);
-  return g_iMax;
+  g_IL_max = IL;
+  return IL;
 }
 
 // =============================================================================
-// (4) ลูปกระแส Cid → duty
-//     u[k] = u[k-1] + A*e[k] - B*e[k-1]
+// บล็อก 4: ลูปกระแส → d
+//   e = Hi*IL_max - Hi*iL
+//   d = Cid(e)
 // =============================================================================
-static float runCid(float iMax, float iBat) {
-  float e = iMax - iBat;
-  g_cidU = g_cidU + CID_A * e - CID_B * g_cidEprev;
-  g_cidEprev = e;
-  g_cidU = clampf(g_cidU, 0.0f, (float)DUTY_RAW_MAX);
+static float Cid_block(float IL_max, float iL) {
+  float e = Hi * IL_max - Hi * iL;
+  // Cid(z)=(5.5z-5.413)/(z-1)
+  cid_u = cid_u + CID_B0 * e - CID_B1 * cid_e_prev;
+  cid_e_prev = e;
 
-  g_duty = slew(g_cidU, g_duty, DUTY_SLEW_UP, DUTY_SLEW_DOWN);
-  return g_duty;
+  // ในซิมพอร์ต d มักอิ่มตัว 0..1
+  float d = clampf(cid_u, 0.0f, 1.0f);
+  g_d = d;
+  return d;
 }
 
 // =============================================================================
-// อ่านเซ็นเซอร์ (โครง — ใส่ ADC จริงของคุณตรงนี้)
+// อ่านเซ็นเซอร์ — ใส่ ADS จริงตรงนี้
 // =============================================================================
-static Sensors readSensorsStub() {
+static Sensors readSensors() {
   Sensors s;
-  // TODO: แทนที่ด้วย ADS1115 / ตัวกรองจริง
-  // ค่าด้านล่างเป็น stub ให้คอมไพล์ดูลอจิกได้
-  s.vPv = 43.5f;
-  s.iPvRaw = 5.1f;     // ค่าเพี้ยนจากเซ็นเซอร์พัง (ตัวอย่าง)
-  s.vBat = 55.7f;
-  s.iBat = 1.6f;
+  // TODO: แทนที่ด้วย ADS1115 จริง
+  s.Vpv = 43.5f;
+  s.IpvRaw = 5.1f;
+  s.Vb = 55.7f;
+  s.iL = 1.6f;   // ใช้ |Ibat| เป็น iL
 
   if (PV_CURRENT_SENSOR_OK) {
-    s.iPv = s.iPvRaw;
+    s.Ipv = s.IpvRaw;
   } else {
-    // ประมาณจากสมดุลกำลังบูสต์: Pin ≈ Pout/eff
-    if (s.vPv > 38.0f && s.iBat > 0.05f) {
-      s.iPv = (s.vBat * s.iBat) / maxf(s.vPv * EFF_EST, 1.0f);
-    } else {
-      s.iPv = 0.0f;
-    }
+    if (s.Vpv > 38.0f && s.iL > 0.05f)
+      s.Ipv = (s.Vb * s.iL) / maxf(s.Vpv * EFF_EST, 1.0f);
+    else
+      s.Ipv = 0.0f;
   }
   return s;
 }
 
 // =============================================================================
-// setup / loop
+// setup / loop — ลำดับเรียกตรงแผนภาพ
 // =============================================================================
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("[BOOT] mppt_cascade_logic_16s");
-  Serial.println("[BOOT] Flow: ModINC -> Cvi(Vpv) -> min(CC,CV) -> Cid(Ibat) -> Duty");
-  Serial.printf("[BOOT] CC=%.1fA CV=%.1fV PV_SENSOR_OK=%d\n",
-                CC_A, CV_V, PV_CURRENT_SENSOR_OK ? 1 : 0);
+  Serial.println("[BOOT] Cascade = Simulink diagram (ModINC/Cvi/Limit/Cid)");
+  Serial.printf("[BOOT] PROFILE=%s  IL_ref=%.1f  PV_SENSOR_OK=%d\n",
+                USE_FIELD_16S ? "16S_FIELD" : "PAPER",
+                P().ilRef, PV_CURRENT_SENSOR_OK ? 1 : 0);
+  Serial.println("[BOOT] Hv=1/5  Cvi=(35z-34.77)/(z-1)  x(-1)");
+  Serial.println("[BOOT] Limit=min(IL_star,IL_ref)  Hi=1/25  Cid=(5.5z-5.413)/(z-1)");
 
   ledcAttach(PIN_PWM_BOOST, PWM_FREQ_HZ, PWM_RES_BITS);
-  setDutyRaw(0);
+  ledcWrite(PIN_PWM_BOOST, 0);
 
-  g_lastCtrl = millis();
-  g_lastMppt = millis();
-  g_lastLog = millis();
+  Vrold = P().vrInit;
+  g_Vr = Vrold;
+  tCtrl = tMppt = tLog = millis();
 }
 
 void loop() {
   uint32_t now = millis();
+  if (now - tCtrl < CTRL_MS) return;
+  tCtrl = now;
 
-  // ---------- ชั้นควบคุมเร็ว (Cvi + limit + Cid) ----------
-  if (now - g_lastCtrl >= CTRL_MS) {
-    g_lastCtrl = now;
-    Sensors s = readSensorsStub();
+  Sensors s = readSensors();
 
-    // ---------- ชั้น MPPT ช้า ----------
-    if (now - g_lastMppt >= MPPT_MS) {
-      g_lastMppt = now;
-      modInc(s.vPv, s.iPv, s.vBat);
-    }
+  // ---- (1) ModINC @ อัตราส่วนช้ากว่า ----
+  if (now - tMppt >= MPPT_MS) {
+    tMppt = now;
+    Mod_INC(s.Vpv, s.Ipv, s.Vb);          // → g_Vr
+  }
 
-    float iStar = runCvi(g_vr, s.vPv);
-    float iMax  = batteryCurrentLimit(iStar, s.vBat, s.iBat);
-    float duty  = runCid(iMax, s.iBat);
-    setDutyRaw((int)lroundf(duty));
+  // ---- (2) ลูปแรงดันแผง ----
+  float IL_star = Cvi_block(g_Vr, s.Vpv); // Hv → Cvi → ×(-1)
 
-    if (now - g_lastLog >= LOG_MS) {
-      g_lastLog = now;
-      Serial.println("=========================================================================================");
-      Serial.printf("Vr=%.2f Vpv=%.2f | Istar=%.2f Imax=%.2f Ibat=%.2f | CV=%d Duty=%.0f (%.0f%%)\n",
-                    g_vr, s.vPv, iStar, iMax, s.iBat,
-                    g_inCv ? 1 : 0, duty, 100.0f * duty / 1023.0f);
-      Serial.printf("Ipv=%.2fA (%s raw=%.2f) Ppv≈%.1fW Pbat≈%.1fW\n",
-                    s.iPv,
-                    PV_CURRENT_SENSOR_OK ? "SENSOR" : "EST",
-                    s.iPvRaw,
-                    s.vPv * s.iPv,
-                    s.vBat * s.iBat);
-      Serial.println("=========================================================================================");
-    }
+  // ---- (3) จำกัดกระแสแบต ----
+  float IL_max = Battery_Charging_Current_Control(P().ilRef, IL_star, s.Vb);
+
+  // ---- (4) ลูปกระแส → duty ----
+  float d = Cid_block(IL_max, s.iL);      // Hi → Cid → d
+  setDutyFromUnit(d);
+
+  if (now - tLog >= LOG_MS) {
+    tLog = now;
+    Serial.println("=========================================================================================");
+    Serial.printf("ModINC: Vr=%.3f | Vpv=%.2f Ipv=%.2f (%s)\n",
+                  g_Vr, s.Vpv, s.Ipv, PV_CURRENT_SENSOR_OK ? "sensor" : "EST");
+    Serial.printf("Cvi:    IL_star=%.3f\n", g_IL_star);
+    Serial.printf("Limit:  IL_ref=%.2f  IL_max=%.3f  CV=%d  Vb=%.2f\n",
+                  P().ilRef, g_IL_max, g_inCv ? 1 : 0, s.Vb);
+    Serial.printf("Cid:    iL=%.2f  d=%.4f  dutyPWM=%d (%.1f%%)\n",
+                  s.iL, g_d, (int)lroundf(g_d * PWM_RAW_MAX),
+                  100.0f * g_d);
+    Serial.println("=========================================================================================");
   }
 }
