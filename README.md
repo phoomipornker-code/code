@@ -5,6 +5,7 @@
 Added sketch:
 
 - `mppt_cc_cv_boost_16s.ino`
+- `mppt_cascade_logic_16s.ino` (clean cascade logic from Simulink: ModINC→Cvi→CC/CV limit→Cid)
 - `legacy_boost_dropin_patch.md` (drop-in patch for replacing BOOST section in an existing legacy sketch)
 - `legacy_cv58_v5_exact_boost_replace.md` (exact replace guide matched to the user-provided `cv58-stability-v5` code)
 - `cv58_stability_v6_full_boost_reworked.ino` (full legacy-style sketch with BOOST section fully reworked to MPPT->CC->CV)
