@@ -1,0 +1,6 @@
+เปิดโฟลเดอร์นี้ใน Arduino IDE แล้ว Upload
+
+Boot ต้องเห็น:
+[BOOT] cv58-boost-v14-forward-v83
+
+v83: หน่วง Boost CV ไม่ให้แกว่ง (แคป iReq ตาม Ppv + duty นุ่มขึ้น)

@@ -1,0 +1,9 @@
+Flash folder: cv58-boost-v14-forward-v82/
+
+Or open firmware/firmware.ino
+
+Boot must show:
+[BOOT] cv58-boost-v14-forward-v82
+
+Boost BMS/OVP restored from cv58-stability-v14-cv-stable.
+Forward control unchanged (v75/v81).

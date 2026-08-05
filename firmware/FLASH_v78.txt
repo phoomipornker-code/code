@@ -1,0 +1,34 @@
+# วิธีได้โค้ด v78 ที่ชาร์จได้ (สำคัญ)
+
+## ดาวน์โหลดทั้งโฟลเดอร์ (แนะนำ)
+
+กดลิงก์นี้ จะได้ไฟล์ ZIP ทั้งโปรเจกต์:
+
+https://github.com/phoomipornker-code/code/archive/refs/heads/cursor/fix-forward-keep-boost-1b21.zip
+
+แตกไฟล์แล้วเข้าโฟลเดอร์:
+
+```text
+code-cursor-fix-forward-keep-boost-1b21/firmware/
+```
+
+เปิดด้วย Arduino IDE ที่ไฟล์ **firmware.ino** แล้ว Upload
+
+## อย่าใช้ branch main
+
+บน main ไม่มีเฟิร์มแวร์ชุดนี้ — ต้องใช้ branch:
+
+cursor/fix-forward-keep-boost-1b21
+
+## หลังแฟลช ต้องเห็น
+
+```text
+[BOOT] cv58-boost-v14-forward-v78 | …
+```
+
+ถ้าขึ้นคนละบรรทัด = แฟลชไฟล์ผิดชุด
+
+## เนื้อหาโค้ด
+
+firmware.ino = ชุดเดียวกับ cv58-boost-v14-forward-v63 ที่ชาร์จได้
+เปลี่ยนแค่ชื่อบูตเป็น v78

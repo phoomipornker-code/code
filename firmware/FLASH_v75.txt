@@ -1,0 +1,15 @@
+# Flash v75
+
+ดาวน์โหลด ZIP:
+
+https://github.com/phoomipornker-code/code/archive/refs/heads/cursor/fix-forward-keep-boost-1b21.zip
+
+เปิดโฟลเดอร์ `firmware/` → Upload `firmware.ino`
+
+หลังแฟลชต้องเห็น:
+
+```text
+[BOOT] cv58-boost-v14-forward-v75 | …
+```
+
+อย่าใช้ branch `main`

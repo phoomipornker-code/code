@@ -1,0 +1,28 @@
+flowchart TD
+    A(["STANDBY"]) --> M{"STOP: toggle mode"}
+    M --> A
+    A --> S{"Selected FORWARD + START?"}
+    S -- no --> A
+    S -- yes --> B{"Bat 40..56.4V and bridge DC >= 95V?"}
+    B -- fail --> ERR["ERROR"] --> A
+    B -- ok --> C["AC relay ON, FWD_SOFTSTART"]
+    C --> LOOP["Read sensors"]
+    LOOP --> F{"Fault? OVP/BMS/ADC/AC"}
+    F -- yes --> KILL["PWM off, latch"] --> A
+    F -- no --> H{"FULL HOLD?"}
+    H -- yes --> R{"Vbat <= 54V?"}
+    R -- yes --> RESUME --> LOOP
+    R -- no --> HOLD --> LOOP
+    H -- no --> PH{"Phase"}
+
+    PH -- SoftStart --> SS["Ramp; ready I>=0.4A or 2.5s"]
+    SS --> CC
+    PH -- CC --> CC["CC 5A taper, PI 14/55"]
+    CC --> ENT{"Enter CV 55.5/55.7?"}
+    ENT -- no --> LOOP
+    ENT -- yes --> CV
+    PH -- CV --> CV["CV like Boost"]
+    CV --> FULL{"Full 60s?"}
+    FULL -- yes --> Q["FULL HOLD"] --> LOOP
+    FULL -- no --> LOOP
+    PH -- DONE --> Q
