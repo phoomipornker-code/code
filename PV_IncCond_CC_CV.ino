@@ -44,6 +44,10 @@ SemaphoreHandle_t i2cMutex;
 // --------------------------------------------------------------------------
 const float TARGET_CV_VOLTAGE = 56.0f;
 const float TARGET_CC_CURRENT = 6.0f;
+const float BOOST_EFFICIENCY_ESTIMATE = 0.90f;
+const float POWER_MODE_HYSTERESIS_W = 15.0f;
+const float CC_EXIT_CURRENT_MARGIN_A = 0.30f;
+const uint32_t CC_EXIT_CONFIRM_MS = 200;
 
 const float MIN_PV_START_VOLTAGE = 42.0f;
 const float PV_SHUTDOWN_VOLTAGE  = 39.0f;
@@ -132,7 +136,8 @@ const float DUTY_SLEW_DOWN_COUNTS = 6.0f;
 enum ChargerState {
   CHARGER_OFF,
   CHARGER_SOFTSTART,
-  CHARGER_MPPT_CC,
+  CHARGER_MPPT,
+  CHARGER_CC,
   CHARGER_CV,
   CHARGER_FULL,
   CHARGER_FAULT
@@ -163,6 +168,7 @@ bool incCondReady = false;
 uint32_t stateEntryMs = 0;
 uint32_t lastSampleMs = 0;
 uint32_t lastMpptMs = 0;
+uint32_t ccExitConditionMs = 0;
 uint32_t fullConditionMs = 0;
 float totalWh = 0.0f;
 
@@ -255,6 +261,7 @@ void resetControllers() {
 void enterState(ChargerState newState) {
   chargerState = newState;
   stateEntryMs = millis();
+  ccExitConditionMs = 0;
 
   if (newState == CHARGER_OFF ||
       newState == CHARGER_FULL ||
@@ -392,67 +399,11 @@ void calibrateCurrentOffsets() {
 // --------------------------------------------------------------------------
 // Charger control
 // --------------------------------------------------------------------------
-void runSoftStart() {
-  float outputVoltage = fmaxf(vBat, vSolar + 2.0f);
-  float estimatedDuty = 1.0f - vSolar / outputVoltage + 0.03f;
-  estimatedDuty = clampf(estimatedDuty, 0.02f, DUTY_MAX);
-
-  float rawStep = 2.0f / PWM_FULL_SCALE;
-  float nextDuty = applySlew(
-      estimatedDuty,
-      dutyCommand,
-      rawStep,
-      5.0f / PWM_FULL_SCALE);
-
-  setBoostDuty(nextDuty);
-
-  if (iBatCharge >= 0.4f ||
-      millis() - stateEntryMs >= SOFTSTART_MS) {
-    currentIntegrator = 0.0f;
-    enterState(CHARGER_MPPT_CC);
-  }
+float requiredPvPowerForCc() {
+  return vBat * TARGET_CC_CURRENT / BOOST_EFFICIENCY_ESTIMATE;
 }
 
-void runMpptCc() {
-  uint32_t now = millis();
-
-  if (now - lastMpptMs >= MPPT_PERIOD_MS) {
-    lastMpptMs = now;
-
-    bool ccIsLimiting =
-        mpptIref >= TARGET_CC_CURRENT - 0.05f &&
-        iBatCharge >= TARGET_CC_CURRENT - 0.15f;
-
-    // MPPT is held while the battery CC limit intentionally curtails power.
-    if (ccIsLimiting) {
-      syncIncCond(vSolar, iSolar);
-    } else {
-      updateIncCond(vSolar, iSolar);
-    }
-
-    float pvVoltageError = vSolar - mpptVref;
-    mpptIref += MPPT_VOLT_TO_IREF_GAIN * pvVoltageError;
-    mpptIref = clampf(mpptIref, 0.0f, TARGET_CC_CURRENT);
-  }
-
-  float currentReference = fminf(mpptIref, TARGET_CC_CURRENT);
-
-  if (vSolar < PV_COLLAPSE_VOLTAGE) {
-    float sag = PV_COLLAPSE_VOLTAGE - vSolar;
-    float scale = clampf(1.0f - 0.35f * sag, 0.15f, 1.0f);
-    currentReference *= scale;
-  }
-
-  // Gentle taper before CV entry.
-  if (vBat >= 54.8f) {
-    float taper = clampf(
-        (TARGET_CV_VOLTAGE - vBat) /
-        (TARGET_CV_VOLTAGE - 54.8f),
-        0.10f,
-        1.0f);
-    currentReference *= taper;
-  }
-
+void runBatteryCurrentLoop(float currentReference) {
   float currentError = currentReference - iBatCharge;
   float dutyDeltaCounts = runPI(
       currentError,
@@ -472,10 +423,100 @@ void runMpptCc() {
       dutyCommand,
       DUTY_SLEW_UP_COUNTS / PWM_FULL_SCALE,
       DUTY_SLEW_DOWN_COUNTS / PWM_FULL_SCALE));
+}
+
+void runSoftStart() {
+  float outputVoltage = fmaxf(vBat, vSolar + 2.0f);
+  float estimatedDuty = 1.0f - vSolar / outputVoltage + 0.03f;
+  estimatedDuty = clampf(estimatedDuty, 0.02f, DUTY_MAX);
+
+  float rawStep = 2.0f / PWM_FULL_SCALE;
+  float nextDuty = applySlew(
+      estimatedDuty,
+      dutyCommand,
+      rawStep,
+      5.0f / PWM_FULL_SCALE);
+
+  setBoostDuty(nextDuty);
+
+  if (iBatCharge >= 0.4f ||
+      millis() - stateEntryMs >= SOFTSTART_MS) {
+    currentIntegrator = 0.0f;
+    enterState(CHARGER_MPPT);
+  }
+}
+
+void runMppt() {
+  uint32_t now = millis();
+
+  if (now - lastMpptMs >= MPPT_PERIOD_MS) {
+    lastMpptMs = now;
+    updateIncCond(vSolar, iSolar);
+
+    float pvVoltageError = vSolar - mpptVref;
+    mpptIref += MPPT_VOLT_TO_IREF_GAIN * pvVoltageError;
+    mpptIref = clampf(mpptIref, 0.0f, TARGET_CC_CURRENT);
+  }
+
+  float currentReference =
+      clampf(mpptIref, 0.0f, TARGET_CC_CURRENT);
+
+  if (vSolar < PV_COLLAPSE_VOLTAGE) {
+    float sag = PV_COLLAPSE_VOLTAGE - vSolar;
+    float scale = clampf(1.0f - 0.35f * sag, 0.15f, 1.0f);
+    currentReference *= scale;
+  }
+
+  runBatteryCurrentLoop(currentReference);
 
   if (vBat >= 55.5f) {
     voltageIntegrator = 0.0f;
     enterState(CHARGER_CV);
+    return;
+  }
+
+  float pvPower = vSolar * iSolar;
+  float ccPowerThreshold = requiredPvPowerForCc();
+  if (pvPower >= ccPowerThreshold + POWER_MODE_HYSTERESIS_W ||
+      iBatCharge >= TARGET_CC_CURRENT - 0.05f) {
+    mpptIref = TARGET_CC_CURRENT;
+    syncIncCond(vSolar, iSolar);
+    enterState(CHARGER_CC);
+  }
+}
+
+void runCc() {
+  uint32_t now = millis();
+
+  // Keep IncCond history current without allowing it to perturb CC.
+  if (now - lastMpptMs >= MPPT_PERIOD_MS) {
+    lastMpptMs = now;
+    syncIncCond(vSolar, iSolar);
+  }
+
+  runBatteryCurrentLoop(TARGET_CC_CURRENT);
+
+  if (vBat >= 55.5f) {
+    voltageIntegrator = 0.0f;
+    enterState(CHARGER_CV);
+    return;
+  }
+
+  float pvPower = vSolar * iSolar;
+  float ccPowerThreshold = requiredPvPowerForCc();
+  bool insufficientPower =
+      pvPower <= ccPowerThreshold - POWER_MODE_HYSTERESIS_W &&
+      iBatCharge <= TARGET_CC_CURRENT - CC_EXIT_CURRENT_MARGIN_A;
+
+  if (insufficientPower) {
+    if (ccExitConditionMs == 0) ccExitConditionMs = now;
+    if (now - ccExitConditionMs >= CC_EXIT_CONFIRM_MS) {
+      mpptIref = clampf(iBatCharge, 0.5f, TARGET_CC_CURRENT);
+      syncIncCond(vSolar, iSolar);
+      enterState(CHARGER_MPPT);
+    }
+  } else {
+    ccExitConditionMs = 0;
   }
 }
 
@@ -524,7 +565,15 @@ void runCv() {
   if (vBat < 54.8f) {
     currentIntegrator = 0.0f;
     voltageIntegrator = 0.0f;
-    enterState(CHARGER_MPPT_CC);
+    float pvPower = vSolar * iSolar;
+    float ccPowerThreshold = requiredPvPowerForCc();
+    if (pvPower >= ccPowerThreshold + POWER_MODE_HYSTERESIS_W) {
+      enterState(CHARGER_CC);
+    } else {
+      mpptIref = clampf(iBatCharge, 0.5f, TARGET_CC_CURRENT);
+      syncIncCond(vSolar, iSolar);
+      enterState(CHARGER_MPPT);
+    }
   }
 
   bool fullCondition =
@@ -572,8 +621,12 @@ void runChargerControl() {
       runSoftStart();
       break;
 
-    case CHARGER_MPPT_CC:
-      runMpptCc();
+    case CHARGER_MPPT:
+      runMppt();
+      break;
+
+    case CHARGER_CC:
+      runCc();
       break;
 
     case CHARGER_CV:
@@ -600,7 +653,8 @@ void runChargerControl() {
 const char *stateName(ChargerState state) {
   switch (state) {
     case CHARGER_SOFTSTART: return "SOFT";
-    case CHARGER_MPPT_CC:   return "MPPT/CC";
+    case CHARGER_MPPT:      return "MPPT";
+    case CHARGER_CC:        return "CC";
     case CHARGER_CV:        return "CV";
     case CHARGER_FULL:      return "FULL";
     case CHARGER_FAULT:     return "FAULT";
