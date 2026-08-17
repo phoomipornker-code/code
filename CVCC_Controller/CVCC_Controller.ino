@@ -8,6 +8,9 @@
  *    5 A ---(-)--- ZOH [I_OUT] --> Kp=1.0 -> sat -+             |
  *                                 Ki -> K*Ts/(z-1) +--> [CC] --+
  *
+ * Every sat block limits to 0 .. 0.41, so 0.41 is the maximum duty and also the
+ * value the Display block reads whenever a branch is railed.
+ *
  * All tunables live in config.h.
  */
 

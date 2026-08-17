@@ -33,37 +33,49 @@ static void expectTrue(const std::string& what, bool condition) {
   }
 }
 
-/* The screenshot shows Duty = 0.41 while the voltage loop is in charge:
- * 0.1 * (58 - 53.9) = 0.41, which is below the current loop's 1.0 * (5 - 4.5). */
-static void testOperatingPoint() {
+/* Far below both setpoints every branch railes against the 0.41 upper limit,
+ * which is the state the model screenshot was captured in. */
+static void testRailedAtStartup() {
   CVCCController c;
   c.begin();
-  const CVCCOutput out = c.update(53.9f, 4.5f);
-  expectNear("CV branch", out.cv, 0.41f);
-  expectNear("CC branch", out.cc, 0.5f);
-  expectNear("duty follows the smaller branch", out.duty, 0.41f);
+  const CVCCOutput out = c.update(0.0f, 0.0f);
+  expectNear("CV branch railed", out.cv, P_SAT_MAX);
+  expectNear("CC branch railed", out.cc, P_SAT_MAX);
+  expectNear("duty at the maximum the model allows", out.duty, 0.41f);
+}
+
+/* Close to the voltage setpoint the CV branch comes off its limit and takes
+ * over, because the lightly loaded CC branch is still railed. */
+static void testVoltageLoopInCharge() {
+  CVCCController c;
+  c.begin();
+  const CVCCOutput out = c.update(56.0f, 4.0f);
+  expectNear("CV branch", out.cv, 0.2f);
+  expectNear("CC branch still railed", out.cc, P_SAT_MAX);
+  expectNear("duty follows the smaller branch", out.duty, 0.2f);
   expectTrue("voltage loop reported as active", !c.currentLimited);
 }
 
-/* Pull more current than the limit and the current branch must take over. */
+/* Pull close to the current limit and the current branch must take over. */
 static void testCurrentLimitTakesOver() {
   CVCCController c;
   c.begin();
   const CVCCOutput out = c.update(50.0f, 4.9f);
-  expectNear("CV branch", out.cv, 0.8f);
+  expectNear("CV branch railed", out.cv, P_SAT_MAX);
   expectNear("CC branch", out.cc, 0.1f);
   expectNear("duty follows the current branch", out.duty, 0.1f);
   expectTrue("current loop reported as active", c.currentLimited);
 }
 
-/* Above the setpoint both branches go negative and the output saturation has to
- * floor the duty cycle at zero rather than let it wrap or go negative. */
+/* Above the setpoint the error goes negative, and because the saturation blocks
+ * have a lower limit of zero the branch has to sit at zero rather than demand a
+ * negative duty cycle. */
 static void testOvervoltageFloorsDuty() {
   CVCCController c;
   c.begin();
   const CVCCOutput out = c.update(62.0f, 0.0f);
-  expectNear("CV branch is negative", out.cv, -0.4f);
-  expectNear("duty clamped to DUTY_MIN", out.duty, 0.0f);
+  expectNear("CV branch floored", out.cv, 0.0f);
+  expectNear("duty clamped to DUTY_MIN", out.duty, DUTY_MIN);
 }
 
 /* With Ki = 0, as the diagram has it, there is nothing to hold duty up once the
@@ -77,32 +89,36 @@ static void testProportionalOnlyHasNoHoldup() {
 
 /* K*Ts/(z-1) is Forward Euler: step k must not yet contain sample k. */
 static void testForwardEulerDelay() {
-  PIController pi{0.0f, 2.0f, 0.001f, -1.0f, 1.0f, -1.0f, 1.0f, 0.0f};
+  PIController pi{0.0f, 2.0f, 0.001f, P_SAT_MIN, P_SAT_MAX,
+                  I_SAT_MIN, I_SAT_MAX, 0.0f};
   expectNear("integrator step 1", pi.update(1.0f), 0.000f);
   expectNear("integrator step 2", pi.update(1.0f), 0.002f);
   expectNear("integrator step 3", pi.update(1.0f), 0.004f);
 }
 
 static void testProportionalSaturation() {
-  PIController pi{1.0f, 0.0f, 0.001f, -1.0f, 1.0f, -1.0f, 1.0f, 0.0f};
-  expectNear("large positive error clamped", pi.update(40.0f), 1.0f);
-  expectNear("large negative error clamped", pi.update(-40.0f), -1.0f);
+  PIController pi{1.0f, 0.0f, 0.001f, P_SAT_MIN, P_SAT_MAX,
+                  I_SAT_MIN, I_SAT_MAX, 0.0f};
+  expectNear("large positive error clamped", pi.update(40.0f), 0.41f);
+  expectNear("negative error clamped at the lower limit", pi.update(-40.0f), 0.0f);
 }
 
 static void testIntegratorAntiWindup() {
-  PIController pi{0.0f, 100.0f, 0.001f, -1.0f, 1.0f, -1.0f, 1.0f, 0.0f};
+  PIController pi{0.0f, 100.0f, 0.001f, P_SAT_MIN, P_SAT_MAX,
+                  I_SAT_MIN, I_SAT_MAX, 0.0f};
   for (int step = 0; step < 200; ++step) {
     pi.update(1.0f);
   }
-  expectNear("integrator state clamped at I_SAT_MAX", pi.iState, 1.0f);
-  expectNear("output clamped too", pi.update(1.0f), 1.0f);
+  expectNear("integrator state clamped at I_SAT_MAX", pi.iState, 0.41f);
+  expectNear("output clamped too", pi.update(1.0f), 0.41f);
 
   pi.reset();
   expectNear("reset clears the state", pi.iState, 0.0f);
 }
 
 int main() {
-  testOperatingPoint();
+  testRailedAtStartup();
+  testVoltageLoopInCharge();
   testCurrentLimitTakesOver();
   testOvervoltageFloorsDuty();
   testProportionalOnlyHasNoHoldup();

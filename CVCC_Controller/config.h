@@ -25,20 +25,23 @@ constexpr float KI_V = 0.0f;
 constexpr float KP_I = 1.0f;
 constexpr float KI_I = 0.0f;
 
-/* Saturation block sitting on each proportional path. The diagram does not
- * reveal its limits, so these mirror the duty-cycle domain the branch feeds. */
-constexpr float P_SAT_MIN = -1.0f;
-constexpr float P_SAT_MAX = 1.0f;
+/* All three Saturation blocks in the model are set to the same 0 .. 0.41 range,
+ * so 0.41 is the highest duty the converter is allowed to run at. The zero
+ * lower limit means neither proportional path can push a negative contribution.
+ *
+ * Saturation blocks sitting on the two proportional paths. */
+constexpr float P_SAT_MIN = 0.0f;
+constexpr float P_SAT_MAX = 0.41f;
 
-/* Clamp applied to the discrete integrator state (anti-windup). A plain
- * Simulink integrator has no limits, but an unbounded state on real hardware
- * takes seconds to unwind after a fault. */
-constexpr float I_SAT_MIN = -1.0f;
-constexpr float I_SAT_MAX = 1.0f;
+/* Clamp applied to the discrete integrator state (anti-windup), kept on the
+ * same range. A plain Simulink integrator has no limits, but an unbounded state
+ * on real hardware takes seconds to unwind after a fault. */
+constexpr float I_SAT_MIN = 0.0f;
+constexpr float I_SAT_MAX = 0.41f;
 
 /* Saturation block after the min selector, i.e. the legal duty-cycle range. */
 constexpr float DUTY_MIN = 0.0f;
-constexpr float DUTY_MAX = 1.0f;
+constexpr float DUTY_MAX = 0.41f;
 
 /* --- Sensor scaling: engineering units = (adcVolts - offset) * gain --------
  * V_SENSE_GAIN is the inverse of the resistor divider ratio, e.g. 150k/10k
