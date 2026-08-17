@@ -24,9 +24,9 @@ struct CVCCController {
 
   void begin() {
     cvLoop = PIController{KP_V, KI_V, TS, P_SAT_MIN, P_SAT_MAX,
-                          I_SAT_MIN, I_SAT_MAX, 0.0f};
+                          I_SAT_MIN, I_SAT_MAX, I_TERM_SIGN, 0.0f};
     ccLoop = PIController{KP_I, KI_I, TS, P_SAT_MIN, P_SAT_MAX,
-                          I_SAT_MIN, I_SAT_MAX, 0.0f};
+                          I_SAT_MIN, I_SAT_MAX, I_TERM_SIGN, 0.0f};
     vRef = V_REF;
     iRef = I_REF;
     dutyMin = DUTY_MIN;

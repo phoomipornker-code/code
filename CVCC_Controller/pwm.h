@@ -53,6 +53,25 @@ inline void pwmWriteDuty(float duty) {
 #endif
 }
 
+/* Integer division of the timer top means the carrier lands near, not exactly
+ * on, PWM_FREQ_HZ, and at 67 kHz there are few counts left to resolve duty
+ * with. Both are worth reporting at startup rather than assuming. */
+inline unsigned long pwmActualFrequencyHz() {
+#if PWM_USE_TIMER1
+  return F_CPU / (PWM_TOP + 1UL);
+#else
+  return 490UL;
+#endif
+}
+
+inline unsigned int pwmDutySteps() {
+#if PWM_USE_TIMER1
+  return (unsigned int)(PWM_TOP + 1UL);
+#else
+  return 256U;
+#endif
+}
+
 /* A default-speed AVR ADC needs about 112 us per reading, which would eat most
  * of a 1 ms step once both channels are oversampled. A /32 prescaler brings
  * that down to roughly 26 us; the cost is a fraction of a bit of accuracy. */

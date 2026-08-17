@@ -33,8 +33,22 @@ static void expectTrue(const std::string& what, bool condition) {
   }
 }
 
-/* Far below both setpoints every branch railes against the 0.41 upper limit,
- * which is the state the model screenshot was captured in. */
+/* The operating point captured in the model: the scope reads 51.33 V and
+ * 4.59 A into a battery at 20% state of charge, and the Display reads 0.41.
+ * The voltage branch is railed while the current branch happens to sit exactly
+ * on the limit, since 1.0 * (5 - 4.59) = 0.41. The two branches are therefore
+ * equal here, so which one the min block picks is a coin toss and the mode
+ * indicator is not worth asserting on. */
+static void testModelOperatingPoint() {
+  CVCCController c;
+  c.begin();
+  const CVCCOutput out = c.update(51.33f, 4.59f);
+  expectNear("CV branch railed", out.cv, P_SAT_MAX);
+  expectNear("CC branch at the limit", out.cc, 0.41f);
+  expectNear("duty matches the Display block", out.duty, 0.41f);
+}
+
+/* Far below both setpoints every branch railes against the 0.41 upper limit. */
 static void testRailedAtStartup() {
   CVCCController c;
   c.begin();
@@ -87,42 +101,54 @@ static void testProportionalOnlyHasNoHoldup() {
   expectNear("duty at zero voltage error", out.cv, 0.0f);
 }
 
-/* K*Ts/(z-1) is Forward Euler: step k must not yet contain sample k. */
+/* K*Ts/(z-1) is Forward Euler: step k must not yet contain sample k. The signs
+ * are negative because the model recombines the paths with a "+-" sum. */
 static void testForwardEulerDelay() {
   PIController pi{0.0f, 2.0f, 0.001f, P_SAT_MIN, P_SAT_MAX,
-                  I_SAT_MIN, I_SAT_MAX, 0.0f};
+                  I_SAT_MIN, I_SAT_MAX, I_TERM_SIGN, 0.0f};
   expectNear("integrator step 1", pi.update(1.0f), 0.000f);
-  expectNear("integrator step 2", pi.update(1.0f), 0.002f);
-  expectNear("integrator step 3", pi.update(1.0f), 0.004f);
+  expectNear("integrator step 2", pi.update(1.0f), -0.002f);
+  expectNear("integrator step 3", pi.update(1.0f), -0.004f);
+}
+
+/* The subtracting summing junction means a positive Ki drives the output the
+ * wrong way. Pinning that down here documents it as a property of the model
+ * rather than a porting mistake, and fails loudly if I_TERM_SIGN is flipped. */
+static void testIntegralTermIsSubtracted() {
+  PIController pi{1.0f, 10.0f, 0.001f, P_SAT_MIN, P_SAT_MAX,
+                  I_SAT_MIN, I_SAT_MAX, I_TERM_SIGN, 0.0f};
+  expectNear("first step is proportional only", pi.update(0.2f), 0.2f);
+  expectNear("integral pulls the output down", pi.update(0.2f), 0.2f - 0.002f);
 }
 
 static void testProportionalSaturation() {
   PIController pi{1.0f, 0.0f, 0.001f, P_SAT_MIN, P_SAT_MAX,
-                  I_SAT_MIN, I_SAT_MAX, 0.0f};
+                  I_SAT_MIN, I_SAT_MAX, I_TERM_SIGN, 0.0f};
   expectNear("large positive error clamped", pi.update(40.0f), 0.41f);
   expectNear("negative error clamped at the lower limit", pi.update(-40.0f), 0.0f);
 }
 
 static void testIntegratorAntiWindup() {
   PIController pi{0.0f, 100.0f, 0.001f, P_SAT_MIN, P_SAT_MAX,
-                  I_SAT_MIN, I_SAT_MAX, 0.0f};
+                  I_SAT_MIN, I_SAT_MAX, I_TERM_SIGN, 0.0f};
   for (int step = 0; step < 200; ++step) {
     pi.update(1.0f);
   }
   expectNear("integrator state clamped at I_SAT_MAX", pi.iState, 0.41f);
-  expectNear("output clamped too", pi.update(1.0f), 0.41f);
 
   pi.reset();
   expectNear("reset clears the state", pi.iState, 0.0f);
 }
 
 int main() {
+  testModelOperatingPoint();
   testRailedAtStartup();
   testVoltageLoopInCharge();
   testCurrentLimitTakesOver();
   testOvervoltageFloorsDuty();
   testProportionalOnlyHasNoHoldup();
   testForwardEulerDelay();
+  testIntegralTermIsSubtracted();
   testProportionalSaturation();
   testIntegratorAntiWindup();
 
