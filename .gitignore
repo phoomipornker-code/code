@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# host test binaries
+test/test_forward_control
