@@ -12,7 +12,19 @@
  * ------------------------------------------------------------------------- */
 
 /* Discrete solver step. Drives both the Zero-Order Hold blocks on the two
- * feedback signals and the Ts used by the K*Ts/(z-1) integrators. */
+ * feedback signals and the Ts used by the K*Ts/(z-1) integrators.
+ *
+ * Sampling faster than the switching frequency buys nothing, because the duty
+ * cycle can only take effect once per switching period. Prefer an integer
+ * submultiple of 67 kHz so the sampling instant keeps a fixed phase relative to
+ * the switching ripple instead of beating against it:
+ *
+ *   fsw/1   14.93 us   fsw/4   59.70 us    fsw/16  238.81 us
+ *   fsw/2   29.85 us   fsw/8  119.40 us    fsw/64  955.22 us
+ *
+ * A 16 MHz AVR cannot come close to those; 1 ms is about a quarter of its
+ * capacity once the ADC reads are paid for. The peakStepUs column in the serial
+ * output measures what a step actually costs, so check it after changing this. */
 constexpr unsigned long TS_MICROS = 1000UL;
 constexpr float TS = 1.0e-6f * (float)TS_MICROS;
 
@@ -70,14 +82,34 @@ constexpr float V_SENSE_GAIN = 16.0f;
 constexpr float I_SENSE_OFFSET_V = 2.5f;
 constexpr float I_SENSE_GAIN = 5.405f;
 
+/* On a 3.3 V board the two sense chains have to be rescaled as well, not just
+ * these two constants: the divider needs a higher ratio (270k/10k keeps 70 V
+ * under 2.5 V, where the ESP32 ADC is still reasonably linear), and an ACS712
+ * running off 5 V sits at 2.5 V with no current and climbs past 3.3 V at 5 A,
+ * so its output needs halving before it reaches the pin. */
+#if defined(ARDUINO_ARCH_ESP32)
+constexpr float ADC_VREF = 3.3f;
+constexpr float ADC_COUNTS = 4095.0f;
+#else
 constexpr float ADC_VREF = 5.0f;
 constexpr float ADC_COUNTS = 1023.0f;
+#endif
+
+/* Averaging costs one ADC conversion per sample, which is the first thing to
+ * give up when moving to a shorter TS_MICROS; the hardware RC filter on each
+ * sense line already does most of the averaging. */
 constexpr uint8_t ADC_OVERSAMPLE = 4;
 
 #if defined(ARDUINO)
 
+#if defined(ARDUINO_ARCH_ESP32)
+/* ADC1 only. ADC2 stops working as soon as WiFi is enabled. */
+constexpr uint8_t V_SENSE_PIN = A0; /* GPIO36 */
+constexpr uint8_t I_SENSE_PIN = A3; /* GPIO39 */
+#else
 constexpr uint8_t V_SENSE_PIN = A0; /* replaces the [V_OUT] from-tag */
 constexpr uint8_t I_SENSE_PIN = A1; /* replaces the [I_OUT] from-tag */
+#endif
 
 /* Switching frequency of the power stage, i.e. the carrier of the D->P block.
  * The output pin is not a free choice, so pwm.h derives it from the board.
