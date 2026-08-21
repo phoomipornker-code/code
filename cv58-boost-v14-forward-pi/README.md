@@ -12,8 +12,10 @@ Matched to pack BMS **HXYP-SH5-16S-20ATF** (16S LFP, same-port, cell OVP **3.65 
 4. Upload. Boot log must show:
 
 ```
-[BOOT] Firmware: cv58-boost-v14-forward-pi-v2
+[BOOT] Firmware: cv58-boost-v14-forward-pi-v3
 ```
+
+Paste into Arduino IDE as a single sketch: copy only `cv58-boost-v14-forward-pi.ino` (helpers are inside the .ino). Do not `#include "control_pi.h"` — that file is only for host tests.
 
 ## Charge setpoints vs this BMS
 

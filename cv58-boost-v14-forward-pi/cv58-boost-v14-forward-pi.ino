@@ -3,9 +3,8 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-#include "control_pi.h"
 
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v2";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v3";
 
 // =========================================================================
 // Hardware
@@ -235,6 +234,34 @@ int quantizeDutyWithDither(float duty_cmd, float *phase, int max_duty);
 void lcdPrintLineRaw(uint8_t row, const char *text);
 void lcdPrintLineFmt(uint8_t row, const char *fmt, ...);
 void reinitI2CBusAndLCD();
+
+static inline float boostClampf(float x, float lo, float hi) {
+    if (x < lo) return lo;
+    if (x > hi) return hi;
+    return x;
+}
+static inline float boostMaxf(float a, float b) {
+    return (a > b) ? a : b;
+}
+static inline float boostMinf(float a, float b) {
+    return (a < b) ? a : b;
+}
+static inline float boostApplySlew(float target, float current, float upStep, float downStep) {
+    float d = target - current;
+    if (d > upStep) return current + upStep;
+    if (d < -downStep) return current - downStep;
+    return target;
+}
+static inline float boostRunPI(float err, float kp, float ki, float dt,
+                               float *integ, float outMin, float outMax) {
+    float p = kp * err;
+    float iCandidate = *integ + (ki * err * dt);
+    float out = p + iCandidate;
+    if (out > outMax) out = outMax;
+    else if (out < outMin) out = outMin;
+    else *integ = iCandidate;
+    return out;
+}
 
 static inline int boostEstimateDutyRaw(float vin, float vout, int maxDuty) {
     float vinUse = (vin > 38.0f) ? vin : 38.0f;
