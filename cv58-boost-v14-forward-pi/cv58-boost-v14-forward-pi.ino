@@ -5,7 +5,7 @@
 #include <stdarg.h>
 #include "control_pi.h"
 
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v1";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v2";
 
 // =========================================================================
 // Hardware
@@ -26,11 +26,16 @@ Adafruit_ADS1115 ads_curr;
 
 // =========================================================================
 // Targets / safety thresholds
+// Pack BMS: HXYP-SH5-16S-20ATF  (16S LFP, same-port)
+//   cell OVP 3.65V ± 0.025V  → pack 58.40 V  (charger must finish first)
+//   cell UVP 2.30V ± 0.05V   → pack 36.80 V
+//   max charge 15 A / max discharge 20 A
+// CV=57.60V (3.60V/cell) — factory-like full + passive-balance window,
+// still 0.80 V below BMS OVP so the charger, not the FET, terminates.
 // =========================================================================
-// CV=56.0V (~3.50V/cell for 16S LFP) — longevity / BMS-friendly cutoff.
-const float TARGET_CV_VOLTAGE = 56.00;
+const float TARGET_CV_VOLTAGE = 57.60;
 const float TARGET_CC_CURRENT = 6.0;       // Boost CC (proven PV path)
-const float FWD_TARGET_CC_CURRENT = 5.0;   // Forward CC — transformer rating
+const float FWD_TARGET_CC_CURRENT = 5.0;   // Forward CC — transformer rating, BMS allows 15 A
 const float MIN_PV_VOLTAGE = 42.0;
 const float UNDER_PV_VOLTAGE_CRIT = 39.0;
 const float MIN_AC_VOLTAGE = 140.0;
@@ -41,12 +46,12 @@ const int MAX_DUTY_BOOST   = 760;
 const unsigned long ADC_STALE_TIMEOUT_MS = 700;
 const unsigned long SENSOR_ERROR_LOG_MS = 2000;
 const float CV_DEADBAND_V = 0.12;
-const float FULL_DETECT_VOLTAGE = 55.90;
+const float FULL_DETECT_VOLTAGE = 57.40;
 const float FULL_END_CURRENT = 0.50;
 const unsigned long FULL_CONFIRM_MS = 60000;
-const float HIGH_VOLTAGE_STOP_VOLTAGE = 56.80;
+const float HIGH_VOLTAGE_STOP_VOLTAGE = 58.20;
 const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 300;
-const float RESTART_CHARGE_VOLTAGE = 54.0;
+const float RESTART_CHARGE_VOLTAGE = 53.60;  // 3.35V/cell — do not resume after LFP rest from full
 
 // =========================================================================
 // Forward (AC) PI: SOFTSTART -> CC -> CV -> DONE
@@ -55,10 +60,10 @@ const float RESTART_CHARGE_VOLTAGE = 54.0;
 // Same cascade as Boost: current PI in CC; voltage PI -> Iref, current PI
 // -> duty in CV. AC is a stiff source, so Forward gains/slew are milder.
 // =========================================================================
-const float FWD_CV_ENTRY_VOLTAGE = 55.50;
-const float FWD_CV_FORCE_VOLTAGE = 55.70;
-const float FWD_CV_EXIT_VOLTAGE  = 54.80;
-const float FWD_CC_TAPER_START_V = 54.80;
+const float FWD_CV_ENTRY_VOLTAGE = 57.10;
+const float FWD_CV_FORCE_VOLTAGE = 57.30;
+const float FWD_CV_EXIT_VOLTAGE  = 56.40;
+const float FWD_CC_TAPER_START_V = 56.40;
 const float FWD_CV_IREF_SLEW_A = 0.06;       // A per 20 ms tick
 const float FWD_CV_NEAR_BAND_V = 0.35;
 const float FWD_CV_DUTY_STEP_NEAR = 0.6;
@@ -108,16 +113,17 @@ const float MIN_CURRENT_FOR_ACTIVE_CHARGE = 0.20;
 // BOOST control (proven v14): SOFTSTART -> CC_MPPT -> CV -> DONE
 // =========================================================================
 const float BOOST_VOLTAGE_FLOOR = 42.0;
-const float BOOST_CV_TARGET_VOLTAGE = 56.00;  // conserve pack: stop/hold at 56V
-const float BOOST_CV_ENTRY_VOLTAGE = 55.50;
-const float BOOST_CV_FORCE_VOLTAGE = 55.70;
-const float BOOST_CV_EXIT_VOLTAGE  = 54.80;   // wider hysteresis so CV does not chatter
-const float BOOST_CC_TAPER_START_V = 54.80;
-const float BMS_OPEN_DETECT_V = 56.30;
+const float BOOST_CV_TARGET_VOLTAGE = 57.60;  // 3.60V/cell, below HXYP 3.65V OVP
+const float BOOST_CV_ENTRY_VOLTAGE = 57.10;
+const float BOOST_CV_FORCE_VOLTAGE = 57.30;
+const float BOOST_CV_EXIT_VOLTAGE  = 56.40;   // wider hysteresis so CV does not chatter
+const float BOOST_CC_TAPER_START_V = 56.40;
+const float BMS_OPEN_DETECT_V = 58.50;        // pack at/above 16×3.65 plus fly-up
+const float BMS_OPEN_MIN_V = 54.50;           // ignore FET-open jumps while still in CC bulk
 const float BMS_OPEN_JUMP_DELTA_V = 1.2;
 const float BMS_OPEN_CURRENT_MAX_A = 1.20;
 const float BMS_PREEMPT_DUTY_CAP_RAW = 140.0;
-const float BMS_PREEMPT_ZONE_V = 55.95;
+const float BMS_PREEMPT_ZONE_V = 58.10;       // cap duty only near true pack OVP, not during CV
 const float BOOST_CV_IREF_SLEW_A = 0.08;      // A per 20ms control tick
 const float BOOST_CV_NEAR_BAND_V = 0.35;      // within this of target => gentle control
 const float BOOST_CV_DUTY_STEP_NEAR = 0.8;    // raw duty step limit near target
@@ -148,8 +154,8 @@ const float BOOST_DUTY_SLEW_DOWN = 6.0;
 const float BOOST_EST_DUTY_MARGIN = 0.03;
 const float BOOST_VBAT_SPIKE_PRECUT_DELTA_V = 0.7;
 const float BOOST_VBAT_SPIKE_PRECUT_RAW_ABOVE_FILT_V = 1.0;
-const float HARD_OVP_TRIP_VOLTAGE = 57.80;
-const float HARD_OVP_RELEASE_VOLTAGE = 55.80;
+const float HARD_OVP_TRIP_VOLTAGE = 59.50;    // after BMS FET opens, output can fly
+const float HARD_OVP_RELEASE_VOLTAGE = 57.20;
 const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 const bool ENABLE_DEBUG_VERBOSE = true;
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 500;
@@ -375,6 +381,8 @@ static inline const char* forwardModeLabel() {
 void setup() {
     Serial.begin(115200);
     Serial.printf("[BOOT] Firmware: %s\n", FW_VERSION_TAG);
+    Serial.printf("[BOOT] BMS HXYP-16S OVP=3.65V/cell pack=58.40V | charger CV=%.2fV restart=%.2fV\n",
+                  TARGET_CV_VOLTAGE, RESTART_CHARGE_VOLTAGE);
     Serial.printf("[BOOT] BOOST CC=%.2fA CV=%.2fV fsw=%dHz Dmax=%d\n",
                   TARGET_CC_CURRENT, BOOST_CV_TARGET_VOLTAGE, PWM_FREQ_BOOST, MAX_DUTY_BOOST);
     Serial.printf("[BOOT] FWD   CC=%.2fA CV=%.2fV fsw=%dHz Dmax=%d CVentry=%.2f CVexit=%.2f\n",
@@ -515,16 +523,22 @@ void TaskSampleData(void * pvParameters) {
             bool charger_active = (currentState == STATE_BOOST || currentState == STATE_FORWARD);
             float vbat_peak = boostMaxf((float)v_bat, (float)v_bat_filt);
 
-            // BMS open / near-open: kill PWM ASAP (before waiting for HARD_OVP threshold).
+            // BMS FET open: one cell can hit 3.65 V while the pack is still ~56–57 V
+            // (imbalance). Detect jump / raw-vs-filt fly-up from BMS_OPEN_MIN_V,
+            // and pack-level OVP from BMS_OPEN_DETECT_V. Do not require the
+            // 58.1 V duty-cap zone — that used to block CV at 56 V.
+            bool bms_jump = (vbat_step >= BMS_OPEN_JUMP_DELTA_V) ||
+                            (v_bat > (v_bat_filt + 1.8f));
+            bool bms_pack_ovp = (v_bat >= BMS_OPEN_DETECT_V) ||
+                                (v_bat_filt >= BMS_OPEN_DETECT_V &&
+                                 i_bat_charge_filt <= BMS_OPEN_CURRENT_MAX_A);
+            bool bms_in_band = (v_bat_filt >= BMS_OPEN_MIN_V) || (v_bat >= BMS_OPEN_MIN_V);
             if (!ovp_latched &&
                 system_ON &&
                 charger_active &&
                 raw_duty > 0 &&
-                (v_bat_filt >= BMS_PREEMPT_ZONE_V || v_bat >= BMS_PREEMPT_ZONE_V) &&
-                ((v_bat >= BMS_OPEN_DETECT_V) ||
-                 (vbat_step >= BMS_OPEN_JUMP_DELTA_V) ||
-                 (v_bat > (v_bat_filt + 1.8f)) ||
-                 (v_bat_filt >= BMS_OPEN_DETECT_V && i_bat_charge_filt <= BMS_OPEN_CURRENT_MAX_A))) {
+                bms_in_band &&
+                (bms_jump || bms_pack_ovp)) {
                 ovp_latched = true;
                 ovp_trip_voltage = vbat_peak;
                 ovp_trip_ms = now;

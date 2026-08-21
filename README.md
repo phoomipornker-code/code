@@ -1,11 +1,11 @@
 # code
 
-ESP32 dual-path charger for 16S LiFePO4:
+ESP32 dual-path charger for 16S LiFePO4 with BMS **HXYP-SH5-16S-20ATF** (cell OVP 3.65 V → pack 58.4 V):
 
-- **Boost / PV** — proven `cv58-stability-v14-cv-stable` (50 kHz, 6 A CC, 56 V CV, MPPT).
-- **Forward / AC** — finished with the same **PI** cascade (67 kHz, 5 A CC, 56 V CV). SoftStart → CC → CV → DONE.
+- **Boost / PV** — 50 kHz, 6 A CC, **57.6 V CV**, MPPT.
+- **Forward / AC** — 67 kHz, 5 A CC, **57.6 V CV**, PI cascade SoftStart → CC → CV → DONE.
 
-Flash the sketch in [`cv58-boost-v14-forward-pi/`](cv58-boost-v14-forward-pi/).
+Charger CV is 0.80 V below the BMS so the charger terminates first. Flash [`cv58-boost-v14-forward-pi/`](cv58-boost-v14-forward-pi/).
 
 Host tests for the shared PI math:
 
