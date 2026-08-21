@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v3";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v4";
 
 // =========================================================================
 // Hardware
@@ -157,7 +157,7 @@ const float HARD_OVP_TRIP_VOLTAGE = 59.50;    // after BMS FET opens, output can
 const float HARD_OVP_RELEASE_VOLTAGE = 57.20;
 const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 const bool ENABLE_DEBUG_VERBOSE = true;
-const unsigned long DEBUG_PRINT_INTERVAL_MS = 500;
+const unsigned long DEBUG_PRINT_INTERVAL_MS = 100;  // one compact line; faults still print immediately
 const unsigned long LCD_REFRESH_INTERVAL_MS = 180;
 const uint32_t I2C_CLOCK_HZ = 100000;
 
@@ -1183,18 +1183,23 @@ void TaskSampleData(void * pvParameters) {
                 else if (forwardMode == FWD_CV) state_label = "FWD_CV";
                 else state_label = "FWD_DONE";
             }
-            float fwdIrefDbg = (forwardMode == FWD_CV) ? fwdIrefCvCmd : fwdIrefCc;
-            Serial.println("=========================================================================================");
-            Serial.printf("[DEBUG] System: %s | State: %s | Duty: %d%% raw=%d\n",
-                          (system_ON ? "ON " : "OFF"), state_label, active_duty_percent, raw_duty);
-            Serial.printf("  [PV ] V:%5.1fV I:%5.2fA P:%6.1fW | Vref:%.2fV Iref_mppt:%.2fA\n",
-                          (float)v_solar, (float)i_solar_mag, (v_solar * i_solar_mag),
-                          boostNewPvRef, boostNewIrefMppt);
-            Serial.printf("  [BAT] V:%5.2fV I:%5.2fA (abs:%5.2fA)\n",
-                          (float)v_bat_filt, (float)i_bat_filt, (float)i_bat_charge_filt);
-            Serial.printf("  [AC ] V:%5.1fV I:%5.2fA | FWD Iref:%.2fA integI:%.2f integV:%.2f\n",
-                          (float)v_ac_in, (float)i_ac_mag, fwdIrefDbg, fwdCurrIntegrator, fwdVoltIntegrator);
-            Serial.println("=========================================================================================");
+            bool fwd = (currentState == STATE_FORWARD);
+            float irefDbg = fwd
+                ? ((forwardMode == FWD_CV) ? fwdIrefCvCmd : fwdIrefCc)
+                : ((boostNewMode == BOOST_NEW_CV) ? boostNewIrefCvCmd : boostNewIrefMppt);
+            float integI = fwd ? fwdCurrIntegrator : boostNewCurrIntegrator;
+            float integV = fwd ? fwdVoltIntegrator : boostNewVoltIntegrator;
+            float vin = fwd ? (float)v_ac_in : (float)v_solar;
+            float iin = fwd ? (float)i_ac_mag : (float)i_solar_mag;
+            // One line / 100 ms — extra Serial here would block the 20 ms loop.
+            Serial.printf("[D] %lu %s %s d=%d/%d%% Vb=%.2f/%.2f Ib=%.2f/%.2f Iref=%.2f Vin=%.1f/%.2f Pi=%.1f/%.1f\n",
+                          now,
+                          (system_ON ? "ON" : "OFF"),
+                          state_label,
+                          raw_duty, active_duty_percent,
+                          (float)v_bat_filt, (float)v_bat,
+                          (float)i_bat_charge_filt, (float)i_bat_charge_abs,
+                          irefDbg, vin, iin, integI, integV);
         }
         vTaskDelay(20 / portTICK_PERIOD_MS);
     }
