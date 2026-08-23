@@ -75,19 +75,21 @@ End: V=57.12 V  I=1.74 A  duty=79  mode=2
 
 ---
 
-## วิธี ค — แก้ระบบ CC/CV ในภาพ (แทนที่ครึ่งซ้าย)
+## วิธี ค — ต่อแบบภาพ ไม่ใช้ MATLAB Function
 
-รายละเอียดคลิกทีละขั้น: [`REPLACE_SCREENSHOT.md`](REPLACE_SCREENSHOT.md)
+รายละเอียดสายไฟ: [`WIRE_LIKE_SCREENSHOT.md`](WIRE_LIKE_SCREENSHOT.md)
 
-สรุป: ลบลูป CV + ลูป CC + Switch `> 55.8`  
-วาง `Interpreted MATLAB Function` = `fwd_cccv_step(u(1),u(2),u(3))`  
-Mux `[V_OUT; I_OUT; 220]` เข้าไป ออกเป็น Duty 0–0.45 เข้าคลื่น PWM เดิม
+สรุป: ลูปบนออก **Iref 0–3 A** → Relay 57.10/56.40 เลือก Iref=5 หรือ Iref จาก CV  
+ลูปล่าง `Iref−I_OUT` ออก **Δduty** → Unit Delay+Add สะสม 0–460 → หาร 1023  
+**ต่อ Duty 0–0.45 เข้าแพลนต์** — ห้ามปิดลูปด้วยพัลส์ `[PWM]`
 
-หรือใน MATLAB:
+ถ้า Duty ยังสี่เหลี่ยม 0↔0.45 หลังเปลี่ยน Sat: อ่านข้อ 7 ใน `WIRE_LIKE_SCREENSHOT.md`  
+(ตัวสะสมยังบวกทุกสเต็ป PWM หรือ I_OUT ยังเป็นกระแสสวิตช์)
 
 ```matlab
 cd sim
-build_forward_cccv_model
+build_forward_cccv_blocks    % สร้าง forward_cccv_blocks.slx (ต่อแพลนต์เอง)
+build_forward_cccv_avg       % สร้างโมเดลปิดลูปค่าเฉลี่ย กด Run ได้เลย
 ```
 
 ## วิธี ข — รื้อภาพ Simulink เดิมทีละบล็อก

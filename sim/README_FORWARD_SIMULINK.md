@@ -58,13 +58,14 @@
      └──────┬──────┘
             │ Δduty
             ▼
-     duty = sat(duty + Δduty, 0, 460)   ← slew ขึ้น 3 ลง 5
+     duty = sat(duty + Δduty, 0, 460)   ← Unit Delay 0.02 s (ไม่ใช่ Memory inherit)
             │
             ▼
      D = duty / 1023
             │
             ▼
-     D >= carrier(67 kHz)  →  PWM
+     D ──► แพลนต์ค่าเฉลี่ย (ปิดลูปตรงนี้)
+     D >= carrier(67 kHz)  →  PWM ดูอย่างเดียว
 ```
 
 สลับโหมด (แทน Switch 55.8):
