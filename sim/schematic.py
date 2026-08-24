@@ -70,17 +70,40 @@ def _diode_h(svg: Svg, x1: float, x2: float, y: float, stroke: str = INK, fill: 
     svg.line(xc, y, x2, y, stroke=stroke)
 
 
-def _diode_v_down(svg: Svg, x: float, y1: float, y2: float, stroke: str = INK, fill: str = "#f3ead8") -> None:
-    ym = (y1 + y2) / 2
-    svg.line(x, y1, x, ym - 12, stroke=stroke)
-    svg.polygon(
-        [(x - 10, ym - 12), (x + 10, ym - 12), (x, ym + 8)],
-        fill=fill,
-        stroke=stroke,
-        sw=1.6,
-    )
-    svg.line(x - 11, ym + 8, x + 11, ym + 8, stroke=stroke, sw=2.2)
-    svg.line(x, ym + 8, x, y2, stroke=stroke)
+def vertical_diode_triangle(
+    x: float, y1: float, y2: float, cathode_at: str
+) -> list[tuple[float, float]]:
+    """Three points of the diode triangle. Tip is the cathode.
+
+    y1 is the top wire, y2 the bottom. Freewheel D2 uses cathode_at='top'
+    (cathode on the L/D1 node, anode on secondary GND).
+    """
+    ym = (y1 + y2) / 2.0
+    if cathode_at == "top":
+        return [(x, ym - 8), (x - 10, ym + 12), (x + 10, ym + 12)]
+    if cathode_at == "bottom":
+        return [(x, ym + 8), (x - 10, ym - 12), (x + 10, ym - 12)]
+    raise ValueError(f"cathode_at must be 'top' or 'bottom', got {cathode_at!r}")
+
+
+def _diode_v(
+    svg: Svg,
+    x: float,
+    y1: float,
+    y2: float,
+    *,
+    cathode_at: str,
+    stroke: str = INK,
+    fill: str = "#f3ead8",
+) -> None:
+    """Vertical diode. Triangle points at the cathode."""
+    tri = vertical_diode_triangle(x, y1, y2, cathode_at)
+    tip_y = tri[0][1]
+    base_y = tri[1][1]
+    svg.line(x, y1, x, min(tip_y, base_y), stroke=stroke)
+    svg.line(x - 11, tip_y, x + 11, tip_y, stroke=stroke, sw=2.2)
+    svg.polygon(tri, fill=fill, stroke=stroke, sw=1.6)
+    svg.line(x, max(tip_y, base_y), x, y2, stroke=stroke)
 
 
 def _inductor_h(svg: Svg, x1: float, x2: float, y: float, loops: int = 4, stroke: str = INK) -> None:
@@ -310,12 +333,13 @@ def draw_power_schematic(path: Path) -> Path:
     svg.text(948, 160, "D1", size=13, fill=SEC, weight="700")
     svg.text(930, 198, "MUR860", size=11, fill=MUTED)
 
-    # D2 freewheel
-    _diode_v_down(svg, 1080, 176, 470, stroke=SEC, fill="#dceaf5")
+    # D2 freewheel: cathode on the L/D1 node, anode on secondary GND
+    _diode_v(svg, 1080, 176, 470, cathode_at="top", stroke=SEC, fill="#dceaf5")
     svg.line(1080, 470, 1080, gnd_y, stroke=SEC)
-    svg.text(1100, 330, "D2", size=13, fill=SEC, weight="700")
-    svg.text(1100, 348, "freewheel", size=11, fill=MUTED)
-    svg.text(1100, 364, "MUR860", size=11, fill=MUTED)
+    svg.text(1100, 318, "D2", size=13, fill=SEC, weight="700")
+    svg.text(1100, 336, "freewheel", size=11, fill=MUTED)
+    svg.text(1100, 352, "แคโทดที่ L", size=11, fill=OK)
+    svg.text(1100, 368, "MUR860", size=11, fill=MUTED)
 
     # L and Co
     _inductor_h(svg, 1080, 1240, 176, loops=5, stroke=SEC)
@@ -368,7 +392,7 @@ def draw_power_schematic(path: Path) -> Path:
     svg.text(
         48,
         880,
-        "จุดสีบนขด = ขั้วจุด (polarity). Np กับ Ns จุดเดียวกัน → ส่งพลังงานตอน Q1 เปิด. Nr จุดกลับด้าน → รีเซ็ตฟลักซ์ตอน Q1 ปิดผ่าน Dr กลับบัส.",
+        "จุดสีบนขด = ขั้วจุด (polarity). Np กับ Ns จุดเดียวกัน → ส่งพลังงานตอน Q1 เปิด. Nr จุดกลับด้าน → รีเซ็ตฟลักซ์ตอน Q1 ปิดผ่าน Dr. D2 แคโทดอยู่ที่โหนด L (หันขึ้น).",
         size=13,
         fill="#3f3a33",
     )
@@ -444,8 +468,9 @@ def draw_on_off(path: Path) -> Path:
         svg.text(x0 + 690, 216, "Vo", size=14, fill=OK, weight="700")
         _cap_v(svg, x0 + 640, 210, gnd_y, stroke=SEC)
         _res_v(svg, x0 + 680, 210, gnd_y, stroke=SEC)
-        _diode_v_down(svg, x0 + 520, 210, 500, stroke=SEC, fill="#dceaf5")
+        _diode_v(svg, x0 + 520, 210, 500, cathode_at="top", stroke=SEC, fill="#dceaf5")
         svg.text(x0 + 534, 360, "D2", size=12, fill=SEC, weight="700")
+        svg.text(x0 + 534, 376, "แคโทดบน", size=10, fill=OK)
         svg.line(sx, 500, sx, gnd_y, stroke=SEC)
         svg.line(sx, gnd_y, x0 + 700, gnd_y, stroke=SEC, sw=1.6)
 
@@ -463,14 +488,15 @@ def draw_on_off(path: Path) -> Path:
             svg.text(x0 + 24, 700, "พลังงานไหลผ่านหม้อแปลงไป D1 และ L   ·   D2 ตัด   ·   ฟลักซ์ในแกนเพิ่มขึ้น", size=13, fill=HOT)
         else:
             svg.polyline(
-                [(x0 + 520, 500), (x0 + 520, gnd_y - 6), (x0 + 680, gnd_y - 6), (x0 + 680, 400)],
+                [
+                    (x0 + 520, 218),
+                    (x0 + 680, 218),
+                    (x0 + 680, gnd_y - 6),
+                    (x0 + 520, gnd_y - 6),
+                    (x0 + 520, 218),
+                ],
                 stroke=OK,
                 sw=3.0,
-            )
-            svg.polyline(
-                [(x0 + 520, 218), (x0 + 620, 218), (x0 + 680, 400)],
-                stroke=OK,
-                sw=2.4,
             )
             svg.text(x0 + 24, 700, "D1 ตัด · D2 ฟรีวีลรักษากระแส L · Nr+Dr คืนพลังงานแมกเนไทซิ่งเข้าบัส Vin", size=13, fill=SEC)
 

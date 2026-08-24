@@ -54,11 +54,12 @@
 <line x1="708.0" y1="210.0" x2="708.0" y2="401.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
 <polyline points="708.0,401.0 700.0,403.3 716.0,408.0 700.0,412.7 716.0,417.3 700.0,422.0 716.0,426.7 708.0,429.0" fill="none" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
 <line x1="708.0" y1="429.0" x2="708.0" y2="620.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
-<line x1="548.0" y1="210.0" x2="548.0" y2="343.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
-<polygon points="538.0,343.0 558.0,343.0 548.0,363.0" fill="#dceaf5" stroke="#1e4d7b" stroke-width="1.6" stroke-linejoin="round"/>
-<line x1="537.0" y1="363.0" x2="559.0" y2="363.0" stroke="#1e4d7b" stroke-width="2.2" stroke-linecap="round" opacity="1.0"/>
-<line x1="548.0" y1="363.0" x2="548.0" y2="500.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
+<line x1="548.0" y1="210.0" x2="548.0" y2="347.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
+<line x1="537.0" y1="347.0" x2="559.0" y2="347.0" stroke="#1e4d7b" stroke-width="2.2" stroke-linecap="round" opacity="1.0"/>
+<polygon points="548.0,347.0 538.0,367.0 558.0,367.0" fill="#dceaf5" stroke="#1e4d7b" stroke-width="1.6" stroke-linejoin="round"/>
+<line x1="548.0" y1="367.0" x2="548.0" y2="500.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
 <text x="562.0" y="360.0" fill="#1e4d7b" font-size="12" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="700" font-style="normal" text-anchor="start">D2</text>
+<text x="562.0" y="376.0" fill="#2a6b48" font-size="10" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">แคโทดบน</text>
 <line x1="384.0" y1="500.0" x2="384.0" y2="620.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
 <line x1="384.0" y1="620.0" x2="728.0" y2="620.0" stroke="#1e4d7b" stroke-width="1.6" stroke-linecap="round" opacity="1.0"/>
 <polyline points="88.0,208.0 322.0,208.0 322.0,296.0 216.0,296.0 216.0,612.0" fill="none" stroke="#9a2f22" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -117,14 +118,14 @@
 <line x1="1500.0" y1="210.0" x2="1500.0" y2="401.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
 <polyline points="1500.0,401.0 1492.0,403.3 1508.0,408.0 1492.0,412.7 1508.0,417.3 1492.0,422.0 1508.0,426.7 1500.0,429.0" fill="none" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
 <line x1="1500.0" y1="429.0" x2="1500.0" y2="620.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
-<line x1="1340.0" y1="210.0" x2="1340.0" y2="343.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
-<polygon points="1330.0,343.0 1350.0,343.0 1340.0,363.0" fill="#dceaf5" stroke="#1e4d7b" stroke-width="1.6" stroke-linejoin="round"/>
-<line x1="1329.0" y1="363.0" x2="1351.0" y2="363.0" stroke="#1e4d7b" stroke-width="2.2" stroke-linecap="round" opacity="1.0"/>
-<line x1="1340.0" y1="363.0" x2="1340.0" y2="500.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
+<line x1="1340.0" y1="210.0" x2="1340.0" y2="347.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
+<line x1="1329.0" y1="347.0" x2="1351.0" y2="347.0" stroke="#1e4d7b" stroke-width="2.2" stroke-linecap="round" opacity="1.0"/>
+<polygon points="1340.0,347.0 1330.0,367.0 1350.0,367.0" fill="#dceaf5" stroke="#1e4d7b" stroke-width="1.6" stroke-linejoin="round"/>
+<line x1="1340.0" y1="367.0" x2="1340.0" y2="500.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
 <text x="1354.0" y="360.0" fill="#1e4d7b" font-size="12" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="700" font-style="normal" text-anchor="start">D2</text>
+<text x="1354.0" y="376.0" fill="#2a6b48" font-size="10" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">แคโทดบน</text>
 <line x1="1176.0" y1="500.0" x2="1176.0" y2="620.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
 <line x1="1176.0" y1="620.0" x2="1520.0" y2="620.0" stroke="#1e4d7b" stroke-width="1.6" stroke-linecap="round" opacity="1.0"/>
-<polyline points="1340.0,500.0 1340.0,614.0 1500.0,614.0 1500.0,400.0" fill="none" stroke="#2a6b48" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/>
-<polyline points="1340.0,218.0 1440.0,218.0 1500.0,400.0" fill="none" stroke="#2a6b48" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="1340.0,218.0 1500.0,218.0 1500.0,614.0 1340.0,614.0 1340.0,218.0" fill="none" stroke="#2a6b48" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/>
 <text x="844.0" y="700.0" fill="#1e4d7b" font-size="13" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">D1 ตัด · D2 ฟรีวีลรักษากระแส L · Nr+Dr คืนพลังงานแมกเนไทซิ่งเข้าบัส Vin</text>
 </svg>

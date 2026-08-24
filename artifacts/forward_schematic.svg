@@ -141,14 +141,15 @@
 <circle cx="1080.0" cy="176.0" r="3.0" fill="#1b1b1b" stroke="none" stroke-width="1.0"/>
 <text x="948.0" y="160.0" fill="#1e4d7b" font-size="13" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="700" font-style="normal" text-anchor="start">D1</text>
 <text x="930.0" y="198.0" fill="#6b6358" font-size="11" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">MUR860</text>
-<line x1="1080.0" y1="176.0" x2="1080.0" y2="311.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
-<polygon points="1070.0,311.0 1090.0,311.0 1080.0,331.0" fill="#dceaf5" stroke="#1e4d7b" stroke-width="1.6" stroke-linejoin="round"/>
-<line x1="1069.0" y1="331.0" x2="1091.0" y2="331.0" stroke="#1e4d7b" stroke-width="2.2" stroke-linecap="round" opacity="1.0"/>
-<line x1="1080.0" y1="331.0" x2="1080.0" y2="470.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
+<line x1="1080.0" y1="176.0" x2="1080.0" y2="315.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
+<line x1="1069.0" y1="315.0" x2="1091.0" y2="315.0" stroke="#1e4d7b" stroke-width="2.2" stroke-linecap="round" opacity="1.0"/>
+<polygon points="1080.0,315.0 1070.0,335.0 1090.0,335.0" fill="#dceaf5" stroke="#1e4d7b" stroke-width="1.6" stroke-linejoin="round"/>
+<line x1="1080.0" y1="335.0" x2="1080.0" y2="470.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
 <line x1="1080.0" y1="470.0" x2="1080.0" y2="620.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
-<text x="1100.0" y="330.0" fill="#1e4d7b" font-size="13" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="700" font-style="normal" text-anchor="start">D2</text>
-<text x="1100.0" y="348.0" fill="#6b6358" font-size="11" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">freewheel</text>
-<text x="1100.0" y="364.0" fill="#6b6358" font-size="11" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">MUR860</text>
+<text x="1100.0" y="318.0" fill="#1e4d7b" font-size="13" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="700" font-style="normal" text-anchor="start">D2</text>
+<text x="1100.0" y="336.0" fill="#6b6358" font-size="11" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">freewheel</text>
+<text x="1100.0" y="352.0" fill="#2a6b48" font-size="11" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">แคโทดที่ L</text>
+<text x="1100.0" y="368.0" fill="#6b6358" font-size="11" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">MUR860</text>
 <line x1="1080.0" y1="176.0" x2="1125.0" y2="176.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
 <path d="M 1125.0 176.0 c 0 -14 14 -14 14 0 c 0 -14 14 -14 14 0 c 0 -14 14 -14 14 0 c 0 -14 14 -14 14 0 c 0 -14 14 -14 14 0" fill="none" stroke="#1e4d7b" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
 <line x1="1195.0" y1="176.0" x2="1240.0" y2="176.0" stroke="#1e4d7b" stroke-width="1.7" stroke-linecap="round" opacity="1.0"/>
@@ -192,5 +193,5 @@
 <rect x="28.0" y="812.0" width="1624.0" height="80.0" rx="10.0" fill="#fff" stroke="#d4c7b0" stroke-width="1"/>
 <text x="48.0" y="838.0" fill="#1b1b1b" font-size="13" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="700" font-style="normal" text-anchor="start">จุดทำงานหลัก</text>
 <text x="48.0" y="860.0" fill="#3f3a33" font-size="13" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Vo = Vin · (Ns/Np) · D    ·    Dmax = Np/(Np+Nr) = 0.50  (ใช้ ≤ 0.45)    ·    Vds,reset ≈ 2 Vin  เมื่อ Nr = Np    ·    Q1: STW20N95K5 + ฮีตซิงก์</text>
-<text x="48.0" y="880.0" fill="#3f3a33" font-size="13" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">จุดสีบนขด = ขั้วจุด (polarity). Np กับ Ns จุดเดียวกัน → ส่งพลังงานตอน Q1 เปิด. Nr จุดกลับด้าน → รีเซ็ตฟลักซ์ตอน Q1 ปิดผ่าน Dr กลับบัส.</text>
+<text x="48.0" y="880.0" fill="#3f3a33" font-size="13" font-family="Noto Sans Thai, Sarabun, Tahoma, DejaVu Sans, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">จุดสีบนขด = ขั้วจุด (polarity). Np กับ Ns จุดเดียวกัน → ส่งพลังงานตอน Q1 เปิด. Nr จุดกลับด้าน → รีเซ็ตฟลักซ์ตอน Q1 ปิดผ่าน Dr. D2 แคโทดอยู่ที่โหนด L (หันขึ้น).</text>
 </svg>

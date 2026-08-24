@@ -6,7 +6,11 @@ import unittest
 
 import numpy as np
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
 from sim.design import design_240vac_58v_5a
+from sim.schematic import draw_on_off, draw_power_schematic, vertical_diode_triangle
 from sim.waveforms import ideal_ccm
 
 
@@ -71,6 +75,55 @@ class WaveformTests(unittest.TestCase):
 
     def test_inductor_current_stays_positive_ccm(self) -> None:
         self.assertGreater(float(self.wf.i_l.min()), 3.5)
+
+
+def _triangle_near(svg_text: str, x: float, tol: float = 12.0) -> list[tuple[float, float]]:
+    found: list[list[tuple[float, float]]] = []
+    for chunk in svg_text.split("<polygon points="):
+        if chunk.startswith('"'):
+            pts_s = chunk.split('"', 2)[1]
+            pts = []
+            for pair in pts_s.split():
+                a, b = pair.split(",")
+                pts.append((float(a), float(b)))
+            if len(pts) == 3 and all(abs(px - x) <= tol for px, _py in pts):
+                found.append(pts)
+    if len(found) != 1:
+        raise AssertionError(f"expected one triangle near x={x}, got {len(found)}")
+    return found[0]
+
+
+def _tip_is_above_base(tri: list[tuple[float, float]]) -> bool:
+    ys = [round(p[1], 1) for p in tri]
+    unique = set(ys)
+    if len(unique) != 2:
+        raise AssertionError(f"expected a triangle with a shared base y, got {ys}")
+    tip_y = next(y for y in unique if ys.count(y) == 1)
+    base_y = next(y for y in unique if ys.count(y) == 2)
+    return tip_y < base_y
+
+
+class DiodePolarityTests(unittest.TestCase):
+    def test_freewheel_triangle_points_up(self) -> None:
+        tri = vertical_diode_triangle(1080, 176, 470, "top")
+        self.assertTrue(_tip_is_above_base(tri))
+        down = vertical_diode_triangle(1080, 176, 470, "bottom")
+        self.assertFalse(_tip_is_above_base(down))
+
+    def test_schematic_d2_cathode_is_at_l_node(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fwd.svg"
+            draw_power_schematic(path)
+            tri = _triangle_near(path.read_text(encoding="utf-8"), 1080)
+        self.assertTrue(_tip_is_above_base(tri))
+
+    def test_on_off_d2_cathode_is_at_l_node(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "onoff.svg"
+            draw_on_off(path)
+            text = path.read_text(encoding="utf-8")
+        for x in (548.0, 1340.0):
+            self.assertTrue(_tip_is_above_base(_triangle_near(text, x)))
 
 
 if __name__ == "__main__":
