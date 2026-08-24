@@ -9,4 +9,5 @@ python3 -m unittest discover -s learn -p 'test_*.py'
 ```
 
 Thai walkthrough: [`docs/learn-cc-cv-pi.md`](../docs/learn-cc-cv-pi.md)  
-Equations: [`docs/cc-cv-pi-equations.md`](../docs/cc-cv-pi-equations.md)
+Equations: [`docs/cc-cv-pi-equations.md`](../docs/cc-cv-pi-equations.md)  
+Reading list: [`docs/cc-cv-pi-reading.md`](../docs/cc-cv-pi-reading.md)

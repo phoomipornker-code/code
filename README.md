@@ -5,7 +5,8 @@ ESP32 dual-path charger for 16S LiFePO4, plus a CC/CV PI learning module.
 ## เรียน CC/CV PI control
 
 เริ่มที่ **[docs/learn-cc-cv-pi.md](docs/learn-cc-cv-pi.md)**  
-สมการ: **[docs/cc-cv-pi-equations.md](docs/cc-cv-pi-equations.md)**
+สมการ: **[docs/cc-cv-pi-equations.md](docs/cc-cv-pi-equations.md)**  
+หนังสือ / นิพนธ์: **[docs/cc-cv-pi-reading.md](docs/cc-cv-pi-reading.md)**
 
 ```bash
 python3 learn/simulate_cc_cv.py
