@@ -29,6 +29,7 @@ python3 -m sim.design
 - [docs/design-240vac-58v-5a.md](docs/design-240vac-58v-5a.md) — คำนวณรอบขด, L, ความเครียด
 - [docs/bom-240vac-58v-5a.md](docs/bom-240vac-58v-5a.md) — รายการชิ้นส่วน
 - [docs/ibat-ripple.md](docs/ibat-ripple.md) — กระแสขาแบตแกว่ง 100 Hz (สโคป 5 ms/div)
+- [docs/input-line.md](docs/input-line.md) — ฝั่งขาเข้า บริดจ์+Cin (สโคป 110 V, พัลส์กระแส)
 
 ## ความปลอดภัย
 
