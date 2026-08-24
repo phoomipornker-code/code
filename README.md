@@ -28,6 +28,7 @@ python3 -m sim.design
 - [docs/forward-converter.md](docs/forward-converter.md) — หลักการและวิธีอ่านวงจร
 - [docs/design-240vac-58v-5a.md](docs/design-240vac-58v-5a.md) — คำนวณรอบขด, L, ความเครียด
 - [docs/bom-240vac-58v-5a.md](docs/bom-240vac-58v-5a.md) — รายการชิ้นส่วน
+- [docs/ibat-ripple.md](docs/ibat-ripple.md) — กระแสขาแบตแกว่ง 100 Hz (สโคป 5 ms/div)
 
 ## ความปลอดภัย
 

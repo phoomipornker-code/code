@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from sim.bus_ripple import fast_pi_5khz, open_loop, plot_ripple, slow_pi_20ms
 from sim.design import design_240vac_58v_5a
 from sim.schematic import draw_on_off, draw_power_schematic
 from sim.waveforms import ideal_ccm, plot_waveforms
@@ -21,9 +22,11 @@ def main() -> None:
     p2 = draw_on_off(art / "forward_on_off.svg")
     wf = ideal_ccm()
     plot_waveforms(wf, art / "forward_waveforms.svg")
+    plot_ripple(open_loop(), slow_pi_20ms(), fast_pi_5khz(), art / "ibat_100hz.svg")
     print(p1)
     print(p2)
     print(art / "forward_waveforms.svg")
+    print(art / "ibat_100hz.svg")
 
 
 if __name__ == "__main__":
