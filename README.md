@@ -31,6 +31,7 @@ python3 -m sim.design
 - [docs/ibat-ripple.md](docs/ibat-ripple.md) — กระแสขาแบตแกว่ง 100 Hz (สโคป 5 ms/div)
 - [docs/input-line.md](docs/input-line.md) — ฝั่งขาเข้า บริดจ์+Cin (สโคป 110 V, พัลส์กระแส)
 - [docs/110v-n13.md](docs/110v-n13.md) — ใช้ไฟ 110 V + หม้อแปลง 1:1.3 แล้วเกิดอะไร
+- [docs/scope-240.md](docs/scope-240.md) — สัญญาณ Vout/Iout ที่ 240 V ขด 48:21
 
 ## ความปลอดภัย
 

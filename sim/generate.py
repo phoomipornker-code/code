@@ -9,6 +9,7 @@ from sim.design import design_240vac_58v_5a
 from sim.hw_110_n13 import N_DOWN, N_UP, evaluate, plot_cases
 from sim.input_line import plot_line, simulate_line
 from sim.schematic import draw_on_off, draw_power_schematic
+from sim.scope_240 import plot_scope
 from sim.waveforms import ideal_ccm, plot_waveforms
 
 
@@ -31,12 +32,14 @@ def main() -> None:
         art / "input_line.svg",
     )
     plot_cases(evaluate(N_UP), evaluate(N_DOWN), art / "hw_110_n13.svg")
+    plot_scope(art / "scope_240_48_21.svg")
     print(p1)
     print(p2)
     print(art / "forward_waveforms.svg")
     print(art / "ibat_100hz.svg")
     print(art / "input_line.svg")
     print(art / "hw_110_n13.svg")
+    print(art / "scope_240_48_21.svg")
 
 
 if __name__ == "__main__":
