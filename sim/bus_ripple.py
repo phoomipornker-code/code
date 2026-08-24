@@ -52,14 +52,20 @@ def simulate_ibat(
     t_end: float = 0.08,
     dt: float = 20e-6,
     cin_f: float | None = None,
+    vac_rms: float | None = None,
+    n_ratio: float | None = None,
+    duty_init: float | None = None,
+    vff_nom: float | None = None,
     label: str = "",
 ) -> RippleRun:
     """Average-value forward into a stiff battery, with cap-input 50 Hz rectifier."""
     dsgn = design_240vac_58v_5a()
     cin = dsgn.cin_f if cin_f is None else cin_f
-    n = dsgn.n
+    n = dsgn.n if n_ratio is None else n_ratio
     l = dsgn.l_h
-    vac_peak = dsgn.vac_nom * np.sqrt(2.0)
+    vac_used = dsgn.vac_nom if vac_rms is None else vac_rms
+    vac_peak = vac_used * np.sqrt(2.0)
+    vff = 340.0 if vff_nom is None else vff_nom
 
     nstep = int(t_end / dt)
     t = np.arange(nstep) * dt
@@ -69,7 +75,7 @@ def simulate_ibat(
 
     vin = vac_peak * 0.92
     i = IREF
-    d = DUTY_OPEN
+    d = DUTY_OPEN if duty_init is None else duty_init
     integ = d
     t_loop = 0.0
 
@@ -87,14 +93,15 @@ def simulate_ibat(
             integ = float(np.clip(integ + ki * err * loop_dt, -0.2, DMAX))
             d_cmd = kp * err + integ
             if feedforward:
-                d_cmd += DUTY_OPEN * 340.0 / max(vin, 80.0) - DUTY_OPEN
+                d0 = duty_init if duty_init is not None else DUTY_OPEN
+                d_cmd += d0 * vff / max(vin, 80.0) - d0
             d_cmd = float(np.clip(d_cmd, 0.05, DMAX))
             if slew is not None:
                 d_cmd = float(np.clip(d_cmd, d - slew, d + slew))
             d = d_cmd
             t_loop = tt
         elif feedforward and loop_dt is None:
-            d = float(np.clip(DUTY_OPEN * 340.0 / max(vin, 80.0), 0.05, DMAX))
+            d = float(np.clip((duty_init or DUTY_OPEN) * vff / max(vin, 80.0), 0.05, DMAX))
 
         v_sec = vin * n * d - dsgn.vf
         i = max(0.0, i + dt * (v_sec - VBAT - i * R_SERIES) / l)
