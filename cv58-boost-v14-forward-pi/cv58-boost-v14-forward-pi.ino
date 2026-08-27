@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v7";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v8";
 
 // =========================================================================
 // Hardware
@@ -60,10 +60,10 @@ const float RESTART_CHARGE_VOLTAGE = 53.60;  // 3.35V/cell — do not resume aft
 // -> duty in CV.
 // v4 ticked at ~30–40 ms (ADC + vTaskDelay(20)) so it could not reject
 // 100 Hz full-wave bus ripple, and Iac peak-cut at 2.5 A held Ibat ~2 A.
-// v7: Forward period 2 ms, dual-ADS parallel Vbat+Ibat to track 100 Hz bus ripple.
+// v8: Forward ~1.2 ms (ADS1115 860 SPS ceiling), dual-chip parallel Vbat+Ibat.
 // =========================================================================
 const unsigned long CONTROL_PERIOD_BOOST_MS = 20;
-const unsigned long CONTROL_PERIOD_FORWARD_MS = 2;  // 500 Hz — 5 samples per 10 ms / 100 Hz bus ripple
+const unsigned long CONTROL_PERIOD_FORWARD_MS = 1;  // run as fast as dual ADS1115 (~1.2 ms)
 const float FWD_CV_ENTRY_VOLTAGE = 57.10;
 const float FWD_CV_FORCE_VOLTAGE = 57.30;
 const float FWD_CV_EXIT_VOLTAGE  = 56.40;
@@ -169,9 +169,9 @@ const float HARD_OVP_TRIP_VOLTAGE = 59.50;    // after BMS FET opens, output can
 const float HARD_OVP_RELEASE_VOLTAGE = 57.20;
 const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 const bool ENABLE_DEBUG_VERBOSE = true;
-const unsigned long DEBUG_PRINT_INTERVAL_MS = 100;  // one compact line; faults still print immediately
-const unsigned long LCD_REFRESH_INTERVAL_MS = 180;
-const uint32_t I2C_CLOCK_HZ = 100000;
+const unsigned long DEBUG_PRINT_INTERVAL_MS = 250;  // Serial at 115200 would stall a 1 ms loop if printed faster
+const unsigned long LCD_REFRESH_INTERVAL_MS = 400;
+const uint32_t I2C_CLOCK_HZ = 400000;
 
 // =========================================================================
 // Runtime variables
@@ -356,24 +356,21 @@ static inline uint16_t adsMuxSingle(uint8_t channel) {
     }
 }
 
-static inline int16_t adsFinishConversion(Adafruit_ADS1115 &adc) {
-    unsigned long t0 = millis();
-    while (!adc.conversionComplete()) {
-        if ((millis() - t0) >= 5) break;
-    }
+static inline int16_t adsReadResult(Adafruit_ADS1115 &adc) {
     int16_t sample = adc.getLastConversionResults();
     if (sample < 0) sample = 0;
     return sample;
 }
 
-// Fire both ADS1115 chips at once (~1.2 ms at 860 SPS) instead of 2.3 ms sequential.
+// Dual ADS1115 at 860 SPS: start both, wait conversion time, read both (~1.2 ms).
 static inline void adsReadPairParallel(Adafruit_ADS1115 &a, uint8_t chA,
                                        Adafruit_ADS1115 &b, uint8_t chB,
                                        float *mvA, float *mvB) {
     a.startADCReading(adsMuxSingle(chA), false);
     b.startADCReading(adsMuxSingle(chB), false);
-    *mvA = adsFinishConversion(a) * 0.1875f;
-    *mvB = adsFinishConversion(b) * 0.1875f;
+    delayMicroseconds(1250);
+    *mvA = adsReadResult(a) * 0.1875f;
+    *mvB = adsReadResult(b) * 0.1875f;
 }
 
 static inline void disablePowerStage() {
@@ -507,6 +504,7 @@ void TaskSampleData(void * pvParameters) {
     float last_valid_raw_mv_v2 = NAN;
     unsigned long last_adc_glitch_log = 0;
     uint8_t fwdAdcPhase = 0;
+    unsigned long last_fwd_us = 0;
     for(;;) {
         unsigned long now = millis();
         if (!sensor_init_ok) {
@@ -520,15 +518,23 @@ void TaskSampleData(void * pvParameters) {
         }
         bool sample_ok = false;
         bool fwdFast = (system_ON && currentState == STATE_FORWARD);
-        TickType_t adcWait = fwdFast ? (TickType_t)3 : (TickType_t)20;
+        TickType_t adcWait = fwdFast ? (TickType_t)1 : (TickType_t)20;
         if (xSemaphoreTake(i2c_Mutex, adcWait)) {
             if (fwdFast) {
-                // Always sample Vbat + Ibat in parallel (~1.2 ms) so CC can track 100 Hz.
-                adsReadPairParallel(ads_volt, 1, ads_curr, 2, &raw_mv_v2, &raw_mv_i2);
-                fwdAdcPhase = (uint8_t)((fwdAdcPhase + 1) & 3);
-                if (fwdAdcPhase == 0) {
-                    adsReadPairParallel(ads_volt, 2, ads_curr, 1, &raw_mv_v1, &raw_mv_i1);
-                }
+                // Ibat every tick (curr ch2). Vbat most ticks (volt ch1).
+                // Vac/Iac steal a slot rarely so the 100 Hz loop is not doubled.
+                uint8_t vCh = 1;
+                uint8_t iCh = 2;
+                fwdAdcPhase++;
+                if (fwdAdcPhase >= 32) fwdAdcPhase = 0;
+                if (fwdAdcPhase == 16) vCh = 2;      // Vac instead of Vbat this tick
+                if (fwdAdcPhase == 31) iCh = 1;      // Iac instead of Ibat this tick
+                float mvV = 0, mvI = 0;
+                adsReadPairParallel(ads_volt, vCh, ads_curr, iCh, &mvV, &mvI);
+                if (vCh == 1) raw_mv_v2 = mvV;
+                else          raw_mv_v1 = mvV;
+                if (iCh == 2) raw_mv_i2 = mvI;
+                else          raw_mv_i1 = mvI;
             } else {
                 raw_mv_v0 = readADCStable(ads_volt, 0, false) * 0.1875;
                 raw_mv_i0 = readADCStable(ads_curr, 0) * 0.1875;
@@ -605,7 +611,7 @@ void TaskSampleData(void * pvParameters) {
             i_bat_charge_abs = fabs(i_bat);
             i_ac_filt = 0.20f * i_ac_mag + 0.80f * i_ac_filt;
             if (fwdFast) {
-                i_bat_fast = 0.72f * i_bat_charge_abs + 0.28f * i_bat_fast;
+                i_bat_fast = 0.85f * i_bat_charge_abs + 0.15f * i_bat_fast;
             } else {
                 i_bat_fast = 0.55f * i_bat_charge_abs + 0.45f * i_bat_fast;
             }
@@ -830,12 +836,14 @@ void TaskSampleData(void * pvParameters) {
         if (system_ON && currentState != STATE_OFF) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
             if (currentState == STATE_FORWARD) {
-                float dt = 0.002f;
-                if (last_millis > 0) {
-                    dt = (now - last_millis) / 1000.0f;
-                    if (dt < 0.001f) dt = 0.001f;
+                unsigned long now_us = micros();
+                float dt = 0.0012f;
+                if (last_fwd_us > 0) {
+                    dt = (now_us - last_fwd_us) / 1000000.0f;
+                    if (dt < 0.0008f) dt = 0.0008f;
                     if (dt > 0.05f) dt = 0.05f;
                 }
+                last_fwd_us = now_us;
                 float tScale = dt / 0.02f;
                 float iCc = i_bat_fast;
                 if (v_ac_in < UNDER_AC_VOLTAGE_CRIT) {
@@ -1292,12 +1300,16 @@ void TaskSampleData(void * pvParameters) {
                           irefDbg, vin, iin, integI, integV);
         }
         unsigned long elapsed = millis() - now;
-        unsigned long periodMs = (system_ON && currentState == STATE_FORWARD)
-                                 ? CONTROL_PERIOD_FORWARD_MS : CONTROL_PERIOD_BOOST_MS;
-        if (elapsed < periodMs) {
-            vTaskDelay((periodMs - elapsed) / portTICK_PERIOD_MS);
+        if (system_ON && currentState == STATE_FORWARD) {
+            // Do not add a 1 ms delay on top of the ~1.2 ms conversion.
+            vTaskDelay(0);
         } else {
-            vTaskDelay(1);
+            unsigned long periodMs = CONTROL_PERIOD_BOOST_MS;
+            if (elapsed < periodMs) {
+                vTaskDelay((periodMs - elapsed) / portTICK_PERIOD_MS);
+            } else {
+                vTaskDelay(1);
+            }
         }
     }
 }

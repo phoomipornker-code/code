@@ -12,7 +12,7 @@ Matched to pack BMS **HXYP-SH5-16S-20ATF** (16S LFP, same-port, cell OVP **3.65 
 4. Upload. Boot log must show:
 
 ```
-[BOOT] Firmware: cv58-boost-v14-forward-pi-v7
+[BOOT] Firmware: cv58-boost-v14-forward-pi-v8
 ```
 
 Paste into Arduino IDE as a single sketch: copy only `cv58-boost-v14-forward-pi.ino` (helpers are inside the .ino). Do not `#include "control_pi.h"` — that file is only for host tests.
@@ -41,7 +41,7 @@ If one cell is high, the BMS can still open while the pack reads ~56–57 V. Jum
 | CV | 57.6 V | 57.6 V |
 | Dmax | 760 | **460 (~45%, Nr=Np)** |
 | Control | SoftStart → CC+MPPT → CV → DONE | SoftStart → **CC PI** → **CV PI** → DONE |
-| Tick | ~20 ms | **2 ms** (v7; was 5 ms) |
+| Tick | ~20 ms | **~1.2 ms** (v8, ADS1115 ceiling) |
 | SoftStart | duty seed | **Iref 0.4 A → 5 A ~15 s** (v6; 4 s min SoftStart, cap 1.2 A) |
 
 Forward v4 looked “slow / not steady” on the scope because:
@@ -53,7 +53,7 @@ v5 raises the peak Iac cut to 8 A (filtered mean still 4 A), uses a faster Ibat 
 
 v6: Forward Iref no longer jumps to 5 A. SoftStart lasts **4 s** (not cancelled at 0.35 A) with Iref capped at **1.2 A**, then Iref slews about **0.3 A/s** up to 5 A (~15 s). Watch `Iref=` on the `[D]` line.
 
-v7: Forward CC samples **Vbat+Ibat in parallel every ~2 ms** (five points per 10 ms / 100 Hz bus ripple). A 5 ms loop only saw two points per cycle so it could not flatten open-loop 100 Hz. Remaining 100 Hz after v7 is mostly DC-bus capacitor, not PI tick.
+v8: Forward runs as fast as the two ADS1115 chips allow (~**1.2 ms**, ~800 Hz). No extra 1 ms delay after conversion, I2C 400 kHz, Vac/Iac stolen off the Ibat path only rarely. This is the hardware ceiling without a faster ADC.
 
 AC-line current pulses opposite the voltage sine are usually a **clamp probe reversed** — firmware uses `|Iac|`, duty is not inverted.
 
