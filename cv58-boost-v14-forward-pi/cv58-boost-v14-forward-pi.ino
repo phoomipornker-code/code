@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v9";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v10";
 
 // =========================================================================
 // Hardware
@@ -60,7 +60,7 @@ const float RESTART_CHARGE_VOLTAGE = 53.60;  // 3.35V/cell — do not resume aft
 // -> duty in CV.
 // v4 ticked at ~30–40 ms (ADC + vTaskDelay(20)) so it could not reject
 // 100 Hz full-wave bus ripple, and Iac peak-cut at 2.5 A held Ibat ~2 A.
-// v9: Iref tracks Ibat to 1 A then climbs; ~1.2 ms dual-ADS tick.
+// v10: Iref holds 1 A until Ibat matches, then climb; CC Kp=5.
 // =========================================================================
 const unsigned long CONTROL_PERIOD_BOOST_MS = 20;
 const unsigned long CONTROL_PERIOD_FORWARD_MS = 1;  // run as fast as dual ADS1115 (~1.2 ms)
@@ -72,16 +72,16 @@ const float FWD_CV_IREF_SLEW_A = 0.06;       // A per 20 ms (scaled by dt)
 const float FWD_CV_NEAR_BAND_V = 0.35;
 const float FWD_CV_DUTY_STEP_NEAR = 0.6;
 const float FWD_CV_DUTY_STEP_FAR = 2.0;
-const unsigned long FWD_SOFTSTART_MS = 4000;  // minimum time before leaving 1 A hold
-const float FWD_IREF_START_A = 0.30f;
-const float FWD_SOFTSTART_IREF_CAP_A = 1.00f; // climb together to 1 A, then hold
-const float FWD_IREF_LEAD_A = 0.20f;          // Iref may lead Ibat mean by this
+const unsigned long FWD_SOFTSTART_MS = 4000;  // min time at 1 A before climb
+const float FWD_IREF_START_A = 1.00f;         // Iref and Ibat meet here first
+const float FWD_SOFTSTART_IREF_CAP_A = 1.00f;
+const float FWD_IREF_LEAD_A = 0.20f;          // after 1 A, Iref may lead Ibat by this
 const float FWD_CC_IREF_SLEW_UP_A = 0.005f;   // A per 20 ms → 0.25 A/s after 1 A
 const float FWD_CC_IREF_SLEW_DOWN_A = 0.020f;
 const unsigned long FWD_SOFTSTART_HOLD_MS = 2000; // stay at 1 A after Ibat matches
 const unsigned long FWD_CV_ENTER_CONFIRM_MS = 200;
 const unsigned long FWD_CV_EXIT_CONFIRM_MS = 5000;
-const float FWD_CURR_KP = 16.0;
+const float FWD_CURR_KP = 5.0;
 const float FWD_CURR_KI = 50.0;
 const float FWD_CURR_OUT_MIN = -28.0;
 const float FWD_CURR_OUT_MAX = 36.0;
@@ -867,9 +867,9 @@ void TaskSampleData(void * pvParameters) {
                     float iRefTarget = iRefMax;
                     if (forwardMode == FWD_SOFTSTART) {
                         iRefTarget = boostMinf(iRefMax, FWD_SOFTSTART_IREF_CAP_A);
+                    } else {
+                        iRefTarget = boostMinf(iRefTarget, iMeas + FWD_IREF_LEAD_A);
                     }
-                    // Climb with Ibat: Iref cannot run more than LEAD amps ahead of mean I.
-                    iRefTarget = boostMinf(iRefTarget, iMeas + FWD_IREF_LEAD_A);
                     iRefTarget = boostMaxf(iRefTarget, FWD_IREF_START_A);
                     iRefTarget = boostMinf(iRefTarget, iRefMax);
                     fwdIrefCc = boostApplySlew(iRefTarget, fwdIrefCc,
