@@ -12,7 +12,7 @@ Matched to pack BMS **HXYP-SH5-16S-20ATF** (16S LFP, same-port, cell OVP **3.65 
 4. Upload. Boot log must show:
 
 ```
-[BOOT] Firmware: cv58-boost-v14-forward-pi-v5
+[BOOT] Firmware: cv58-boost-v14-forward-pi-v6
 ```
 
 Paste into Arduino IDE as a single sketch: copy only `cv58-boost-v14-forward-pi.ino` (helpers are inside the .ino). Do not `#include "control_pi.h"` — that file is only for host tests.
@@ -41,7 +41,8 @@ If one cell is high, the BMS can still open while the pack reads ~56–57 V. Jum
 | CV | 57.6 V | 57.6 V |
 | Dmax | 760 | **460 (~45%, Nr=Np)** |
 | Control | SoftStart → CC+MPPT → CV → DONE | SoftStart → **CC PI** → **CV PI** → DONE |
-| Tick | ~20 ms | **5 ms** (v5) so CC can track 100 Hz bus ripple |
+| Tick | ~20 ms | **5 ms** (v5+) |
+| SoftStart | duty seed | **Iref 0.4 A → 5 A ~15 s** (v6; 4 s min SoftStart, cap 1.2 A) |
 
 Forward v4 looked “slow / not steady” on the scope because:
 
@@ -49,6 +50,8 @@ Forward v4 looked “slow / not steady” on the scope because:
 - `FWD_AC_CURRENT_HARD_A = 2.5 A` cut duty on rectifier **peaks** (~3.8 A), so Ibat mean sat near **2 A** instead of 5 A.
 
 v5 raises the peak Iac cut to 8 A (filtered mean still 4 A), uses a faster Ibat sample for CC, and applies Vac feedforward at PWM.
+
+v6: Forward Iref no longer jumps to 5 A. SoftStart lasts **4 s** (not cancelled at 0.35 A) with Iref capped at **1.2 A**, then Iref slews about **0.3 A/s** up to 5 A (~15 s). Watch `Iref=` on the `[D]` line.
 
 AC-line current pulses opposite the voltage sine are usually a **clamp probe reversed** — firmware uses `|Iac|`, duty is not inverted.
 

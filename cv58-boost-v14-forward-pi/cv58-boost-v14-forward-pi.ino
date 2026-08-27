@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v5";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v6";
 
 // =========================================================================
 // Hardware
@@ -72,7 +72,11 @@ const float FWD_CV_IREF_SLEW_A = 0.06;       // A per 20 ms (scaled by dt)
 const float FWD_CV_NEAR_BAND_V = 0.35;
 const float FWD_CV_DUTY_STEP_NEAR = 0.6;
 const float FWD_CV_DUTY_STEP_FAR = 2.0;
-const unsigned long FWD_SOFTSTART_MS = 2000;
+const unsigned long FWD_SOFTSTART_MS = 4000;  // minimum time; do not exit on first 0.35 A
+const float FWD_IREF_START_A = 0.40f;
+const float FWD_SOFTSTART_IREF_CAP_A = 1.20f; // Iref cap during SoftStart
+const float FWD_CC_IREF_SLEW_UP_A = 0.006f;   // A per 20 ms → 0.30 A/s, ~15 s 0.4→5 A
+const float FWD_CC_IREF_SLEW_DOWN_A = 0.020f;
 const unsigned long FWD_CV_ENTER_CONFIRM_MS = 200;
 const unsigned long FWD_CV_EXIT_CONFIRM_MS = 5000;
 const float FWD_CURR_KP = 16.0;
@@ -303,7 +307,7 @@ static inline void forwardNewResetOnEntry() {
     fwdCurrIntegrator = 0.0f;
     fwdVoltIntegrator = 0.0f;
     fwdIrefCvCmd = 0.5f;
-    fwdIrefCc = FWD_TARGET_CC_CURRENT;
+    fwdIrefCc = FWD_IREF_START_A;
     fwdCvEnterMs = 0;
     fwdCvExitMs = 0;
 }
@@ -797,50 +801,57 @@ void TaskSampleData(void * pvParameters) {
                     duty_accumulator = 0.0f;
                     fwdCurrIntegrator = 0.0f;
                     fwdVoltIntegrator = 0.0f;
-                } else if (forwardMode == FWD_SOFTSTART) {
-                    duty_accumulator = boostApplySlew(FWD_SOFTSTART_SEED_DUTY, duty_accumulator,
-                                                      FWD_SOFTSTART_DUTY_SLEW * tScale, 4.0f * tScale);
-                    bool ready = (iCc >= 0.35f) ||
-                                 (now - forward_mode_enter_ms >= FWD_SOFTSTART_MS);
-                    if (ready) {
-                        forwardMode = FWD_CC;
-                        fwdCurrIntegrator = 0.0f;
-                        fwdIrefCc = FWD_TARGET_CC_CURRENT;
-                        Serial.printf("[INFO] FORWARD SoftStart done -> CC (I=%.2fA duty=%.0f)\n",
-                                      (float)i_bat_charge_filt, duty_accumulator);
-                    }
-                } else if (forwardMode == FWD_CC) {
-                    float iRef = FWD_TARGET_CC_CURRENT;
-                    // Pre-CV taper: ease current as battery approaches 56 V
+                } else if (forwardMode == FWD_SOFTSTART || forwardMode == FWD_CC) {
+                    float iRefMax = FWD_TARGET_CC_CURRENT;
                     if (v_bat_filt >= FWD_CC_TAPER_START_V) {
                         float span = boostMaxf(0.20f, TARGET_CV_VOLTAGE - FWD_CC_TAPER_START_V);
                         float rem = TARGET_CV_VOLTAGE - v_bat_filt;
                         float taper = boostClampf(rem / span, 0.10f, 1.0f);
-                        iRef *= taper;
+                        iRefMax *= taper;
                     }
-                    iRef = boostClampf(iRef, 0.0f, FWD_TARGET_CC_CURRENT);
-                    fwdIrefCc = iRef;
+                    iRefMax = boostClampf(iRefMax, 0.0f, FWD_TARGET_CC_CURRENT);
+                    float iRefTarget = iRefMax;
+                    if (forwardMode == FWD_SOFTSTART) {
+                        iRefTarget = boostMinf(iRefMax, FWD_SOFTSTART_IREF_CAP_A);
+                    }
+                    fwdIrefCc = boostApplySlew(iRefTarget, fwdIrefCc,
+                                               FWD_CC_IREF_SLEW_UP_A * tScale,
+                                               FWD_CC_IREF_SLEW_DOWN_A * tScale);
+                    float iRef = fwdIrefCc;
                     float iErr = iRef - iCc;
                     float dDuty = boostRunPI(iErr, FWD_CURR_KP, FWD_CURR_KI, dt,
                                              &fwdCurrIntegrator, FWD_CURR_OUT_MIN, FWD_CURR_OUT_MAX);
-                    // Help climb out of low-duty when far below CC target (AC is stiff).
-                    if (iErr > 0.8f && duty_accumulator < 280.0f && v_ac_in >= MIN_AC_VOLTAGE) {
+                    // Only nudge duty up once Iref is already near CC (not during ramp).
+                    if (iRef >= 3.5f && iErr > 0.8f && duty_accumulator < 280.0f &&
+                        v_ac_in >= MIN_AC_VOLTAGE) {
                         dDuty = boostMaxf(dDuty, 4.0f);
                     }
                     float dutyTarget = duty_accumulator + dDuty;
                     dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
-                    duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator,
-                                                      FWD_DUTY_SLEW_UP * tScale, FWD_DUTY_SLEW_DOWN * tScale);
-                    float vPeak = boostMaxf((float)v_bat, (float)v_bat_filt);
-                    if (v_bat_filt >= FWD_CV_FORCE_VOLTAGE || vPeak >= FWD_CV_FORCE_VOLTAGE) {
-                        enterForwardCv("force", v_bat, v_bat_filt);
-                    } else if (v_bat_filt >= FWD_CV_ENTRY_VOLTAGE) {
-                        if (fwdCvEnterMs == 0) fwdCvEnterMs = now;
-                        if (now - fwdCvEnterMs >= FWD_CV_ENTER_CONFIRM_MS) {
-                            enterForwardCv("confirm", v_bat, v_bat_filt);
+                    float slewUp = (forwardMode == FWD_SOFTSTART)
+                                   ? (FWD_SOFTSTART_DUTY_SLEW * tScale)
+                                   : (FWD_DUTY_SLEW_UP * tScale);
+                    float slewDown = (forwardMode == FWD_SOFTSTART) ? (4.0f * tScale)
+                                                                    : (FWD_DUTY_SLEW_DOWN * tScale);
+                    duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, slewUp, slewDown);
+                    if (forwardMode == FWD_SOFTSTART) {
+                        if (now - forward_mode_enter_ms >= FWD_SOFTSTART_MS) {
+                            forwardMode = FWD_CC;
+                            Serial.printf("[INFO] FORWARD SoftStart done -> CC (Iref=%.2fA I=%.2fA duty=%.0f)\n",
+                                          iRef, (float)i_bat_charge_filt, duty_accumulator);
                         }
                     } else {
-                        fwdCvEnterMs = 0;
+                        float vPeak = boostMaxf((float)v_bat, (float)v_bat_filt);
+                        if (v_bat_filt >= FWD_CV_FORCE_VOLTAGE || vPeak >= FWD_CV_FORCE_VOLTAGE) {
+                            enterForwardCv("force", v_bat, v_bat_filt);
+                        } else if (v_bat_filt >= FWD_CV_ENTRY_VOLTAGE) {
+                            if (fwdCvEnterMs == 0) fwdCvEnterMs = now;
+                            if (now - fwdCvEnterMs >= FWD_CV_ENTER_CONFIRM_MS) {
+                                enterForwardCv("confirm", v_bat, v_bat_filt);
+                            }
+                        } else {
+                            fwdCvEnterMs = 0;
+                        }
                     }
                 } else if (forwardMode == FWD_CV) {
                     float vErr = TARGET_CV_VOLTAGE - v_bat_filt;
@@ -892,6 +903,8 @@ void TaskSampleData(void * pvParameters) {
                             fwdCurrIntegrator = 0.0f;
                             fwdVoltIntegrator = 0.0f;
                             fwdIrefCvCmd = 0.5f;
+                            fwdIrefCc = boostClampf(i_bat_charge_filt, FWD_IREF_START_A,
+                                                    FWD_TARGET_CC_CURRENT);
                             full_condition_start_ms = 0;
                             Serial.printf("[INFO] FORWARD CV exit -> CC at filt=%.2fV\n",
                                           (float)v_bat_filt);
@@ -920,6 +933,8 @@ void TaskSampleData(void * pvParameters) {
                         fwdCurrIntegrator = 0.0f;
                         fwdVoltIntegrator = 0.0f;
                         fwdIrefCvCmd = 0.5f;
+                        fwdIrefCc = boostClampf(i_bat_charge_filt, FWD_IREF_START_A,
+                                                FWD_TARGET_CC_CURRENT);
                         Serial.println("[INFO] FORWARD resume from DONE -> CC.");
                     }
                 }
