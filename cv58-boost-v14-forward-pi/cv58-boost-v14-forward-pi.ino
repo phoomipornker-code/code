@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v8";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v9";
 
 // =========================================================================
 // Hardware
@@ -60,7 +60,7 @@ const float RESTART_CHARGE_VOLTAGE = 53.60;  // 3.35V/cell — do not resume aft
 // -> duty in CV.
 // v4 ticked at ~30–40 ms (ADC + vTaskDelay(20)) so it could not reject
 // 100 Hz full-wave bus ripple, and Iac peak-cut at 2.5 A held Ibat ~2 A.
-// v8: Forward ~1.2 ms (ADS1115 860 SPS ceiling), dual-chip parallel Vbat+Ibat.
+// v9: Iref tracks Ibat to 1 A then climbs; ~1.2 ms dual-ADS tick.
 // =========================================================================
 const unsigned long CONTROL_PERIOD_BOOST_MS = 20;
 const unsigned long CONTROL_PERIOD_FORWARD_MS = 1;  // run as fast as dual ADS1115 (~1.2 ms)
@@ -72,11 +72,13 @@ const float FWD_CV_IREF_SLEW_A = 0.06;       // A per 20 ms (scaled by dt)
 const float FWD_CV_NEAR_BAND_V = 0.35;
 const float FWD_CV_DUTY_STEP_NEAR = 0.6;
 const float FWD_CV_DUTY_STEP_FAR = 2.0;
-const unsigned long FWD_SOFTSTART_MS = 4000;  // minimum time; do not exit on first 0.35 A
-const float FWD_IREF_START_A = 0.40f;
-const float FWD_SOFTSTART_IREF_CAP_A = 1.20f; // Iref cap during SoftStart
-const float FWD_CC_IREF_SLEW_UP_A = 0.006f;   // A per 20 ms → 0.30 A/s, ~15 s 0.4→5 A
+const unsigned long FWD_SOFTSTART_MS = 4000;  // minimum time before leaving 1 A hold
+const float FWD_IREF_START_A = 0.30f;
+const float FWD_SOFTSTART_IREF_CAP_A = 1.00f; // climb together to 1 A, then hold
+const float FWD_IREF_LEAD_A = 0.20f;          // Iref may lead Ibat mean by this
+const float FWD_CC_IREF_SLEW_UP_A = 0.005f;   // A per 20 ms → 0.25 A/s after 1 A
 const float FWD_CC_IREF_SLEW_DOWN_A = 0.020f;
+const unsigned long FWD_SOFTSTART_HOLD_MS = 2000; // stay at 1 A after Ibat matches
 const unsigned long FWD_CV_ENTER_CONFIRM_MS = 200;
 const unsigned long FWD_CV_EXIT_CONFIRM_MS = 5000;
 const float FWD_CURR_KP = 16.0;
@@ -222,9 +224,10 @@ volatile ForwardMode forwardMode = FWD_SOFTSTART;
 float fwdCurrIntegrator = 0.0f;
 float fwdVoltIntegrator = 0.0f;
 float fwdIrefCvCmd = 0.5f;
-float fwdIrefCc = FWD_TARGET_CC_CURRENT;
+float fwdIrefCc = FWD_IREF_START_A;
 unsigned long fwdCvEnterMs = 0;
 unsigned long fwdCvExitMs = 0;
+unsigned long fwdIrefHoldMs = 0;
 unsigned long forward_mode_enter_ms = 0;
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 SemaphoreHandle_t i2c_Mutex;
@@ -310,6 +313,7 @@ static inline void forwardNewResetOnEntry() {
     fwdIrefCc = FWD_IREF_START_A;
     fwdCvEnterMs = 0;
     fwdCvExitMs = 0;
+    fwdIrefHoldMs = 0;
 }
 
 static inline void enterForwardCv(const char *why, float vRaw, float vFilt) {
@@ -845,7 +849,8 @@ void TaskSampleData(void * pvParameters) {
                 }
                 last_fwd_us = now_us;
                 float tScale = dt / 0.02f;
-                float iCc = i_bat_fast;
+                float iMeas = i_bat_charge_filt;
+                float iCc = 0.35f * i_bat_fast + 0.65f * iMeas;
                 if (v_ac_in < UNDER_AC_VOLTAGE_CRIT) {
                     duty_accumulator = 0.0f;
                     fwdCurrIntegrator = 0.0f;
@@ -863,6 +868,10 @@ void TaskSampleData(void * pvParameters) {
                     if (forwardMode == FWD_SOFTSTART) {
                         iRefTarget = boostMinf(iRefMax, FWD_SOFTSTART_IREF_CAP_A);
                     }
+                    // Climb with Ibat: Iref cannot run more than LEAD amps ahead of mean I.
+                    iRefTarget = boostMinf(iRefTarget, iMeas + FWD_IREF_LEAD_A);
+                    iRefTarget = boostMaxf(iRefTarget, FWD_IREF_START_A);
+                    iRefTarget = boostMinf(iRefTarget, iRefMax);
                     fwdIrefCc = boostApplySlew(iRefTarget, fwdIrefCc,
                                                FWD_CC_IREF_SLEW_UP_A * tScale,
                                                FWD_CC_IREF_SLEW_DOWN_A * tScale);
@@ -870,7 +879,6 @@ void TaskSampleData(void * pvParameters) {
                     float iErr = iRef - iCc;
                     float dDuty = boostRunPI(iErr, FWD_CURR_KP, FWD_CURR_KI, dt,
                                              &fwdCurrIntegrator, FWD_CURR_OUT_MIN, FWD_CURR_OUT_MAX);
-                    // Only nudge duty up once Iref is already near CC (not during ramp).
                     if (iRef >= 3.5f && iErr > 0.8f && duty_accumulator < 280.0f &&
                         v_ac_in >= MIN_AC_VOLTAGE) {
                         dDuty = boostMaxf(dDuty, 4.0f);
@@ -884,10 +892,17 @@ void TaskSampleData(void * pvParameters) {
                                                                     : (FWD_DUTY_SLEW_DOWN * tScale);
                     duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, slewUp, slewDown);
                     if (forwardMode == FWD_SOFTSTART) {
-                        if (now - forward_mode_enter_ms >= FWD_SOFTSTART_MS) {
-                            forwardMode = FWD_CC;
-                            Serial.printf("[INFO] FORWARD SoftStart done -> CC (Iref=%.2fA I=%.2fA duty=%.0f)\n",
-                                          iRef, (float)i_bat_charge_filt, duty_accumulator);
+                        bool atOneAmp = (iRef >= 0.92f) && (iMeas >= 0.80f) &&
+                                        (fabsf(iMeas - iRef) <= 0.25f);
+                        if (!atOneAmp || (now - forward_mode_enter_ms < FWD_SOFTSTART_MS)) {
+                            fwdIrefHoldMs = 0;
+                        } else {
+                            if (fwdIrefHoldMs == 0) fwdIrefHoldMs = now;
+                            if (now - fwdIrefHoldMs >= FWD_SOFTSTART_HOLD_MS) {
+                                forwardMode = FWD_CC;
+                                Serial.printf("[INFO] FORWARD 1A matched -> CC (Iref=%.2fA I=%.2fA duty=%.0f)\n",
+                                              iRef, iMeas, duty_accumulator);
+                            }
                         }
                     } else {
                         float vPeak = boostMaxf((float)v_bat, (float)v_bat_filt);
