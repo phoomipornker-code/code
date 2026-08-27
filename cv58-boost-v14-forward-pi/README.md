@@ -12,7 +12,7 @@ Matched to pack BMS **HXYP-SH5-16S-20ATF** (16S LFP, same-port, cell OVP **3.65 
 4. Upload. Boot log must show:
 
 ```
-[BOOT] Firmware: cv58-boost-v14-forward-pi-v10
+[BOOT] Firmware: cv58-boost-v14-forward-pi-v11
 ```
 
 Paste into Arduino IDE as a single sketch: copy only `cv58-boost-v14-forward-pi.ino` (helpers are inside the .ino). Do not `#include "control_pi.h"` — that file is only for host tests.
@@ -55,6 +55,8 @@ v6: Forward Iref no longer jumps to 5 A. SoftStart lasts **4 s** (not cancelled 
 
 v10: SoftStart **Iref = 1.0 A** until Ibat matches (~1 A), hold 2 s, then climb to 5 A. Forward CC **Kp = 5** (was 16) so Ibat hunts less.
 
+v11: Forward PI gains can be changed live over Serial (no re-flash). Defaults stay `kp 5` / `ki 50` / `vkp 0.70` / `vki 0.35` until you type new values.
+
 AC-line current pulses opposite the voltage sine are usually a **clamp probe reversed** — firmware uses `|Iac|`, duty is not inverted.
 
 ```
@@ -62,3 +64,36 @@ current PI  → duty          (CC)
 voltage PI  → Iref
 current PI  → duty          (CV)
 ```
+
+## Serial PI tune (v11)
+
+Serial Monitor **115200**, line ending **Newline** (or Both NL & CR). Type a command, then Enter.
+
+| Command | Meaning | Allowed range |
+|---------|---------|----------------|
+| `kp 5` | Forward **current** PI Kp | 0.1–40 |
+| `ki 50` | Forward **current** PI Ki | 0–200 |
+| `vkp 0.70` | Forward **voltage** PI Kp (CV) | 0.05–8 |
+| `vki 0.35` | Forward **voltage** PI Ki (CV) | 0–8 |
+| `pi` or `?` | Print current gains | — |
+| `def` | Restore sketch defaults and zero integrators | — |
+
+Boot prints the same command list once. Changing a gain **zeros that PI integrator** so leftover `integ` does not jump the duty.
+
+Values reset on reboot. When a set works, paste it into `FWD_CURR_KP` / `FWD_CURR_KI` / `FWD_VOLT_KP` / `FWD_VOLT_KI` in the `.ino` and re-flash.
+
+**CC:** start charge, watch `[D]` `Iref` vs `Ib`. Raise `kp` until Ibat follows Iref without hunting, then add `ki` until steady error is small. If Ibat oscillates, lower `kp` first.
+
+**CV:** wait until `FWD CV`. `vkp`/`vki` change Iref from voltage error. Too much `vkp` makes Iref jump; too much `vki` winds Iref up.
+
+Boost PI is not live-tunable (unchanged proven path).
+
+## Serial debug `[D]`
+
+Printed every 250 ms:
+
+```
+[D] ms ON/OFF STATE d=raw/% Vb=filt/raw Ib=filt/abs-or-fast Iref=A Vin=V/A Pi=integI/integV
+```
+
+On Forward, the second `Ib` field is `i_bat_fast` and `Vin` current is filtered `|Iac|`.

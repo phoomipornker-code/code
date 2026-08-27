@@ -3,8 +3,14 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
+#include <string.h>
+#include <stdio.h>
 
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v10";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v11";
+
+// Serial Monitor 115200, newline:
+//   kp 5     ki 50     vkp 0.70    vki 0.35
+//   pi  or ?           def = restore compile-time defaults
 
 // =========================================================================
 // Hardware
@@ -81,12 +87,12 @@ const float FWD_CC_IREF_SLEW_DOWN_A = 0.020f;
 const unsigned long FWD_SOFTSTART_HOLD_MS = 2000; // stay at 1 A after Ibat matches
 const unsigned long FWD_CV_ENTER_CONFIRM_MS = 200;
 const unsigned long FWD_CV_EXIT_CONFIRM_MS = 5000;
-const float FWD_CURR_KP = 5.0;
-const float FWD_CURR_KI = 50.0;
+const float FWD_CURR_KP = 5.0;              // live-tune: Serial "kp 5"
+const float FWD_CURR_KI = 50.0;              // live-tune: Serial "ki 50"
 const float FWD_CURR_OUT_MIN = -28.0;
 const float FWD_CURR_OUT_MAX = 36.0;
-const float FWD_VOLT_KP = 0.70;
-const float FWD_VOLT_KI = 0.35;
+const float FWD_VOLT_KP = 0.70;              // live-tune: Serial "vkp 0.70"
+const float FWD_VOLT_KI = 0.35;              // live-tune: Serial "vki 0.35"
 const float FWD_VOLT_OUT_MIN = 0.0;
 const float FWD_VOLT_OUT_MAX = 3.0;          // CV must not demand CC current
 const float FWD_DUTY_SLEW_UP = 8.0;
@@ -229,6 +235,11 @@ unsigned long fwdCvEnterMs = 0;
 unsigned long fwdCvExitMs = 0;
 unsigned long fwdIrefHoldMs = 0;
 unsigned long forward_mode_enter_ms = 0;
+// Runtime Forward PI (edit live over Serial 115200). Defaults = const above.
+volatile float fwdCurrKp = FWD_CURR_KP;
+volatile float fwdCurrKi = FWD_CURR_KI;
+volatile float fwdVoltKp = FWD_VOLT_KP;
+volatile float fwdVoltKi = FWD_VOLT_KI;
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 SemaphoreHandle_t i2c_Mutex;
 float raw_mv_v0 = 0, raw_mv_v1 = 0, raw_mv_v2 = 0;
@@ -461,6 +472,8 @@ void setup() {
     Serial.printf("[BOOT] FWD   CC=%.2fA CV=%.2fV fsw=%dHz Dmax=%d tick=%lums CVentry=%.2f CVexit=%.2f\n",
                   FWD_TARGET_CC_CURRENT, TARGET_CV_VOLTAGE, PWM_FREQ_FORWARD, MAX_DUTY_FORWARD,
                   CONTROL_PERIOD_FORWARD_MS, FWD_CV_ENTRY_VOLTAGE, FWD_CV_EXIT_VOLTAGE);
+    Serial.printf("[PI] Serial tune: kp %.2f | ki %.2f | vkp %.2f | vki %.2f | pi | def\n",
+                  FWD_CURR_KP, FWD_CURR_KI, FWD_VOLT_KP, FWD_VOLT_KI);
     Wire.begin(21, 22);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(25);
@@ -877,7 +890,7 @@ void TaskSampleData(void * pvParameters) {
                                                FWD_CC_IREF_SLEW_DOWN_A * tScale);
                     float iRef = fwdIrefCc;
                     float iErr = iRef - iCc;
-                    float dDuty = boostRunPI(iErr, FWD_CURR_KP, FWD_CURR_KI, dt,
+                    float dDuty = boostRunPI(iErr, fwdCurrKp, fwdCurrKi, dt,
                                              &fwdCurrIntegrator, FWD_CURR_OUT_MIN, FWD_CURR_OUT_MAX);
                     if (iRef >= 3.5f && iErr > 0.8f && duty_accumulator < 280.0f &&
                         v_ac_in >= MIN_AC_VOLTAGE) {
@@ -924,7 +937,7 @@ void TaskSampleData(void * pvParameters) {
                         vErr = 0.0f;
                         fwdVoltIntegrator *= 0.92f;
                     }
-                    float iReq = boostRunPI(vErr, FWD_VOLT_KP, FWD_VOLT_KI, dt,
+                    float iReq = boostRunPI(vErr, fwdVoltKp, fwdVoltKi, dt,
                                             &fwdVoltIntegrator, FWD_VOLT_OUT_MIN, FWD_VOLT_OUT_MAX);
                     if (nearTarget) {
                         float nearCap = 1.0f + boostClampf(vErr / FWD_CV_NEAR_BAND_V, 0.0f, 1.0f) * 1.0f;
@@ -935,8 +948,8 @@ void TaskSampleData(void * pvParameters) {
                                                   FWD_CV_IREF_SLEW_A * tScale, FWD_CV_IREF_SLEW_A * tScale);
                     float iRef = fwdIrefCvCmd;
                     float iErr = iRef - iCc;
-                    float dDuty = boostRunPI(iErr, FWD_CURR_KP * (nearTarget ? 0.50f : 0.80f),
-                                             FWD_CURR_KI * (nearTarget ? 0.40f : 0.65f),
+                    float dDuty = boostRunPI(iErr, fwdCurrKp * (nearTarget ? 0.50f : 0.80f),
+                                             fwdCurrKi * (nearTarget ? 0.40f : 0.65f),
                                              dt, &fwdCurrIntegrator,
                                              nearTarget ? -6.0f : FWD_CURR_OUT_MIN,
                                              nearTarget ? 6.0f : 15.0f);
@@ -1329,6 +1342,79 @@ void TaskSampleData(void * pvParameters) {
     }
 }
 
+static void printFwdPiGains() {
+    Serial.printf("[PI] CC Kp=%.3f Ki=%.3f | CV Kp=%.3f Ki=%.3f\n",
+                  (float)fwdCurrKp, (float)fwdCurrKi, (float)fwdVoltKp, (float)fwdVoltKi);
+    Serial.println("[PI] kp <n> | ki <n> | vkp <n> | vki <n> | pi | def");
+}
+
+static void applyFwdPiLine(char *line) {
+    while (*line == ' ' || *line == '\t') line++;
+    if (*line == '\0') return;
+    char cmd[12];
+    float val = 0.0f;
+    int ntok = sscanf(line, "%11s %f", cmd, &val);
+    if (ntok < 1) return;
+    for (char *p = cmd; *p; p++) {
+        if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+    }
+    if (strcmp(cmd, "pi") == 0 || strcmp(cmd, "?") == 0 || strcmp(cmd, "help") == 0) {
+        printFwdPiGains();
+        return;
+    }
+    if (strcmp(cmd, "def") == 0 || strcmp(cmd, "default") == 0) {
+        fwdCurrKp = FWD_CURR_KP;
+        fwdCurrKi = FWD_CURR_KI;
+        fwdVoltKp = FWD_VOLT_KP;
+        fwdVoltKi = FWD_VOLT_KI;
+        fwdCurrIntegrator = 0.0f;
+        fwdVoltIntegrator = 0.0f;
+        Serial.println("[PI] restored defaults");
+        printFwdPiGains();
+        return;
+    }
+    if (ntok < 2) {
+        Serial.println("[PI] need a number, e.g. kp 5");
+        return;
+    }
+    if (strcmp(cmd, "kp") == 0) {
+        fwdCurrKp = boostClampf(val, 0.10f, 40.0f);
+        fwdCurrIntegrator = 0.0f;
+    } else if (strcmp(cmd, "ki") == 0) {
+        fwdCurrKi = boostClampf(val, 0.0f, 200.0f);
+        fwdCurrIntegrator = 0.0f;
+    } else if (strcmp(cmd, "vkp") == 0) {
+        fwdVoltKp = boostClampf(val, 0.05f, 8.0f);
+        fwdVoltIntegrator = 0.0f;
+    } else if (strcmp(cmd, "vki") == 0) {
+        fwdVoltKi = boostClampf(val, 0.0f, 8.0f);
+        fwdVoltIntegrator = 0.0f;
+    } else {
+        Serial.println("[PI] unknown cmd");
+        printFwdPiGains();
+        return;
+    }
+    printFwdPiGains();
+}
+
+static void pollFwdPiTuneSerial() {
+    static char buf[48];
+    static uint8_t n = 0;
+    while (Serial.available() > 0) {
+        char c = (char)Serial.read();
+        if (c == '\r') continue;
+        if (c == '\n') {
+            buf[n] = '\0';
+            n = 0;
+            applyFwdPiLine(buf);
+        } else if (n < sizeof(buf) - 1) {
+            buf[n++] = c;
+        } else {
+            n = 0;
+        }
+    }
+}
+
 void TaskLCDLoop(void * pvParameters) {
     bool last_start_state = HIGH, last_stop_state = HIGH;
     bool show_no_power_alert = false;
@@ -1341,6 +1427,7 @@ void TaskLCDLoop(void * pvParameters) {
     unsigned long start_change_ms = 0, stop_change_ms = 0;
     const unsigned long DEBOUNCE_MS = 80;
     for(;;) {
+        pollFwdPiTuneSerial();
         unsigned long now = millis();
         bool start_raw = digitalRead(BUTTON_START_PIN);
         bool stop_raw  = digitalRead(BUTTON_STOP_PIN);
