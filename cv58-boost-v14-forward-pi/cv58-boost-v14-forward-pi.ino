@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v4";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v5";
 
 // =========================================================================
 // Hardware
@@ -57,32 +57,40 @@ const float RESTART_CHARGE_VOLTAGE = 53.60;  // 3.35V/cell — do not resume aft
 // Replaces the old dual-PID min(CC,CV)+Kd law. That path had no dt on Ki,
 // two integrators that fought, and derivative on noisy Ibat.
 // Same cascade as Boost: current PI in CC; voltage PI -> Iref, current PI
-// -> duty in CV. AC is a stiff source, so Forward gains/slew are milder.
+// -> duty in CV.
+// v4 ticked at ~30–40 ms (ADC + vTaskDelay(20)) so it could not reject
+// 100 Hz full-wave bus ripple, and Iac peak-cut at 2.5 A held Ibat ~2 A.
+// v5: Forward period 5 ms, real dt, peak Iac clamp raised, CC uses fast I.
 // =========================================================================
+const unsigned long CONTROL_PERIOD_BOOST_MS = 20;
+const unsigned long CONTROL_PERIOD_FORWARD_MS = 5;
 const float FWD_CV_ENTRY_VOLTAGE = 57.10;
 const float FWD_CV_FORCE_VOLTAGE = 57.30;
 const float FWD_CV_EXIT_VOLTAGE  = 56.40;
 const float FWD_CC_TAPER_START_V = 56.40;
-const float FWD_CV_IREF_SLEW_A = 0.06;       // A per 20 ms tick
+const float FWD_CV_IREF_SLEW_A = 0.06;       // A per 20 ms (scaled by dt)
 const float FWD_CV_NEAR_BAND_V = 0.35;
 const float FWD_CV_DUTY_STEP_NEAR = 0.6;
 const float FWD_CV_DUTY_STEP_FAR = 2.0;
 const unsigned long FWD_SOFTSTART_MS = 2000;
 const unsigned long FWD_CV_ENTER_CONFIRM_MS = 200;
 const unsigned long FWD_CV_EXIT_CONFIRM_MS = 5000;
-const float FWD_CURR_KP = 8.0;
-const float FWD_CURR_KI = 35.0;
-const float FWD_CURR_OUT_MIN = -20.0;
-const float FWD_CURR_OUT_MAX = 25.0;
+const float FWD_CURR_KP = 16.0;
+const float FWD_CURR_KI = 50.0;
+const float FWD_CURR_OUT_MIN = -28.0;
+const float FWD_CURR_OUT_MAX = 36.0;
 const float FWD_VOLT_KP = 0.70;
 const float FWD_VOLT_KI = 0.35;
 const float FWD_VOLT_OUT_MIN = 0.0;
 const float FWD_VOLT_OUT_MAX = 3.0;          // CV must not demand CC current
-const float FWD_DUTY_SLEW_UP = 3.0;
-const float FWD_DUTY_SLEW_DOWN = 5.0;
-const float FWD_SOFTSTART_DUTY_SLEW = 1.5;
+const float FWD_DUTY_SLEW_UP = 8.0;
+const float FWD_DUTY_SLEW_DOWN = 12.0;
+const float FWD_SOFTSTART_DUTY_SLEW = 2.5;
 const float FWD_SOFTSTART_SEED_DUTY = 80.0;  // ~8% — PI climbs, do not seed from old Vac data
-const float FWD_AC_CURRENT_HARD_A = 2.5;
+const float FWD_AC_CURRENT_HARD_A = 8.0;     // instantaneous peak (rectifier pulses)
+const float FWD_AC_CURRENT_FILT_HARD_A = 4.0; // ~mean; 2.5 A peak-cut starved CC
+const float FWD_VAC_FF_NOM = 220.0;
+const float FWD_VAC_FF_MIN = 100.0;
 const float FWD_BMS_PREEMPT_DUTY_CAP_RAW = 120.0;
 
 // =========================================================================
@@ -169,8 +177,10 @@ volatile float i_solar = 0, i_ac_in = 0, i_bat = 0;
 volatile float v_bat_filt = 0, i_bat_filt = 0;
 volatile float i_solar_mag = 0;
 volatile float i_ac_mag = 0;
+volatile float i_ac_filt = 0;
 volatile float i_bat_charge_filt = 0;
 volatile float i_bat_charge_abs = 0;
+volatile float i_bat_fast = 0;
 volatile bool ovp_latched = false;
 volatile float ovp_trip_voltage = 0.0;
 volatile unsigned long ovp_trip_ms = 0;
@@ -343,6 +353,8 @@ static inline void disablePowerStage() {
     digitalWrite(RELAY_AC_PIN, LOW);
     ledcWrite(PWM_FORWARD_PIN, 0);
     ledcWrite(PWM_BOOST_PIN, 0);
+    i_ac_filt = 0.0f;
+    i_bat_fast = 0.0f;
 }
 
 static inline void forceSafeShutdown() {
@@ -412,9 +424,9 @@ void setup() {
                   TARGET_CV_VOLTAGE, RESTART_CHARGE_VOLTAGE);
     Serial.printf("[BOOT] BOOST CC=%.2fA CV=%.2fV fsw=%dHz Dmax=%d\n",
                   TARGET_CC_CURRENT, BOOST_CV_TARGET_VOLTAGE, PWM_FREQ_BOOST, MAX_DUTY_BOOST);
-    Serial.printf("[BOOT] FWD   CC=%.2fA CV=%.2fV fsw=%dHz Dmax=%d CVentry=%.2f CVexit=%.2f\n",
+    Serial.printf("[BOOT] FWD   CC=%.2fA CV=%.2fV fsw=%dHz Dmax=%d tick=%lums CVentry=%.2f CVexit=%.2f\n",
                   FWD_TARGET_CC_CURRENT, TARGET_CV_VOLTAGE, PWM_FREQ_FORWARD, MAX_DUTY_FORWARD,
-                  FWD_CV_ENTRY_VOLTAGE, FWD_CV_EXIT_VOLTAGE);
+                  CONTROL_PERIOD_FORWARD_MS, FWD_CV_ENTRY_VOLTAGE, FWD_CV_EXIT_VOLTAGE);
     Wire.begin(21, 22);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(25);
@@ -473,15 +485,20 @@ void TaskSampleData(void * pvParameters) {
             continue;
         }
         bool sample_ok = false;
-        if (xSemaphoreTake(i2c_Mutex, 50)) {
-            raw_mv_v0 = readADCStable(ads_volt, 0, true) * 0.1875;
-            raw_mv_v1 = readADCStable(ads_volt, 2, true) * 0.1875;
-            raw_mv_v2 = readADCStable(ads_volt, 1, true) * 0.1875;
-            raw_mv_i0 = readADCStable(ads_curr, 0) * 0.1875;
+        bool fwdFast = (system_ON && currentState == STATE_FORWARD);
+        TickType_t adcWait = fwdFast ? (TickType_t)5 : (TickType_t)20;
+        if (xSemaphoreTake(i2c_Mutex, adcWait)) {
+            if (!fwdFast) {
+                raw_mv_v0 = readADCStable(ads_volt, 0, false) * 0.1875;
+                raw_mv_i0 = readADCStable(ads_curr, 0) * 0.1875;
+            }
+            raw_mv_v1 = readADCStable(ads_volt, 2, false) * 0.1875;
+            raw_mv_v2 = readADCStable(ads_volt, 1, false) * 0.1875;
             raw_mv_i1 = readADCStable(ads_curr, 1) * 0.1875;
             raw_mv_i2 = readADCStable(ads_curr, 2) * 0.1875;
             bool power_stage_active = (raw_duty > 0);
-            bool solar_raw_glitch = (raw_mv_v0 < ADC_RAW_MIN_VALID_MV) &&
+            bool solar_raw_glitch = (!fwdFast) &&
+                                    (raw_mv_v0 < ADC_RAW_MIN_VALID_MV) &&
                                     (power_stage_active ||
                                      i_solar_mag > ADC_GLITCH_CURRENT_GATE_A ||
                                      i_bat_charge_filt > ADC_GLITCH_CURRENT_GATE_A);
@@ -545,6 +562,8 @@ void TaskSampleData(void * pvParameters) {
             i_ac_mag = fabs(i_ac_in);
             i_bat_charge_filt = fabs(i_bat_filt);
             i_bat_charge_abs = fabs(i_bat);
+            i_ac_filt = 0.20f * i_ac_mag + 0.80f * i_ac_filt;
+            i_bat_fast = 0.55f * i_bat_charge_abs + 0.45f * i_bat_fast;
             float vbat_step = (last_vbat_sample > 0.0f) ? (v_bat - last_vbat_sample) : 0.0f;
             float vbat_filt_step = (last_vbat_filt_sample > 0.0f) ? (v_bat_filt - last_vbat_filt_sample) : 0.0f;
             bool charger_active = (currentState == STATE_BOOST || currentState == STATE_FORWARD);
@@ -766,15 +785,22 @@ void TaskSampleData(void * pvParameters) {
         if (system_ON && currentState != STATE_OFF) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
             if (currentState == STATE_FORWARD) {
-                const float dt = 0.02f;
+                float dt = 0.005f;
+                if (last_millis > 0) {
+                    dt = (now - last_millis) / 1000.0f;
+                    if (dt < 0.002f) dt = 0.002f;
+                    if (dt > 0.05f) dt = 0.05f;
+                }
+                float tScale = dt / 0.02f;
+                float iCc = i_bat_fast;
                 if (v_ac_in < UNDER_AC_VOLTAGE_CRIT) {
                     duty_accumulator = 0.0f;
                     fwdCurrIntegrator = 0.0f;
                     fwdVoltIntegrator = 0.0f;
                 } else if (forwardMode == FWD_SOFTSTART) {
                     duty_accumulator = boostApplySlew(FWD_SOFTSTART_SEED_DUTY, duty_accumulator,
-                                                      FWD_SOFTSTART_DUTY_SLEW, 4.0f);
-                    bool ready = (i_bat_charge_filt >= 0.35f) ||
+                                                      FWD_SOFTSTART_DUTY_SLEW * tScale, 4.0f * tScale);
+                    bool ready = (iCc >= 0.35f) ||
                                  (now - forward_mode_enter_ms >= FWD_SOFTSTART_MS);
                     if (ready) {
                         forwardMode = FWD_CC;
@@ -794,17 +820,17 @@ void TaskSampleData(void * pvParameters) {
                     }
                     iRef = boostClampf(iRef, 0.0f, FWD_TARGET_CC_CURRENT);
                     fwdIrefCc = iRef;
-                    float iErr = iRef - i_bat_charge_filt;
+                    float iErr = iRef - iCc;
                     float dDuty = boostRunPI(iErr, FWD_CURR_KP, FWD_CURR_KI, dt,
                                              &fwdCurrIntegrator, FWD_CURR_OUT_MIN, FWD_CURR_OUT_MAX);
                     // Help climb out of low-duty when far below CC target (AC is stiff).
-                    if (iErr > 0.8f && duty_accumulator < 200.0f && v_ac_in >= MIN_AC_VOLTAGE) {
-                        dDuty = boostMaxf(dDuty, 2.0f);
+                    if (iErr > 0.8f && duty_accumulator < 280.0f && v_ac_in >= MIN_AC_VOLTAGE) {
+                        dDuty = boostMaxf(dDuty, 4.0f);
                     }
                     float dutyTarget = duty_accumulator + dDuty;
                     dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
                     duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator,
-                                                      FWD_DUTY_SLEW_UP, FWD_DUTY_SLEW_DOWN);
+                                                      FWD_DUTY_SLEW_UP * tScale, FWD_DUTY_SLEW_DOWN * tScale);
                     float vPeak = boostMaxf((float)v_bat, (float)v_bat_filt);
                     if (v_bat_filt >= FWD_CV_FORCE_VOLTAGE || vPeak >= FWD_CV_FORCE_VOLTAGE) {
                         enterForwardCv("force", v_bat, v_bat_filt);
@@ -831,9 +857,9 @@ void TaskSampleData(void * pvParameters) {
                     }
                     iReq = boostClampf(iReq, 0.0f, FWD_VOLT_OUT_MAX);
                     fwdIrefCvCmd = boostApplySlew(iReq, fwdIrefCvCmd,
-                                                  FWD_CV_IREF_SLEW_A, FWD_CV_IREF_SLEW_A);
+                                                  FWD_CV_IREF_SLEW_A * tScale, FWD_CV_IREF_SLEW_A * tScale);
                     float iRef = fwdIrefCvCmd;
-                    float iErr = iRef - i_bat_charge_filt;
+                    float iErr = iRef - iCc;
                     float dDuty = boostRunPI(iErr, FWD_CURR_KP * (nearTarget ? 0.50f : 0.80f),
                                              FWD_CURR_KI * (nearTarget ? 0.40f : 0.65f),
                                              dt, &fwdCurrIntegrator,
@@ -856,8 +882,8 @@ void TaskSampleData(void * pvParameters) {
                         dutyTarget = boostMaxf(0.0f, dutyTarget);
                     }
                     dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
-                    float cvSlewUp = nearTarget ? 1.0f : 2.0f;
-                    float cvSlewDown = nearTarget ? 1.8f : 3.5f;
+                    float cvSlewUp = (nearTarget ? 1.0f : 2.0f) * tScale;
+                    float cvSlewDown = (nearTarget ? 1.8f : 3.5f) * tScale;
                     duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, cvSlewUp, cvSlewDown);
                     if (v_bat_filt <= FWD_CV_EXIT_VOLTAGE) {
                         if (fwdCvExitMs == 0) fwdCvExitMs = now;
@@ -902,7 +928,7 @@ void TaskSampleData(void * pvParameters) {
                     duty_accumulator -= (2.0f + (i_bat_charge_abs - FWD_TARGET_CC_CURRENT) * 3.0f);
                     fwdCurrIntegrator *= 0.8f;
                 }
-                if (i_ac_mag > FWD_AC_CURRENT_HARD_A) {
+                if (i_ac_filt > FWD_AC_CURRENT_FILT_HARD_A || i_ac_mag > FWD_AC_CURRENT_HARD_A) {
                     duty_accumulator -= 4.0f;
                     fwdCurrIntegrator *= 0.85f;
                 }
@@ -928,7 +954,12 @@ void TaskSampleData(void * pvParameters) {
                 duty_accumulator = boostClampf(duty_accumulator, 0.0f, (float)allowed_max_duty);
             }
             else if (currentState == STATE_BOOST) {
-                const float dt = 0.02f;
+                float dt = 0.02f;
+                if (last_millis > 0) {
+                    dt = (now - last_millis) / 1000.0f;
+                    if (dt < 0.005f) dt = 0.005f;
+                    if (dt > 0.05f) dt = 0.05f;
+                }
                 if (v_solar <= 0.0f) {
                     duty_accumulator = 0.0f;
                     boostNewCurrIntegrator = 0.0f;
@@ -1135,7 +1166,9 @@ void TaskSampleData(void * pvParameters) {
             }
             duty_accumulator = constrain(duty_accumulator, 0.0, (float)allowed_max_duty);
             if (currentState == STATE_FORWARD) {
-                raw_duty = quantizeDutyWithDither(duty_accumulator, &forward_dither_phase, allowed_max_duty);
+                float vac = boostMaxf((float)v_ac_in, FWD_VAC_FF_MIN);
+                float vacFf = boostClampf(FWD_VAC_FF_NOM / vac, 0.85f, 1.60f);
+                raw_duty = quantizeDutyWithDither(duty_accumulator * vacFf, &forward_dither_phase, allowed_max_duty);
                 boost_dither_phase = 0.0;
                 ledcWrite(PWM_FORWARD_PIN, raw_duty);
                 ledcWrite(PWM_BOOST_PIN, 0);
@@ -1190,18 +1223,26 @@ void TaskSampleData(void * pvParameters) {
             float integI = fwd ? fwdCurrIntegrator : boostNewCurrIntegrator;
             float integV = fwd ? fwdVoltIntegrator : boostNewVoltIntegrator;
             float vin = fwd ? (float)v_ac_in : (float)v_solar;
-            float iin = fwd ? (float)i_ac_mag : (float)i_solar_mag;
-            // One line / 100 ms — extra Serial here would block the 20 ms loop.
+            float iin = fwd ? (float)i_ac_filt : (float)i_solar_mag;
+            // One line / 100 ms — extra Serial here would block the control loop.
             Serial.printf("[D] %lu %s %s d=%d/%d%% Vb=%.2f/%.2f Ib=%.2f/%.2f Iref=%.2f Vin=%.1f/%.2f Pi=%.1f/%.1f\n",
                           now,
                           (system_ON ? "ON" : "OFF"),
                           state_label,
                           raw_duty, active_duty_percent,
                           (float)v_bat_filt, (float)v_bat,
-                          (float)i_bat_charge_filt, (float)i_bat_charge_abs,
+                          (float)i_bat_charge_filt,
+                          fwd ? (float)i_bat_fast : (float)i_bat_charge_abs,
                           irefDbg, vin, iin, integI, integV);
         }
-        vTaskDelay(20 / portTICK_PERIOD_MS);
+        unsigned long elapsed = millis() - now;
+        unsigned long periodMs = (system_ON && currentState == STATE_FORWARD)
+                                 ? CONTROL_PERIOD_FORWARD_MS : CONTROL_PERIOD_BOOST_MS;
+        if (elapsed < periodMs) {
+            vTaskDelay((periodMs - elapsed) / portTICK_PERIOD_MS);
+        } else {
+            vTaskDelay(1);
+        }
     }
 }
 

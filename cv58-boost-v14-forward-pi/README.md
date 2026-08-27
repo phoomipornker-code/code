@@ -12,7 +12,7 @@ Matched to pack BMS **HXYP-SH5-16S-20ATF** (16S LFP, same-port, cell OVP **3.65 
 4. Upload. Boot log must show:
 
 ```
-[BOOT] Firmware: cv58-boost-v14-forward-pi-v4
+[BOOT] Firmware: cv58-boost-v14-forward-pi-v5
 ```
 
 Paste into Arduino IDE as a single sketch: copy only `cv58-boost-v14-forward-pi.ino` (helpers are inside the .ino). Do not `#include "control_pi.h"` — that file is only for host tests.
@@ -41,6 +41,16 @@ If one cell is high, the BMS can still open while the pack reads ~56–57 V. Jum
 | CV | 57.6 V | 57.6 V |
 | Dmax | 760 | **460 (~45%, Nr=Np)** |
 | Control | SoftStart → CC+MPPT → CV → DONE | SoftStart → **CC PI** → **CV PI** → DONE |
+| Tick | ~20 ms | **5 ms** (v5) so CC can track 100 Hz bus ripple |
+
+Forward v4 looked “slow / not steady” on the scope because:
+
+- The loop was ADC + `vTaskDelay(20)` ≈ 30–40 ms, slower than 100 Hz full-wave ripple (10 ms).
+- `FWD_AC_CURRENT_HARD_A = 2.5 A` cut duty on rectifier **peaks** (~3.8 A), so Ibat mean sat near **2 A** instead of 5 A.
+
+v5 raises the peak Iac cut to 8 A (filtered mean still 4 A), uses a faster Ibat sample for CC, and applies Vac feedforward at PWM.
+
+AC-line current pulses opposite the voltage sine are usually a **clamp probe reversed** — firmware uses `|Iac|`, duty is not inverted.
 
 ```
 current PI  → duty          (CC)
