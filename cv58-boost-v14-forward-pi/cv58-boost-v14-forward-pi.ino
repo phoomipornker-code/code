@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdarg.h>
 
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v6";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-pi-v7";
 
 // =========================================================================
 // Hardware
@@ -60,10 +60,10 @@ const float RESTART_CHARGE_VOLTAGE = 53.60;  // 3.35V/cell — do not resume aft
 // -> duty in CV.
 // v4 ticked at ~30–40 ms (ADC + vTaskDelay(20)) so it could not reject
 // 100 Hz full-wave bus ripple, and Iac peak-cut at 2.5 A held Ibat ~2 A.
-// v5: Forward period 5 ms, real dt, peak Iac clamp raised, CC uses fast I.
+// v7: Forward period 2 ms, dual-ADS parallel Vbat+Ibat to track 100 Hz bus ripple.
 // =========================================================================
 const unsigned long CONTROL_PERIOD_BOOST_MS = 20;
-const unsigned long CONTROL_PERIOD_FORWARD_MS = 5;
+const unsigned long CONTROL_PERIOD_FORWARD_MS = 2;  // 500 Hz — 5 samples per 10 ms / 100 Hz bus ripple
 const float FWD_CV_ENTRY_VOLTAGE = 57.10;
 const float FWD_CV_FORCE_VOLTAGE = 57.30;
 const float FWD_CV_EXIT_VOLTAGE  = 56.40;
@@ -347,6 +347,35 @@ static inline int16_t readADCStable(Adafruit_ADS1115 &adc, uint8_t channel, bool
     return sample;
 }
 
+static inline uint16_t adsMuxSingle(uint8_t channel) {
+    switch (channel) {
+        case 0: return ADS1X15_REG_CONFIG_MUX_SINGLE_0;
+        case 1: return ADS1X15_REG_CONFIG_MUX_SINGLE_1;
+        case 2: return ADS1X15_REG_CONFIG_MUX_SINGLE_2;
+        default: return ADS1X15_REG_CONFIG_MUX_SINGLE_3;
+    }
+}
+
+static inline int16_t adsFinishConversion(Adafruit_ADS1115 &adc) {
+    unsigned long t0 = millis();
+    while (!adc.conversionComplete()) {
+        if ((millis() - t0) >= 5) break;
+    }
+    int16_t sample = adc.getLastConversionResults();
+    if (sample < 0) sample = 0;
+    return sample;
+}
+
+// Fire both ADS1115 chips at once (~1.2 ms at 860 SPS) instead of 2.3 ms sequential.
+static inline void adsReadPairParallel(Adafruit_ADS1115 &a, uint8_t chA,
+                                       Adafruit_ADS1115 &b, uint8_t chB,
+                                       float *mvA, float *mvB) {
+    a.startADCReading(adsMuxSingle(chA), false);
+    b.startADCReading(adsMuxSingle(chB), false);
+    *mvA = adsFinishConversion(a) * 0.1875f;
+    *mvB = adsFinishConversion(b) * 0.1875f;
+}
+
 static inline void disablePowerStage() {
     currentState = STATE_OFF;
     raw_duty = 0;
@@ -477,6 +506,7 @@ void TaskSampleData(void * pvParameters) {
     float last_valid_raw_mv_v1 = NAN;
     float last_valid_raw_mv_v2 = NAN;
     unsigned long last_adc_glitch_log = 0;
+    uint8_t fwdAdcPhase = 0;
     for(;;) {
         unsigned long now = millis();
         if (!sensor_init_ok) {
@@ -490,16 +520,23 @@ void TaskSampleData(void * pvParameters) {
         }
         bool sample_ok = false;
         bool fwdFast = (system_ON && currentState == STATE_FORWARD);
-        TickType_t adcWait = fwdFast ? (TickType_t)5 : (TickType_t)20;
+        TickType_t adcWait = fwdFast ? (TickType_t)3 : (TickType_t)20;
         if (xSemaphoreTake(i2c_Mutex, adcWait)) {
-            if (!fwdFast) {
+            if (fwdFast) {
+                // Always sample Vbat + Ibat in parallel (~1.2 ms) so CC can track 100 Hz.
+                adsReadPairParallel(ads_volt, 1, ads_curr, 2, &raw_mv_v2, &raw_mv_i2);
+                fwdAdcPhase = (uint8_t)((fwdAdcPhase + 1) & 3);
+                if (fwdAdcPhase == 0) {
+                    adsReadPairParallel(ads_volt, 2, ads_curr, 1, &raw_mv_v1, &raw_mv_i1);
+                }
+            } else {
                 raw_mv_v0 = readADCStable(ads_volt, 0, false) * 0.1875;
                 raw_mv_i0 = readADCStable(ads_curr, 0) * 0.1875;
+                raw_mv_v1 = readADCStable(ads_volt, 2, false) * 0.1875;
+                raw_mv_v2 = readADCStable(ads_volt, 1, false) * 0.1875;
+                raw_mv_i1 = readADCStable(ads_curr, 1) * 0.1875;
+                raw_mv_i2 = readADCStable(ads_curr, 2) * 0.1875;
             }
-            raw_mv_v1 = readADCStable(ads_volt, 2, false) * 0.1875;
-            raw_mv_v2 = readADCStable(ads_volt, 1, false) * 0.1875;
-            raw_mv_i1 = readADCStable(ads_curr, 1) * 0.1875;
-            raw_mv_i2 = readADCStable(ads_curr, 2) * 0.1875;
             bool power_stage_active = (raw_duty > 0);
             bool solar_raw_glitch = (!fwdFast) &&
                                     (raw_mv_v0 < ADC_RAW_MIN_VALID_MV) &&
@@ -567,7 +604,11 @@ void TaskSampleData(void * pvParameters) {
             i_bat_charge_filt = fabs(i_bat_filt);
             i_bat_charge_abs = fabs(i_bat);
             i_ac_filt = 0.20f * i_ac_mag + 0.80f * i_ac_filt;
-            i_bat_fast = 0.55f * i_bat_charge_abs + 0.45f * i_bat_fast;
+            if (fwdFast) {
+                i_bat_fast = 0.72f * i_bat_charge_abs + 0.28f * i_bat_fast;
+            } else {
+                i_bat_fast = 0.55f * i_bat_charge_abs + 0.45f * i_bat_fast;
+            }
             float vbat_step = (last_vbat_sample > 0.0f) ? (v_bat - last_vbat_sample) : 0.0f;
             float vbat_filt_step = (last_vbat_filt_sample > 0.0f) ? (v_bat_filt - last_vbat_filt_sample) : 0.0f;
             bool charger_active = (currentState == STATE_BOOST || currentState == STATE_FORWARD);
@@ -789,10 +830,10 @@ void TaskSampleData(void * pvParameters) {
         if (system_ON && currentState != STATE_OFF) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
             if (currentState == STATE_FORWARD) {
-                float dt = 0.005f;
+                float dt = 0.002f;
                 if (last_millis > 0) {
                     dt = (now - last_millis) / 1000.0f;
-                    if (dt < 0.002f) dt = 0.002f;
+                    if (dt < 0.001f) dt = 0.001f;
                     if (dt > 0.05f) dt = 0.05f;
                 }
                 float tScale = dt / 0.02f;
