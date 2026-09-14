@@ -1,22 +1,21 @@
-# cv58-boost-v14-forward-v86
+# cv58-boost-v14-forward-v87
 
-Forward ใช้ **cascade PI ตามไดอะแกรม Simulink** — Boost ไม่ได้แก้
+Forward = cascade PI ตามไดอะแกรม + **เทaper กระแสก่อน 57 V** ให้ BMS บาลานซ์ทัน  
+Boost ไม่ได้แก้
 
-```text
-58.4 − V_OUT → PI(Kp=15, Ki=1) → sat Iref [CV]
-Iref − I_OUT → PI(Kp=0.5, Ki=23) + duty[CC] → sat Duty → PWM
-```
+สาเหตุ BMS ตัด: ที่ 57 V ลูปแรงดัน Kp=15 ยังสั่ง Iref = 3 A จนใกล้ 58.2 V  
+เซลล์ที่เต็มก่อน (3.65 V) โดน OVP เพราะบาลานซ์ passive ตามไม่ทัน
 
-เมื่อ V ต่ำ Iref ชนเพดาน 3 A = โหมด CC  
-เมื่อ V ใกล้ 58.4 V Iref ลดลงเอง = โหมด CV  
-เพดาน PWM-off ที่ **target + 0.45 V** (Forward ≈ 58.85 V) กันพุ่งถึง 60 V
+## Iref vs แรงดันแพ็ก
+
+| Vpack | Iref สูงสุด |
+|-------|-------------|
+| ≤ 55.2 V | 3.0 A (CC) |
+| 56.0 V | ~1.7 A |
+| ≥ 56.8 V | **0.35 A** (หน้าต่างบาลานซ์) |
+| 58.4 V | CV ลดต่อจน FULL |
 
 ## แฟลช
 
 Arduino IDE → เปิด `cv58-boost-v14-forward-v84.ino`  
-Serial 115200 ต้องเห็น:
-
-```text
-[BOOT] cv58-boost-v14-forward-v86 | B_CC=6A F_CC=3A CV=58.40V DmaxF=460
-[BOOT] FWD cascade PI V(Kp=15 Ki=1) I(Kp=0.50 Ki=23) Ts=20ms
-```
+ต้องเห็น `cv58-boost-v14-forward-v87` และบรรทัด `FWD Iref taper 55.2V@3A → 56.8V@0.35A`
