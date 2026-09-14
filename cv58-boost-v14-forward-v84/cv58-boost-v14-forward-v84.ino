@@ -3,12 +3,12 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v84";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v85";
 // Same control as charge-OK v75 / v81; Serial table every 20 s.
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: SoftStart→CC→CV→DONE with step/hysteresis control (no PID).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
-// CV raised to 58.00 V (16S LFP ≈ 3.625 V/cell). Control / PWM / ADC unchanged.
+// CV 58.00 V with a hard ceiling so the pack cannot fly to 60 V.
 // =========================================================================
 // Hardware
 // =========================================================================
@@ -54,8 +54,12 @@ const float FULL_END_CURRENT = 0.50;
 const unsigned long FULL_CONFIRM_MS = 60000;          // Boost
 const unsigned long FWD_FULL_CONFIRM_MS = 15000;      // Forward: was 60s — too long near full
 const unsigned long FWD_FULL_FAST_CONFIRM_MS = 5000;  // V peak≥CV and Iabs collapsed
-const float HIGH_VOLTAGE_STOP_VOLTAGE = 58.40;
-const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 300;
+const float HIGH_VOLTAGE_STOP_VOLTAGE = 58.20;
+const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 80;  // 300 ms @ ~5 V/s overshoot was ~60 V
+// Peak ceiling: dump duty / PWM-off this tick — do not wait for OVP confirm.
+const float CV_PEAK_NO_UP_V = 57.90f;      // freeze duty-up (use peak, not lagged filt)
+const float CV_OVERSHOOT_BLEED_V = 58.10f; // dump duty above CV
+const float CV_ABS_CEILING_V = 58.35f;     // PWM off + FULL HOLD (never sit at 60 V)
 const float RESTART_CHARGE_VOLTAGE = 54.0;
 // =========================================================================
 // Forward (AC) control: SoftStart → CC → CV → DONE  (NO PID — step/hysteresis)
@@ -135,16 +139,16 @@ const unsigned long STOP_HOLD_END_MS = 350;
 // =========================================================================
 const float BOOST_VOLTAGE_FLOOR = 42.0;
 const float BOOST_CV_TARGET_VOLTAGE = 58.00;  // 16S LFP CV 58.0 V
-const float BOOST_CV_ENTRY_VOLTAGE = 57.50;
-const float BOOST_CV_FORCE_VOLTAGE = 57.70;
+const float BOOST_CV_ENTRY_VOLTAGE = 57.10;
+const float BOOST_CV_FORCE_VOLTAGE = 57.40;
 const float BOOST_CV_EXIT_VOLTAGE  = 56.80;   // wider hysteresis so CV does not chatter
 const float BOOST_CC_TAPER_START_V = 56.80;
-const float BMS_OPEN_DETECT_V = 58.50;      // above CV 58.0 / BMS 58.4 — near-full is not open
+const float BMS_OPEN_DETECT_V = 58.40;      // pack BMS OVP 3.65 V/cell — not a 60 V fly-up
 const float BMS_OPEN_JUMP_DELTA_V = 1.2;
 const float BMS_OPEN_CURRENT_MAX_A = 0.25f; // was 1.20 — taper ~0.7A near full ≠ BMS open
 const float BMS_PREEMPT_DUTY_CAP_RAW = 140.0;
-const float BMS_PREEMPT_ZONE_V = 58.20;       // cap duty only above CV, not during 58.0 hold
-const float BMS_OPEN_NEAR_FULL_MAX_V = 58.60f; // Forward/Boost CV band: never BMS-OPEN here if I flowing
+const float BMS_PREEMPT_ZONE_V = 58.10;       // cap as soon as peak is clearly over 58.00
+const float BMS_OPEN_NEAR_FULL_MAX_V = 58.50f; // Forward/Boost CV band: never BMS-OPEN here if I flowing
 const float BOOST_CV_IREF_SLEW_A = 0.08;      // A per 20ms control tick
 const float BOOST_CV_NEAR_BAND_V = 0.35;      // within this of target => gentle control
 const float BOOST_CV_DUTY_STEP_NEAR = 0.8;    // raw duty step limit near target
@@ -175,7 +179,7 @@ const float BOOST_DUTY_SLEW_DOWN = 6.0;
 const float BOOST_EST_DUTY_MARGIN = 0.03;
 const float BOOST_VBAT_SPIKE_PRECUT_DELTA_V = 0.7;
 const float BOOST_VBAT_SPIKE_PRECUT_RAW_ABOVE_FILT_V = 1.0;
-const float HARD_OVP_TRIP_VOLTAGE = 59.50;    // after BMS FET opens, output can fly
+const float HARD_OVP_TRIP_VOLTAGE = 58.80;    // catch fly-up before 60 V
 const float HARD_OVP_RELEASE_VOLTAGE = 57.80;
 const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 const bool ENABLE_DEBUG_STATUS = false;        // [STAT] lines (off — table is enough)
@@ -822,9 +826,16 @@ void TaskSampleData(void * pvParameters) {
             // Always — including after STOP (field: OVP at filt=74 after spike leaked in).
             const bool bat_v_implausible_now = (v_bat < 35.0f || v_bat > 62.0f);
             // Voltage-domain spike (field: +2.89 V ≈70 mV passed old 80 mV gate → false OVP).
+            // Near CV, 58→60 is real overshoot — do not hold last_good and keep PWM on.
+            const bool near_cv_real_rise =
+                !isnan(last_good_v_bat) &&
+                (last_good_v_bat >= 56.0f) &&
+                (v_bat >= 56.0f) &&
+                (v_bat <= 59.20f);
             const bool bat_v_step_spike =
                 !isnan(last_good_v_bat) &&
-                (v_bat > (last_good_v_bat + ADC_BAT_V_STEP_SPIKE_V));
+                (v_bat > (last_good_v_bat + ADC_BAT_V_STEP_SPIKE_V)) &&
+                !near_cv_real_rise;
             if (bat_v_implausible_now || bat_v_step_spike) {
                 if (!isnan(last_good_v_bat)) {
                     v_bat = last_good_v_bat;
@@ -932,11 +943,15 @@ void TaskSampleData(void * pvParameters) {
                 const bool filt_pack_ok = (v_bat_filt >= 35.0f && v_bat_filt <= 62.0f);
                 const bool raw_pack_ok = (v_bat >= 35.0f && v_bat <= 62.0f);
                 bool filt_trip = filt_pack_ok && (v_bat_filt >= HARD_OVP_TRIP_VOLTAGE);
+                const bool near_cv =
+                    (v_bat_filt >= 56.0f) ||
+                    (!isnan(last_good_v_bat) && last_good_v_bat >= 56.0f);
                 bool raw_trip_plausible =
                     raw_pack_ok &&
                     (v_bat >= HARD_OVP_TRIP_VOLTAGE) &&
                     filt_pack_ok &&
-                    (v_bat_filt >= (HARD_OVP_TRIP_VOLTAGE - 1.5f)) &&
+                    ((v_bat_filt >= (HARD_OVP_TRIP_VOLTAGE - 1.5f)) ||
+                     (near_cv && v_bat_filt >= 56.0f)) &&
                     (vbat_step < 8.0f);
                 if (filt_trip || raw_trip_plausible) {
                     if (hard_ovp_suspect_ms == 0) hard_ovp_suspect_ms = now;
@@ -1178,7 +1193,8 @@ void TaskSampleData(void * pvParameters) {
                 const bool ac_fake_low = (v_ac_in < MIN_AC_VOLTAGE) &&
                                          ((i_bat_charge_filt > 0.35f) || (i_bat_charge_abs > 0.35f));
                 const bool freezeDutyUp = (!ac_fake_low && ((v_ac_in < MIN_AC_VOLTAGE) || ac_is_collapsing)) ||
-                                          (v_ac_in < FWD_AC_HOLD_CLIMB_V && raw_duty > 40 && !ac_fake_low);
+                                          (v_ac_in < FWD_AC_HOLD_CLIMB_V && raw_duty > 40 && !ac_fake_low) ||
+                                          (max(v_bat, v_bat_filt) >= CV_PEAK_NO_UP_V);
                 if (forwardMode == FWD_SOFTSTART) {
                     int seedDuty = forwardEstimateDutyRaw(v_ac_in, TARGET_CV_VOLTAGE, allowed_max_duty);
                     if (!freezeDutyUp && duty_accumulator < (float)seedDuty) {
@@ -1251,10 +1267,10 @@ void TaskSampleData(void * pvParameters) {
                     float vPeak = max(v_bat, v_bat_filt);
                     float vErr = TARGET_CV_VOLTAGE - vReg;
                     fwdIrefCvCmd = TARGET_CV_VOLTAGE;
-                    if (vPeak > (TARGET_CV_VOLTAGE + 0.25f)) {
+                    if (vPeak > (TARGET_CV_VOLTAGE + 0.10f)) {
                         float over = vPeak - TARGET_CV_VOLTAGE;
                         duty_accumulator -= (FWD_STEP_DOWN_CV_OVER + over * 1.5f);
-                    } else if (vErr > FWD_CV_HOLD_BAND_V) {
+                    } else if (vErr > FWD_CV_HOLD_BAND_V && vPeak < TARGET_CV_VOLTAGE) {
                         // Below target — raise duty, but freeze climb when current has already
                         // tapered (near full). Field: duty ran to Dmax@I≈0.16A → sense fly-up spikes.
                         if (!freezeDutyUp && i_bat_charge_abs < FWD_TARGET_CC_CURRENT) {
@@ -1365,24 +1381,13 @@ void TaskSampleData(void * pvParameters) {
                     }
                 }
                 if (v_bat_filt >= BMS_PREEMPT_ZONE_V || v_bat >= BMS_PREEMPT_ZONE_V) {
-                    if (forwardMode == FWD_CV) {
-                        // Field: slam to 140 at ~55.9 killed CV (duty 380→142).
-                        // Const-V already regulates; hard cap only near BMS-open.
-                        if (v_bat >= BMS_OPEN_DETECT_V || v_bat_filt >= BMS_OPEN_DETECT_V) {
-                            if (duty_accumulator > BMS_PREEMPT_DUTY_CAP_RAW) {
-                                duty_accumulator = BMS_PREEMPT_DUTY_CAP_RAW;
-                            }
-                            if (v_bat_filt >= TARGET_CV_VOLTAGE) {
-                                duty_accumulator = min(duty_accumulator, 80.0f);
-                            }
-                        }
-                    } else {
-                        if (duty_accumulator > BMS_PREEMPT_DUTY_CAP_RAW) {
-                            duty_accumulator = BMS_PREEMPT_DUTY_CAP_RAW;
-                        }
-                        if (v_bat_filt >= TARGET_CV_VOLTAGE) {
-                            duty_accumulator = min(duty_accumulator, 80.0f);
-                        }
+                    // Peak already over CV 58.0 — cap now. Waiting for BMS-OPEN 58.4 let it fly to 60.
+                    if (duty_accumulator > BMS_PREEMPT_DUTY_CAP_RAW) {
+                        duty_accumulator = BMS_PREEMPT_DUTY_CAP_RAW;
+                    }
+                    if (v_bat_filt >= TARGET_CV_VOLTAGE ||
+                        max(v_bat, v_bat_filt) >= (TARGET_CV_VOLTAGE + 0.10f)) {
+                        duty_accumulator = min(duty_accumulator, 80.0f);
                     }
                 }
                 duty_accumulator = boostClampf(duty_accumulator, 0.0f, (float)allowed_max_duty);
@@ -1476,7 +1481,13 @@ void TaskSampleData(void * pvParameters) {
                         boostNewPAvailFilt = (boostNewPAvailFilt <= 0.01f) ? pPv : (0.22f * pPv + 0.78f * boostNewPAvailFilt);
                     }
                     float vErr = BOOST_CV_TARGET_VOLTAGE - v_bat_filt;
-                    bool nearTarget = (fabsf(vErr) <= BOOST_CV_NEAR_BAND_V);
+                    const float vPeakCv = max(v_bat, v_bat_filt);
+                    // Peak already at/over CV: do not keep demanding current while filt lags.
+                    if (vPeakCv >= BOOST_CV_TARGET_VOLTAGE) {
+                        vErr = min(vErr, 0.0f);
+                    }
+                    bool nearTarget = (fabsf(vErr) <= BOOST_CV_NEAR_BAND_V) ||
+                                      (vPeakCv >= CV_PEAK_NO_UP_V);
                     if (fabs(vErr) <= CV_DEADBAND_V) {
                         vErr = 0.0f;
                         boostNewVoltIntegrator *= 0.92f;
@@ -1526,7 +1537,11 @@ void TaskSampleData(void * pvParameters) {
                     dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
                     float cvSlewUp = nearTarget ? 1.2f : 2.5f;
                     float cvSlewDown = nearTarget ? 2.0f : 4.0f;
-                    duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, cvSlewUp, cvSlewDown);
+                    if (vPeakCv >= CV_PEAK_NO_UP_V) {
+                        duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, 0.0f, cvSlewDown);
+                    } else {
+                        duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator, cvSlewUp, cvSlewDown);
+                    }
                     if (v_bat_filt <= BOOST_CV_EXIT_VOLTAGE) {
                         if (boostNewCvExitMs == 0) boostNewCvExitMs = now;
                         if (now - boostNewCvExitMs >= BOOST_CV_EXIT_CONFIRM_MS) {
@@ -1594,13 +1609,34 @@ void TaskSampleData(void * pvParameters) {
                     if (duty_accumulator > BMS_PREEMPT_DUTY_CAP_RAW) {
                         duty_accumulator = BMS_PREEMPT_DUTY_CAP_RAW;
                     }
-                    if (v_bat_filt >= BOOST_CV_TARGET_VOLTAGE) {
+                    if (v_bat_filt >= BOOST_CV_TARGET_VOLTAGE ||
+                        max(v_bat, v_bat_filt) >= (BOOST_CV_TARGET_VOLTAGE + 0.10f)) {
                         duty_accumulator = min(duty_accumulator, 80.0f);
                     }
                 }
                 duty_accumulator = boostClampf(duty_accumulator, 0.0f, (float)allowed_max_duty);
             }
             duty_accumulator = constrain(duty_accumulator, 0.0, (float)allowed_max_duty);
+            // Hard CV ceiling: 300 ms high-V confirm at 58.4 V let the pack fly to ~60 V.
+            {
+                const float vPeakNow = max((float)v_bat, (float)v_bat_filt);
+                const float cvTgt = (currentState == STATE_BOOST)
+                                        ? BOOST_CV_TARGET_VOLTAGE
+                                        : TARGET_CV_VOLTAGE;
+                if (vPeakNow >= CV_OVERSHOOT_BLEED_V) {
+                    float over = vPeakNow - cvTgt;
+                    duty_accumulator -= (6.0f + over * 25.0f);
+                    if (duty_accumulator < 0.0f) duty_accumulator = 0.0f;
+                }
+                if (vPeakNow >= CV_ABS_CEILING_V) {
+                    charge_full_hold = true;
+                    disablePowerStage();
+                    last_lcd_soft_resync_ms = 0;
+                    lcd_force_refresh = true;
+                    Serial.printf("[STOP] CV ceiling FULL HOLD V=%.2f filt=%.2f lim=%.2f\n",
+                                  vPeakNow, v_bat_filt, CV_ABS_CEILING_V);
+                }
+            }
             if (currentState == STATE_FORWARD) {
                 // No dither on Forward — 1-LSB toggling looked like signal cuts on the scope.
                 raw_duty = constrain((int)lroundf(duty_accumulator), 0, allowed_max_duty);
