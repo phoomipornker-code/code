@@ -1,0 +1,6 @@
+เปิดโฟลเดอร์:
+  cv58-boost-v14-forward-v84/cv58-boost-v14-forward-v84.ino
+
+Arduino IDE → Upload
+ต้องเห็น: [BOOT] cv58-boost-v14-forward-v87 | … CV=58.40V …
+Iref เทaper 55.2 V @ 3 A → 56.8 V @ 0.35 A (กัน BMS ตัดที่ 57 V)
