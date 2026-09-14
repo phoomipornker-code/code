@@ -2,5 +2,5 @@
   cv58-boost-v14-forward-v84/cv58-boost-v14-forward-v84.ino
 
 Arduino IDE → Upload
-ต้องเห็น: [BOOT] cv58-boost-v14-forward-v85 | … CV=58.00V …
-กันพุ่งถึง 60 V — PWM off ที่ 58.35 V
+ต้องเห็น: [BOOT] cv58-boost-v14-forward-v86 | … CV=58.40V …
+Forward = cascade PI ตามไดอะแกรม (Vref=58.4, Kp_v=15, Ki_v=1, Kp_i=0.5, Ki_i=23)
