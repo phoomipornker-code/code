@@ -3,9 +3,10 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v86";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v87";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: Simulink cascade PI — V PI (58.4) → Iref → I PI → Duty → PWM.
+// Near-full: taper Iref before 57 V so one high cell can balance (BMS was cutting at 3 A).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
 // =========================================================================
 // Hardware
@@ -65,9 +66,13 @@ const float RESTART_CHARGE_VOLTAGE = 54.0;
 // Voltage PI: Kp=15, Ki=1. Current PI: Kp=0.5, Ki=23. Ts=20 ms.
 // [CC] on the diagram is previous duty (unit delay) added to Δduty.
 // =========================================================================
-const float FWD_CV_ENTRY_VOLTAGE = 57.50;  // label CV when cascade unsaturates
-const float FWD_CV_FORCE_VOLTAGE = 57.90;
-const float FWD_CV_EXIT_VOLTAGE  = 56.80;
+const float FWD_CV_ENTRY_VOLTAGE = 56.40;  // enter CV before the 57 V imbalance window
+const float FWD_CV_FORCE_VOLTAGE = 56.80;
+const float FWD_CV_EXIT_VOLTAGE  = 55.50;
+// Iref cap vs pack V — Kp_v=15 stays at 3 A until ~58.2 V; that trips a high cell at 57 V.
+const float FWD_CC_TAPER_START_V = 55.20f;   // ~3.45 V/cell avg — start leaving CC
+const float FWD_BALANCE_HOLD_V = 56.80f;     // by ~57 V, hold balance current
+const float FWD_BALANCE_CURRENT_A = 0.35f;   // passive BMS (~tens of mA) can catch up
 const unsigned long FWD_SOFTSTART_MS = 5000;
 const unsigned long FWD_CV_ENTER_CONFIRM_MS = 200;
 const unsigned long FWD_CV_EXIT_CONFIRM_MS = 5000;
@@ -312,6 +317,15 @@ static inline int boostEstimateDutyRaw(float vin, float vout, int maxDuty) {
 static inline float forwardDutyFracForTargetI() {
     float frac = FWD_DESIGN_DUTY_FRAC * (FWD_TARGET_CC_CURRENT / FWD_DESIGN_I_AT_D45);
     return boostClampf(frac, 0.08f, FWD_DESIGN_DUTY_FRAC);
+}
+// Cap Iref so 3 A CC cannot continue into the 57 V window (one cell at 3.65 V).
+static inline float forwardIrefCapForVoltage(float vPeak, float vFilt) {
+    float v = (vPeak > vFilt) ? vPeak : vFilt;
+    if (v <= FWD_CC_TAPER_START_V) return FWD_TARGET_CC_CURRENT;
+    if (v >= FWD_BALANCE_HOLD_V) return FWD_BALANCE_CURRENT_A;
+    float span = FWD_BALANCE_HOLD_V - FWD_CC_TAPER_START_V;
+    float t = (v - FWD_CC_TAPER_START_V) / span;
+    return FWD_TARGET_CC_CURRENT + t * (FWD_BALANCE_CURRENT_A - FWD_TARGET_CC_CURRENT);
 }
 // Forward SoftStart seed: start below CC duty so Cin is not slammed open.
 static inline int forwardEstimateDutyRaw(float vin, float vout, int maxDuty) {
@@ -613,6 +627,9 @@ void setup() {
                   TARGET_CV_VOLTAGE, MAX_DUTY_FORWARD);
     Serial.printf("[BOOT] FWD cascade PI V(Kp=%.0f Ki=%.0f) I(Kp=%.2f Ki=%.0f) Ts=20ms\n",
                   FWD_VOLT_KP, FWD_VOLT_KI, FWD_CURR_KP, FWD_CURR_KI);
+    Serial.printf("[BOOT] FWD Iref taper %.1fV@%.0fA → %.1fV@%.2fA (balance)\n",
+                  FWD_CC_TAPER_START_V, FWD_TARGET_CC_CURRENT,
+                  FWD_BALANCE_HOLD_V, FWD_BALANCE_CURRENT_A);
     Serial.println("Tim           Iin        Vin     Iout    Vout    Duty");
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(I2C_CLOCK_HZ);
@@ -1212,9 +1229,10 @@ void TaskSampleData(void * pvParameters) {
                         float collapseScale = boostClampf(1.0f - (sag * 0.35f), 0.15f, 1.0f);
                         iCcMax *= collapseScale;
                     }
+                    iCcMax = min(iCcMax, forwardIrefCapForVoltage(vPeak, v_bat_filt));
                     iCcMax = boostClampf(iCcMax, 0.0f, FWD_TARGET_CC_CURRENT);
 
-                    // Voltage PI (Simulink Gain 15 / Gain 1). Saturation is Iref 0..Icc = CC limit.
+                    // Voltage PI sat at iCcMax (tapered). Pass cap as outMax so the integrator cannot wind at 3 A.
                     float vErr = TARGET_CV_VOLTAGE - v_bat_filt;
                     if (vPeak > TARGET_CV_VOLTAGE) {
                         vErr = min(vErr, TARGET_CV_VOLTAGE - vPeak);
