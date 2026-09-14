@@ -1,0 +1,5 @@
+เปิดโฟลเดอร์:
+  cv58-boost-v14-forward-v84/cv58-boost-v14-forward-v84.ino
+
+Arduino IDE → Upload
+ต้องเห็น: [BOOT] cv58-boost-v14-forward-v84 | … CV=58.00V …
