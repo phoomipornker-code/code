@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v92";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v93";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: Simulink cascade PI — V PI (58.4) → Iref → I PI → Duty → PWM.
 // Near-full: taper Iref before 57 V so one high cell can balance (BMS was cutting at 3 A).
@@ -67,13 +67,15 @@ const float RESTART_CHARGE_VOLTAGE = 54.0;
 // ADS1115 860 SPS × 6 ch ≈ 8–12 ms + vTaskDelay(20) ⇒ loop ~30–40 ms (not 20 ms).
 // 8-tap Ibat filter ≈ 8×loop ≈ 0.25–0.3 s. Duty-up must wait for a new ADS frame.
 // =========================================================================
-const float FWD_CV_ENTRY_VOLTAGE = 56.40;  // enter CV before the 57 V imbalance window
-const float FWD_CV_FORCE_VOLTAGE = 56.80;
-const float FWD_CV_EXIT_VOLTAGE  = 55.50;
+const float FWD_CV_ENTRY_VOLTAGE = 55.60;  // was 56.40 — BMS already cutting at ~56.2
+const float FWD_CV_FORCE_VOLTAGE = 55.90;
+const float FWD_CV_EXIT_VOLTAGE  = 54.80;
 // Iref cap vs pack V — Kp_v=15 stays at 3 A until ~58.2 V; that trips a high cell at 57 V.
 const float FWD_CC_TAPER_START_V = 55.20f;   // ~3.45 V/cell avg — start leaving CC
-const float FWD_BALANCE_HOLD_V = 56.80f;     // by ~57 V, hold balance current
+const float FWD_BALANCE_HOLD_V = 56.00f;     // was 56.80 — Iref=0.35 A by 56 V (BMS window)
 const float FWD_BALANCE_CURRENT_A = 0.35f;   // passive BMS (~tens of mA) can catch up
+const float FWD_UNLOADED_I_A = 0.25f;        // Iabs below this near-full ⇒ pack/BMS not accepting
+const unsigned long FWD_UNLOADED_PWM_OFF_MS = 80;
 const unsigned long FWD_SOFTSTART_MS = 5000;
 const unsigned long FWD_CV_ENTER_CONFIRM_MS = 200;
 const unsigned long FWD_CV_EXIT_CONFIRM_MS = 5000;
@@ -85,7 +87,8 @@ const float FWD_CURR_KI = 23.0f;     // Simulink Gain 23 → K·Ts/(z−1)
 // Δduty sat = slew so PI cannot wind past what one ADS+filter frame can show.
 const float FWD_CURR_OUT_MIN = -4.0f;
 const float FWD_CURR_OUT_MAX = 1.2f;
-const float FWD_DUTY_SLEW_UP = 1.2f;     // was 8: 0→45% in ~2 s, Cin 151→124 V
+const float FWD_DUTY_SLEW_UP = 1.2f;     // far CC — wait for ADS+filter
+const float FWD_DUTY_SLEW_UP_NEAR = 0.20f; // near 56 V: ~0.02 %/tick (was integer 1% display)
 const float FWD_DUTY_SLEW_DOWN = 4.0f;   // faster down (OC / over-V) than up
 const float FWD_SOFTSTART_DUTY_SLEW = 0.8f;  // seed ~125 raw ≈ 5 s at real loop dt
 const float FWD_AC_HOLD_CLIMB_V = 115.0f; // freeze duty-up if bus dips (Cin stress)
@@ -388,7 +391,7 @@ static inline void printLiveTable(unsigned long now) {
     const float batI = i_bat;
     const float batIf = i_bat_filt;
     const int dutyRaw = raw_duty;
-    const int dutyPct = active_duty_percent;
+    const float dutyPct = (duty_accumulator * 100.0f) / 1023.0f;
     float iref = 0.0f;
     if (currentState == STATE_FORWARD) {
         iref = fwdIrefCcCmd;
@@ -401,7 +404,8 @@ static inline void printLiveTable(unsigned long now) {
     if ((now - last_adc_sample_ms) > ADC_STALE_WARN_MS) {
         n += snprintf(note + n, sizeof(note) - (size_t)n, "ADC ");
     }
-    if (pvV < NOISE_V_THRESHOLD && fabsf(pvI) > 0.30f) {
+    const bool fwdLive = (currentState == STATE_FORWARD);
+    if (!fwdLive && pvV < NOISE_V_THRESHOLD && fabsf(pvI) > 0.30f) {
         n += snprintf(note + n, sizeof(note) - (size_t)n, "Ipv ");
     }
     if (acV < NOISE_V_THRESHOLD && fabsf(acI) > 0.30f) {
@@ -413,8 +417,12 @@ static inline void printLiveTable(unsigned long now) {
     if (fabsf(batI) <= NOISE_I_THRESHOLD && fabsf(batIf) > 0.40f) {
         n += snprintf(note + n, sizeof(note) - (size_t)n, "Ilag ");
     }
+    if (fwdLive && (batVf >= FWD_CC_TAPER_START_V) &&
+        (fabsf(batI) < FWD_UNLOADED_I_A) && (dutyRaw > 30)) {
+        n += snprintf(note + n, sizeof(note) - (size_t)n, "Icut ");
+    }
     const unsigned long sec = now / 1000UL;
-    Serial.printf("%02u:%02u:%02u.%u %-4s %-5s %5.1f %5.2f %6.1f %5.2f %5.2f %5.2f %5.2f %5.2f %4d %3d %5.2f %s\n",
+    Serial.printf("%02u:%02u:%02u.%u %-4s %-5s %5.1f %5.2f %6.1f %5.2f %5.2f %5.2f %5.2f %5.2f %4d %8.4f %5.2f %s\n",
                   (unsigned int)((sec / 3600UL) % 100UL),
                   (unsigned int)((sec / 60UL) % 60UL),
                   (unsigned int)(sec % 60UL),
@@ -702,7 +710,7 @@ void setup() {
     Serial.printf("[BOOT] FWD Iref taper %.1fV@%.0fA → %.1fV@%.2fA (balance)\n",
                   FWD_CC_TAPER_START_V, FWD_TARGET_CC_CURRENT,
                   FWD_BALANCE_HOLD_V, FWD_BALANCE_CURRENT_A);
-    Serial.println("Tim        Ph   Sel    PVv   PVi    ACv   ACi  Vbat    Vf  Ibat    If   Dr  D%  Iref note");
+    Serial.println("Tim        Ph   Sel    PVv   PVi    ACv   ACi  Vbat    Vf  Ibat    If   Dr     Duty   Iref note");
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(40);
@@ -766,6 +774,8 @@ void TaskSampleData(void * pvParameters) {
     unsigned long last_oc_fwd_ac_log_ms = 0;
     unsigned long last_oc_fwd_bat_log_ms = 0;
     unsigned long last_oc_boost_pv_log_ms = 0;
+    unsigned long fwd_unload_since_ms = 0;
+    bool fwd_saw_charge_i = false;
     for(;;) {
         unsigned long now = millis();
         if (!sensor_init_ok) {
@@ -1266,6 +1276,8 @@ void TaskSampleData(void * pvParameters) {
             forwardMode = FWD_SOFTSTART;
             fwdVoltIntegrator = 0.0f;
             fwdCurrIntegrator = 0.0f;
+            fwd_unload_since_ms = 0;
+            fwd_saw_charge_i = false;
         }
         if (system_ON && currentState != STATE_OFF) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
@@ -1278,9 +1290,16 @@ void TaskSampleData(void * pvParameters) {
                 const float vPeak = max((float)v_bat, (float)v_bat_filt);
                 const bool ac_fake_low = (v_ac_in < MIN_AC_VOLTAGE) &&
                                          ((i_bat_charge_filt > 0.35f) || (i_bat_charge_abs > 0.35f));
+                if (i_bat_charge_abs > 0.40f) fwd_saw_charge_i = true;
+                // Near 56 V, I→0 means BMS opened — do not chase Iref to Dmax (scope 90 V).
+                const bool packUnloaded = fwd_saw_charge_i &&
+                                          (vPeak >= FWD_CC_TAPER_START_V) &&
+                                          (i_bat_charge_abs < FWD_UNLOADED_I_A) &&
+                                          (raw_duty > 30);
                 const bool freezeDutyUp = (!ac_fake_low && ((v_ac_in < MIN_AC_VOLTAGE) || ac_is_collapsing)) ||
                                           (v_ac_in < FWD_AC_HOLD_CLIMB_V && raw_duty > 40 && !ac_fake_low) ||
-                                          (vPeak >= (TARGET_CV_VOLTAGE - CV_PEAK_NO_UP_MARGIN_V));
+                                          (vPeak >= (TARGET_CV_VOLTAGE - CV_PEAK_NO_UP_MARGIN_V)) ||
+                                          packUnloaded;
                 if (forwardMode == FWD_DONE) {
                     duty_accumulator = 0.0f;
                     fwdVoltIntegrator = 0.0f;
@@ -1333,10 +1352,12 @@ void TaskSampleData(void * pvParameters) {
                         fwdIrefCcCmd = iRef;
                         float iMeas = boostClampf(i_bat_charge_filt, 0.0f, FWD_BAT_CURRENT_HARD_A);
                         float iErr = iRef - iMeas;
-                        float slewUp = freezeDutyUp ? 0.0f : FWD_DUTY_SLEW_UP;
+                        const bool nearV = (vPeak >= FWD_CC_TAPER_START_V);
+                        float slewUp = freezeDutyUp ? 0.0f
+                                       : (nearV ? FWD_DUTY_SLEW_UP_NEAR : FWD_DUTY_SLEW_UP);
+                        float dDutyMax = freezeDutyUp ? 0.0f : slewUp;
                         float dDuty = boostRunPI(iErr, FWD_CURR_KP, FWD_CURR_KI, dt,
-                                                 &fwdCurrIntegrator, FWD_CURR_OUT_MIN,
-                                                 freezeDutyUp ? 0.0f : FWD_CURR_OUT_MAX);
+                                                 &fwdCurrIntegrator, FWD_CURR_OUT_MIN, dDutyMax);
                         if (freezeDutyUp && dDuty > 0.0f) dDuty = 0.0f;
                         // [CC] = previous duty (unit delay). duty = sat(Δduty + duty_prev)
                         float dutyTarget = duty_accumulator + dDuty;
@@ -1345,6 +1366,24 @@ void TaskSampleData(void * pvParameters) {
                                                           slewUp, FWD_DUTY_SLEW_DOWN);
                     } else {
                         fwdIrefCcCmd = iRef;
+                    }
+
+                    if (packUnloaded) {
+                        if (fwd_unload_since_ms == 0) fwd_unload_since_ms = now;
+                        duty_accumulator = max(0.0f, duty_accumulator - 20.0f);
+                        fwdCurrIntegrator = 0.0f;
+                        if ((now - fwd_unload_since_ms) >= FWD_UNLOADED_PWM_OFF_MS) {
+                            Serial.printf("[STOP] FORWARD no-load V=%.2f I=%.2fA D=%.4f (BMS cut)\n",
+                                          vPeak, i_bat_charge_abs,
+                                          (duty_accumulator * 100.0f) / 1023.0f);
+                            system_ON = false;
+                            charge_full_hold = false;
+                            disablePowerStage();
+                            lcd_force_refresh = true;
+                            fwd_unload_since_ms = 0;
+                        }
+                    } else {
+                        fwd_unload_since_ms = 0;
                     }
 
                     if (forwardMode != FWD_SOFTSTART) {
