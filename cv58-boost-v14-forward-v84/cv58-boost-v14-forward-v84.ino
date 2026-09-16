@@ -1287,7 +1287,8 @@ void TaskSampleData(void * pvParameters) {
                         float iErr = iRef - iMeas;
                         float slewUp = freezeDutyUp ? 0.0f : FWD_DUTY_SLEW_UP;
                         float dDuty = boostRunPI(iErr, FWD_CURR_KP, FWD_CURR_KI, dt,
-                                                 &fwdCurrIntegrator, FWD_CURR_OUT_MIN, max(slewUp, 0.0f));
+                                                 &fwdCurrIntegrator, FWD_CURR_OUT_MIN,
+                                                 freezeDutyUp ? 0.0f : FWD_CURR_OUT_MAX);
                         if (freezeDutyUp && dDuty > 0.0f) dDuty = 0.0f;
                         // [CC] = previous duty (unit delay). duty = sat(Δduty + duty_prev)
                         float dutyTarget = duty_accumulator + dDuty;
