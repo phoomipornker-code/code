@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v90";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v91";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: Simulink cascade PI — V PI (58.4) → Iref → I PI → Duty → PWM.
 // Near-full: taper Iref before 57 V so one high cell can balance (BMS was cutting at 3 A).
@@ -63,8 +63,9 @@ const float RESTART_CHARGE_VOLTAGE = 54.0;
 // =========================================================================
 // Forward (AC) cascade PI  (Simulink: 58.4 − V_OUT → V-PI → Iref → I-PI → Duty)
 // SoftStart → CC (Iref sat at FWD_TARGET_CC_CURRENT) → CV → DONE
-// Voltage PI: Kp=15, Ki=1. Current PI: Kp=0.5, Ki=23. Ts=20 ms.
-// [CC] on the diagram is previous duty (unit delay) added to Δduty.
+// Voltage PI: Kp=15, Ki=1. Current PI: Kp=0.5, Ki=23.
+// ADS1115 860 SPS × 6 ch ≈ 8–12 ms + vTaskDelay(20) ⇒ loop ~30–40 ms (not 20 ms).
+// 8-tap Ibat filter ≈ 8×loop ≈ 0.25–0.3 s. Duty-up must wait for a new ADS frame.
 // =========================================================================
 const float FWD_CV_ENTRY_VOLTAGE = 56.40;  // enter CV before the 57 V imbalance window
 const float FWD_CV_FORCE_VOLTAGE = 56.80;
@@ -81,11 +82,12 @@ const float FWD_VOLT_KI = 1.0f;      // Simulink Gain 1 → K·Ts/(z−1)
 const float FWD_VOLT_OUT_MIN = 0.0f; // Iref sat (A)
 const float FWD_CURR_KP = 0.50f;     // Simulink Gain 0.5
 const float FWD_CURR_KI = 23.0f;     // Simulink Gain 23 → K·Ts/(z−1)
-const float FWD_CURR_OUT_MIN = -25.0f;  // Δduty raw / 20 ms
-const float FWD_CURR_OUT_MAX = 25.0f;
-const float FWD_DUTY_SLEW_UP = 8.0f;
-const float FWD_DUTY_SLEW_DOWN = 12.0f;
-const float FWD_SOFTSTART_DUTY_SLEW = 2.0f;
+// Δduty sat = slew so PI cannot wind past what one ADS+filter frame can show.
+const float FWD_CURR_OUT_MIN = -4.0f;
+const float FWD_CURR_OUT_MAX = 1.2f;
+const float FWD_DUTY_SLEW_UP = 1.2f;     // was 8: 0→45% in ~2 s, Cin 151→124 V
+const float FWD_DUTY_SLEW_DOWN = 4.0f;   // faster down (OC / over-V) than up
+const float FWD_SOFTSTART_DUTY_SLEW = 0.8f;  // seed ~125 raw ≈ 5 s at real loop dt
 const float FWD_AC_HOLD_CLIMB_V = 115.0f; // freeze duty-up if bus dips (Cin stress)
 const unsigned long FWD_AC_COLLAPSE_CONFIRM_MS = 15000;
 const unsigned long FWD_AC_BRIEF_GLITCH_MS = 1500; // hold lone AC=0 blips while BAT OK / still charging
@@ -1221,7 +1223,10 @@ void TaskSampleData(void * pvParameters) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
             if (currentState == STATE_FORWARD) {
                 // Simulink cascade: (58.4 − V) V-PI → Iref[CV] → (Iref − I) I-PI + duty[CC] → PWM
-                const float dt = 0.02f;
+                // dt from real loop (ADS 6ch + 20 ms delay), not a fixed 20 ms tick.
+                float dt = (now - last_millis) * 0.001f;
+                if (dt < 0.010f) dt = 0.010f;
+                if (dt > 0.050f) dt = 0.050f;
                 const float vPeak = max((float)v_bat, (float)v_bat_filt);
                 const bool ac_fake_low = (v_ac_in < MIN_AC_VOLTAGE) &&
                                          ((i_bat_charge_filt > 0.35f) || (i_bat_charge_abs > 0.35f));
@@ -1251,17 +1256,20 @@ void TaskSampleData(void * pvParameters) {
                     if (vPeak > TARGET_CV_VOLTAGE) {
                         vErr = min(vErr, TARGET_CV_VOLTAGE - vPeak);
                     }
-                    float iRefCv = boostRunPI(vErr, FWD_VOLT_KP, FWD_VOLT_KI, dt,
-                                              &fwdVoltIntegrator, FWD_VOLT_OUT_MIN, iCcMax);
-                    fwdIrefCvCmd = iRefCv;
-                    float iRef = iRefCv;
+                    if (sample_ok) {
+                        float iRefCv = boostRunPI(vErr, FWD_VOLT_KP, FWD_VOLT_KI, dt,
+                                                  &fwdVoltIntegrator, FWD_VOLT_OUT_MIN, iCcMax);
+                        fwdIrefCvCmd = iRefCv;
+                    }
+                    float iRef = fwdIrefCvCmd;
 
                     if (forwardMode == FWD_SOFTSTART) {
+                        // Seed only — do not run current PI on top (v90 slew+8 overwrote SoftStart).
                         float t = (float)(now - forward_mode_enter_ms) / (float)FWD_SOFTSTART_MS;
                         t = boostClampf(t, 0.0f, 1.0f);
                         iRef = min(iRef, max(0.30f, t * iCcMax));
                         int seedDuty = forwardEstimateDutyRaw(v_ac_in, TARGET_CV_VOLTAGE, allowed_max_duty);
-                        if (!freezeDutyUp && duty_accumulator < (float)seedDuty) {
+                        if (!freezeDutyUp && sample_ok && duty_accumulator < (float)seedDuty) {
                             duty_accumulator = boostApplySlew((float)seedDuty, duty_accumulator,
                                                               FWD_SOFTSTART_DUTY_SLEW, 5.0f);
                         }
@@ -1272,20 +1280,23 @@ void TaskSampleData(void * pvParameters) {
                             forwardMode = FWD_CC;
                             fwdCurrIntegrator = 0.0f;
                         }
+                        fwdIrefCcCmd = iRef;
+                    } else if (sample_ok) {
+                        fwdIrefCcCmd = iRef;
+                        float iMeas = boostClampf(i_bat_charge_filt, 0.0f, FWD_BAT_CURRENT_HARD_A);
+                        float iErr = iRef - iMeas;
+                        float slewUp = freezeDutyUp ? 0.0f : FWD_DUTY_SLEW_UP;
+                        float dDuty = boostRunPI(iErr, FWD_CURR_KP, FWD_CURR_KI, dt,
+                                                 &fwdCurrIntegrator, FWD_CURR_OUT_MIN, max(slewUp, 0.0f));
+                        if (freezeDutyUp && dDuty > 0.0f) dDuty = 0.0f;
+                        // [CC] = previous duty (unit delay). duty = sat(Δduty + duty_prev)
+                        float dutyTarget = duty_accumulator + dDuty;
+                        dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
+                        duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator,
+                                                          slewUp, FWD_DUTY_SLEW_DOWN);
+                    } else {
+                        fwdIrefCcCmd = iRef;
                     }
-
-                    fwdIrefCcCmd = iRef;
-                    float iMeas = boostClampf(i_bat_charge_filt, 0.0f, FWD_BAT_CURRENT_HARD_A);
-                    float iErr = iRef - iMeas;
-                    float dDuty = boostRunPI(iErr, FWD_CURR_KP, FWD_CURR_KI, dt,
-                                             &fwdCurrIntegrator, FWD_CURR_OUT_MIN, FWD_CURR_OUT_MAX);
-                    if (freezeDutyUp && dDuty > 0.0f) dDuty = 0.0f;
-                    // [CC] = previous duty (unit delay). duty = sat(Δduty + duty_prev)
-                    float dutyTarget = duty_accumulator + dDuty;
-                    dutyTarget = boostClampf(dutyTarget, 0.0f, (float)allowed_max_duty);
-                    float slewUp = freezeDutyUp ? 0.0f : FWD_DUTY_SLEW_UP;
-                    duty_accumulator = boostApplySlew(dutyTarget, duty_accumulator,
-                                                      slewUp, FWD_DUTY_SLEW_DOWN);
 
                     if (forwardMode != FWD_SOFTSTART) {
                         if (vPeak >= FWD_CV_FORCE_VOLTAGE) {
