@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v87";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v88";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: Simulink cascade PI — V PI (58.4) → Iref → I PI → Duty → PWM.
 // Near-full: taper Iref before 57 V so one high cell can balance (BMS was cutting at 3 A).
@@ -187,7 +187,8 @@ const bool ENABLE_EVENT_LOG = false;           // [INFO]/[WARN] chatter (ADC/AC 
 const unsigned long OC_EVENT_LOG_MS = 1000;    // rate-limit [OC] while hard limit active
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 5000;
 const unsigned long DEBUG_PRINT_CHARGE_MS = 3000;
-const unsigned long DEBUG_CSV_INTERVAL_MS = 20000;   // table every 20 s (v80: 60 s, v75: 1 s)
+const unsigned long DEBUG_CSV_INTERVAL_MS = 20000;   // standby table
+const unsigned long DEBUG_CSV_CHARGE_MS = 1000;      // while charging (v75)
 const unsigned long LCD_REFRESH_INTERVAL_MS = 500;      // standby / FULL
 const unsigned long LCD_CHARGE_REFRESH_MS = 2000;       // only used after FULL (or alerts)
 // Soft resync kept for FULL/standby recover path — not used while charge-blanked.
@@ -354,6 +355,27 @@ static inline void boostNewResetOnEntry(float vpvNow) {
     boostNewLastMpptMs = 0;
     boostNewCvEnterMs = 0;
     boostNewCvExitMs = 0;
+}
+static inline void printLiveTable(unsigned long now) {
+    const bool use_boost_in =
+        (currentState == STATE_BOOST ||
+         (!system_ON && selectedChargeMode == USER_MODE_BOOST));
+    const float vin_now = use_boost_in ? v_solar : v_ac_in;
+    const float iin_now = use_boost_in ? fabsf(i_solar) : fabsf(i_ac_in);
+    const unsigned long sec = now / 1000UL;
+    Serial.printf("%02u:%02u:%02u   %6.2f    %6.1f   %5.2f   %5.2f  %4d\n",
+                  (unsigned int)((sec / 3600UL) % 100UL),
+                  (unsigned int)((sec / 60UL) % 60UL),
+                  (unsigned int)(sec % 60UL),
+                  iin_now, vin_now,
+                  i_bat_charge_filt, v_bat_filt,
+                  active_duty_percent);
+}
+static inline void maybePrintLiveTable(unsigned long now, unsigned long *last_csv, unsigned long interval_ms) {
+    if (!ENABLE_DEBUG_CSV) return;
+    if ((now - *last_csv) < interval_ms) return;
+    *last_csv = now;
+    printLiveTable(now);
 }
 static inline void forwardNewResetOnEntry() {
     forwardMode = FWD_SOFTSTART;
@@ -675,6 +697,7 @@ void TaskSampleData(void * pvParameters) {
     unsigned long ac_collapse_start_time = 0;
     bool ac_is_collapsing = false;
     unsigned long last_csv_time = 0;
+    bool last_system_on_for_csv = false;
     int last_stat_sel = (int)USER_MODE_BOOST;  // match default — no STANDBY spam until toggle
     bool last_system_on_for_stat = false;
     unsigned long last_sensor_error_log = 0;
@@ -1106,6 +1129,8 @@ void TaskSampleData(void * pvParameters) {
             }
             if (charge_full_hold) {
                 last_millis = now;
+                active_duty_percent = 0;
+                maybePrintLiveTable(now, &last_csv_time, DEBUG_CSV_CHARGE_MS);
                 vTaskDelay(20 / portTICK_PERIOD_MS);
                 continue;
             }
@@ -1675,30 +1700,22 @@ void TaskSampleData(void * pvParameters) {
                 }
             }
         }
-        const char* sel_label =
-            (selectedChargeMode == USER_MODE_BOOST) ? "BOOST" : "FORW";
-        const bool use_boost_in =
-            (currentState == STATE_BOOST ||
-             (!system_ON && selectedChargeMode == USER_MODE_BOOST));
-        const float vin_now = use_boost_in ? v_solar : v_ac_in;
-        const float iin_now = use_boost_in ? fabsf(i_solar) : fabsf(i_ac_in);
-
-        // Table rows always — STANDBY and charging (no need to press START).
-        if (ENABLE_DEBUG_CSV && (now - last_csv_time >= DEBUG_CSV_INTERVAL_MS)) {
-            last_csv_time = now;
-            const unsigned long sec = now / 1000UL;
-            const unsigned int hh = (unsigned int)((sec / 3600UL) % 100UL);
-            const unsigned int mm = (unsigned int)((sec / 60UL) % 60UL);
-            const unsigned int ss = (unsigned int)(sec % 60UL);
-            Serial.printf("%02u:%02u:%02u   %6.2f    %6.1f   %5.2f   %5.2f  %4d\n",
-                          hh, mm, ss,
-                          iin_now, vin_now,
-                          i_bat_charge_filt, v_bat_filt,
-                          active_duty_percent);
+        const unsigned long csvMs =
+            system_ON ? DEBUG_CSV_CHARGE_MS : DEBUG_CSV_INTERVAL_MS;
+        if (system_ON && !last_system_on_for_csv) {
+            last_csv_time = (now > csvMs) ? (now - csvMs) : 0;
         }
+        last_system_on_for_csv = system_ON;
+        maybePrintLiveTable(now, &last_csv_time, csvMs);
 
         // [STAT] only on mode toggle or charge start — keep table readable.
         if (ENABLE_DEBUG_STATUS) {
+            const char* sel_label =
+                (selectedChargeMode == USER_MODE_BOOST) ? "BOOST" : "FORW";
+            const bool use_boost_in =
+                (currentState == STATE_BOOST ||
+                 (!system_ON && selectedChargeMode == USER_MODE_BOOST));
+            const float vin_now = use_boost_in ? v_solar : v_ac_in;
             const int sel_now = (int)selectedChargeMode;
             const bool mode_changed = (sel_now != last_stat_sel);
             const bool charge_started = system_ON && !last_system_on_for_stat;
