@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v93";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v95";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: Simulink cascade PI — V PI (58.4) → Iref → I PI → Duty → PWM.
 // Near-full: taper Iref before 57 V so one high cell can balance (BMS was cutting at 3 A).
@@ -67,8 +67,8 @@ const float RESTART_CHARGE_VOLTAGE = 54.0;
 // ADS1115 860 SPS × 6 ch ≈ 8–12 ms + vTaskDelay(20) ⇒ loop ~30–40 ms (not 20 ms).
 // 8-tap Ibat filter ≈ 8×loop ≈ 0.25–0.3 s. Duty-up must wait for a new ADS frame.
 // =========================================================================
-const float FWD_CV_ENTRY_VOLTAGE = 55.60;  // was 56.40 — BMS already cutting at ~56.2
-const float FWD_CV_FORCE_VOLTAGE = 55.90;
+const float FWD_CV_ENTRY_VOLTAGE = 56.00;  // enter CV from 56.0 V
+const float FWD_CV_FORCE_VOLTAGE = 56.20;  // skip 200 ms confirm if already past 56.0
 const float FWD_CV_EXIT_VOLTAGE  = 54.80;
 // Iref cap vs pack V — Kp_v=15 stays at 3 A until ~58.2 V; that trips a high cell at 57 V.
 const float FWD_CC_TAPER_START_V = 55.20f;   // ~3.45 V/cell avg — start leaving CC
@@ -209,6 +209,7 @@ const int I2C_SCL_PIN = 22;
 volatile float v_solar = 0, v_ac_in = 0, v_bat = 0;
 volatile float i_solar = 0, i_ac_in = 0, i_bat = 0;
 volatile float v_bat_filt = 0, i_bat_filt = 0;
+volatile float v_bat_ads = 0;  // this ADS sample before pack-window reject (may be 90 V)
 volatile float i_solar_mag = 0;
 volatile float i_bat_charge_filt = 0;
 volatile float i_bat_charge_abs = 0;
@@ -312,6 +313,18 @@ static inline float boostRunPI(float err, float kp, float ki, float dt,
     else *integ = iCandidate;
     return out;
 }
+// Voltage CV actually regulates: pack estimate plus this ADS sample.
+// 90 V fly-up is kept out of v_bat_filt, but still drives duty-down when I has collapsed.
+static inline float cvSenseVoltage() {
+    float v = max((float)v_bat, (float)v_bat_filt);
+    const float ads = v_bat_ads;
+    if (ads >= 35.0f && ads <= 62.0f) {
+        v = max(v, ads);
+    } else if (raw_duty > 0 && ads > 62.0f && i_bat_charge_abs < 0.35f) {
+        v = max(v, ads);
+    }
+    return v;
+}
 static inline int boostEstimateDutyRaw(float vin, float vout, int maxDuty) {
     float vinUse = (vin > 38.0f) ? vin : 38.0f;
     float voutUse = (vout > (vinUse + 2.0f)) ? vout : (vinUse + 2.0f);
@@ -386,7 +399,7 @@ static inline void printLiveTable(unsigned long now) {
     const float pvI = i_solar;
     const float acV = v_ac_in;
     const float acI = i_ac_in;
-    const float batV = v_bat;
+    const float batV = v_bat_ads;
     const float batVf = v_bat_filt;
     const float batI = i_bat;
     const float batIf = i_bat_filt;
@@ -420,6 +433,9 @@ static inline void printLiveTable(unsigned long now) {
     if (fwdLive && (batVf >= FWD_CC_TAPER_START_V) &&
         (fabsf(batI) < FWD_UNLOADED_I_A) && (dutyRaw > 30)) {
         n += snprintf(note + n, sizeof(note) - (size_t)n, "Icut ");
+    }
+    if (v_bat_ads > TARGET_CV_VOLTAGE) {
+        n += snprintf(note + n, sizeof(note) - (size_t)n, "CVhi ");
     }
     const unsigned long sec = now / 1000UL;
     Serial.printf("%02u:%02u:%02u.%u %-4s %-5s %5.1f %5.2f %6.1f %5.2f %5.2f %5.2f %5.2f %5.2f %4d %8.4f %5.2f %s\n",
@@ -691,6 +707,7 @@ void calibrateCurrentOffsetsAtBoot() {
     v_ac_in = v_ac;
     v_bat = v_b;
     v_bat_filt = v_b;
+    v_bat_ads = v_b;
     i_solar = i_pv;
     i_ac_in = i_ac;
     i_bat = i_b;
@@ -811,6 +828,8 @@ void TaskSampleData(void * pvParameters) {
             float pv_raw_before = raw_mv_v0;
             float ac_raw_before = raw_mv_v1;
             float bat_raw_before = raw_mv_v2;
+            v_bat_ads = ((bat_raw_before - OFFSET_V_BAT) / 1000.0f) * CAL_SCALE_V_BAT;
+            if (v_bat_ads < 0.0f) v_bat_ads = 0.0f;
             // Same ~40mV on BAT+AC while charging ⇒ ADS bus glitch.
             // Sudden AC→~0 while BAT still valid: brief glitch/dropout — hold AC short time.
             bool multi_ch_bus_glitch =
@@ -1287,7 +1306,7 @@ void TaskSampleData(void * pvParameters) {
                 float dt = (now - last_millis) * 0.001f;
                 if (dt < 0.010f) dt = 0.010f;
                 if (dt > 0.050f) dt = 0.050f;
-                const float vPeak = max((float)v_bat, (float)v_bat_filt);
+                const float vPeak = cvSenseVoltage();
                 const bool ac_fake_low = (v_ac_in < MIN_AC_VOLTAGE) &&
                                          ((i_bat_charge_filt > 0.35f) || (i_bat_charge_abs > 0.35f));
                 if (i_bat_charge_abs > 0.40f) fwd_saw_charge_i = true;
@@ -1318,10 +1337,12 @@ void TaskSampleData(void * pvParameters) {
                     iCcMax = min(iCcMax, forwardIrefCapForVoltage(vPeak, v_bat_filt));
                     iCcMax = boostClampf(iCcMax, 0.0f, FWD_TARGET_CC_CURRENT);
 
-                    // Voltage PI sat at iCcMax (tapered). Pass cap as outMax so the integrator cannot wind at 3 A.
-                    float vErr = TARGET_CV_VOLTAGE - v_bat_filt;
+                    // Voltage PI holds CV on peak sense (pack or ADS fly-up). Over-CV → Iref down.
+                    float vErr = TARGET_CV_VOLTAGE - vPeak;
                     if (vPeak > TARGET_CV_VOLTAGE) {
-                        vErr = min(vErr, TARGET_CV_VOLTAGE - vPeak);
+                        if (forwardMode != FWD_SOFTSTART && forwardMode != FWD_DONE) {
+                            forwardMode = FWD_CV;
+                        }
                     }
                     if (sample_ok) {
                         float iRefCv = boostRunPI(vErr, FWD_VOLT_KP, FWD_VOLT_KI, dt,
@@ -1707,7 +1728,7 @@ void TaskSampleData(void * pvParameters) {
             duty_accumulator = constrain(duty_accumulator, 0.0, (float)allowed_max_duty);
             // Hard CV ceiling vs active target — do not let the pack fly to 60 V.
             {
-                const float vPeakNow = max((float)v_bat, (float)v_bat_filt);
+                const float vPeakNow = cvSenseVoltage();
                 const float cvTgt = (currentState == STATE_BOOST)
                                         ? BOOST_CV_TARGET_VOLTAGE
                                         : TARGET_CV_VOLTAGE;
@@ -1741,7 +1762,7 @@ void TaskSampleData(void * pvParameters) {
             }
             total_Wh += ((v_bat * i_bat_charge_filt) * (now - last_millis)) / 3600000.0;
             // High-V stop: use peak so lagged Vf cannot block cut near full.
-            const float vStop = max(v_bat, v_bat_filt);
+            const float vStop = cvSenseVoltage();
             const float vStopLim = ((currentState == STATE_BOOST)
                                         ? BOOST_CV_TARGET_VOLTAGE
                                         : TARGET_CV_VOLTAGE) + HIGH_VOLTAGE_STOP_MARGIN_V;

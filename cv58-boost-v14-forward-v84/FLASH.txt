@@ -2,6 +2,5 @@
   cv58-boost-v14-forward-v84/cv58-boost-v14-forward-v84.ino
 
 Arduino IDE → Upload
-ต้องเห็น: [BOOT] cv58-boost-v14-forward-v93
-คอลัมน์ Duty เป็นทศนิยม 4 หลัก เช่น 39.9805
-ใกล้ 56 V ต้องไม่พุ่งไป 45.0000 เมื่อกระแสยุบ (note Icut / [STOP] BMS cut)
+ต้องเห็น: [BOOT] cv58-boost-v14-forward-v95
+ถ้า ADS เห็นแรงดันเกิน CV 58.40 V → note CVhi และดิวตี้ต้องลง (ไม่ไล่ 45%)
