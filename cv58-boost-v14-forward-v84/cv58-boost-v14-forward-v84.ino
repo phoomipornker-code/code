@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v91";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v92";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: Simulink cascade PI — V PI (58.4) → Iref → I PI → Duty → PWM.
 // Near-full: taper Iref before 57 V so one high cell can balance (BMS was cutting at 3 A).
@@ -183,14 +183,15 @@ const float HARD_OVP_TRIP_VOLTAGE = 59.20;    // catch fly-up before 60 V; CV ho
 const float HARD_OVP_RELEASE_VOLTAGE = 57.80;
 const unsigned long HARD_OVP_RELEASE_DELAY_MS = 2500;
 const bool ENABLE_DEBUG_STATUS = false;        // [STAT] lines (off — table is enough)
-const bool ENABLE_DEBUG_CSV = true;            // Tim Iin Vin Iout Vout Duty table rows
+const bool ENABLE_DEBUG_CSV = true;            // live ESP view (all sensors the loop uses)
 const bool ENABLE_EVENT_LOG = false;           // [INFO]/[WARN] chatter (ADC/AC sag/phase)
 // Always print: [BOOT] [MODE] [START] [STOP] [FULL] [OVP] [OC] [CRITICAL] + table.
 const unsigned long OC_EVENT_LOG_MS = 1000;    // rate-limit [OC] while hard limit active
 const unsigned long DEBUG_PRINT_INTERVAL_MS = 5000;
 const unsigned long DEBUG_PRINT_CHARGE_MS = 3000;
-const unsigned long DEBUG_CSV_INTERVAL_MS = 20000;   // standby table
-const unsigned long DEBUG_CSV_CHARGE_MS = 1000;      // while charging (v75)
+const unsigned long DEBUG_CSV_LIVE_MS = 200;         // realtime: same vars the control loop sees
+const unsigned long DEBUG_CSV_INTERVAL_MS = DEBUG_CSV_LIVE_MS;
+const unsigned long DEBUG_CSV_CHARGE_MS = DEBUG_CSV_LIVE_MS;
 const unsigned long LCD_REFRESH_INTERVAL_MS = 500;      // standby / FULL
 const unsigned long LCD_CHARGE_REFRESH_MS = 2000;       // only used after FULL (or alerts)
 // Soft resync kept for FULL/standby recover path — not used while charge-blanked.
@@ -358,20 +359,72 @@ static inline void boostNewResetOnEntry(float vpvNow) {
     boostNewCvEnterMs = 0;
     boostNewCvExitMs = 0;
 }
+static inline const char* livePhaseLabel() {
+    if (ovp_latched) return "OVP";
+    if (charge_full_hold) return "FULL";
+    if (!system_ON) return "STBY";
+    if (currentState == STATE_FORWARD) {
+        if (forwardMode == FWD_SOFTSTART) return "F-SS";
+        if (forwardMode == FWD_CC) return "F-CC";
+        if (forwardMode == FWD_CV) return "F-CV";
+        return "F-DN";
+    }
+    if (currentState == STATE_BOOST) {
+        if (boostNewMode == BOOST_NEW_SOFTSTART) return "B-SS";
+        if (boostNewMode == BOOST_NEW_CC_MPPT) return "B-CC";
+        if (boostNewMode == BOOST_NEW_CV) return "B-CV";
+        return "B-DN";
+    }
+    return "ON";
+}
+// Same numbers the control loop uses (not the collapsed Iin/Vin pair).
 static inline void printLiveTable(unsigned long now) {
-    const bool use_boost_in =
-        (currentState == STATE_BOOST ||
-         (!system_ON && selectedChargeMode == USER_MODE_BOOST));
-    const float vin_now = use_boost_in ? v_solar : v_ac_in;
-    const float iin_now = use_boost_in ? fabsf(i_solar) : fabsf(i_ac_in);
+    const float pvV = v_solar;
+    const float pvI = i_solar;
+    const float acV = v_ac_in;
+    const float acI = i_ac_in;
+    const float batV = v_bat;
+    const float batVf = v_bat_filt;
+    const float batI = i_bat;
+    const float batIf = i_bat_filt;
+    const int dutyRaw = raw_duty;
+    const int dutyPct = active_duty_percent;
+    float iref = 0.0f;
+    if (currentState == STATE_FORWARD) {
+        iref = fwdIrefCcCmd;
+    } else if (currentState == STATE_BOOST) {
+        iref = (boostNewMode == BOOST_NEW_CV) ? boostNewIrefCvCmd : boostNewIrefMppt;
+    }
+    char note[28];
+    note[0] = '\0';
+    int n = 0;
+    if ((now - last_adc_sample_ms) > ADC_STALE_WARN_MS) {
+        n += snprintf(note + n, sizeof(note) - (size_t)n, "ADC ");
+    }
+    if (pvV < NOISE_V_THRESHOLD && fabsf(pvI) > 0.30f) {
+        n += snprintf(note + n, sizeof(note) - (size_t)n, "Ipv ");
+    }
+    if (acV < NOISE_V_THRESHOLD && fabsf(acI) > 0.30f) {
+        n += snprintf(note + n, sizeof(note) - (size_t)n, "Iac ");
+    }
+    if (fabsf(batV - batVf) > 1.50f) {
+        n += snprintf(note + n, sizeof(note) - (size_t)n, "Vspk ");
+    }
+    if (fabsf(batI) <= NOISE_I_THRESHOLD && fabsf(batIf) > 0.40f) {
+        n += snprintf(note + n, sizeof(note) - (size_t)n, "Ilag ");
+    }
     const unsigned long sec = now / 1000UL;
-    Serial.printf("%02u:%02u:%02u   %6.2f    %6.1f   %5.2f   %5.2f  %4d\n",
+    Serial.printf("%02u:%02u:%02u.%u %-4s %-5s %5.1f %5.2f %6.1f %5.2f %5.2f %5.2f %5.2f %5.2f %4d %3d %5.2f %s\n",
                   (unsigned int)((sec / 3600UL) % 100UL),
                   (unsigned int)((sec / 60UL) % 60UL),
                   (unsigned int)(sec % 60UL),
-                  iin_now, vin_now,
-                  i_bat_charge_filt, v_bat_filt,
-                  active_duty_percent);
+                  (unsigned int)((now % 1000UL) / 100UL),
+                  livePhaseLabel(),
+                  (selectedChargeMode == USER_MODE_BOOST) ? "BOOST" : "FORWD",
+                  pvV, pvI, acV, acI,
+                  batV, batVf, batI, batIf,
+                  dutyRaw, dutyPct, iref,
+                  note);
 }
 static inline void maybePrintLiveTable(unsigned long now, unsigned long *last_csv, unsigned long interval_ms) {
     if (!ENABLE_DEBUG_CSV) return;
@@ -636,25 +689,20 @@ void calibrateCurrentOffsetsAtBoot() {
     i_bat_filt = i_b;
     i_bat_charge_filt = fabsf(i_b);
     i_bat_charge_abs = fabsf(i_b);
-    const bool use_boost = (selectedChargeMode == USER_MODE_BOOST);
-    const float vin = use_boost ? v_pv : v_ac;
-    const float iin = use_boost ? fabsf(i_pv) : fabsf(i_ac);
-    const unsigned long sec = millis() / 1000UL;
-    Serial.printf("%02lu:%02lu:%02lu   %6.2f    %6.1f   %5.2f   %5.2f  %4d\n",
-                  (sec / 3600UL) % 100UL, (sec / 60UL) % 60UL, sec % 60UL,
-                  iin, vin, fabsf(i_b), v_b, 0);
+    last_adc_sample_ms = millis();
+    printLiveTable(last_adc_sample_ms);
 }
 void setup() {
     Serial.begin(115200);
     Serial.printf("[BOOT] %s | B_CC=%.0fA F_CC=%.0fA CV=%.2fV DmaxF=%d\n",
                   FW_VERSION_TAG, TARGET_CC_CURRENT, FWD_TARGET_CC_CURRENT,
                   TARGET_CV_VOLTAGE, MAX_DUTY_FORWARD);
-    Serial.printf("[BOOT] FWD cascade PI V(Kp=%.0f Ki=%.0f) I(Kp=%.2f Ki=%.0f) Ts=20ms\n",
+    Serial.printf("[BOOT] FWD cascade PI V(Kp=%.0f Ki=%.0f) I(Kp=%.2f Ki=%.0f) dt=loop ADS\n",
                   FWD_VOLT_KP, FWD_VOLT_KI, FWD_CURR_KP, FWD_CURR_KI);
     Serial.printf("[BOOT] FWD Iref taper %.1fV@%.0fA → %.1fV@%.2fA (balance)\n",
                   FWD_CC_TAPER_START_V, FWD_TARGET_CC_CURRENT,
                   FWD_BALANCE_HOLD_V, FWD_BALANCE_CURRENT_A);
-    Serial.println("Tim           Iin        Vin     Iout    Vout    Duty");
+    Serial.println("Tim        Ph   Sel    PVv   PVi    ACv   ACi  Vbat    Vf  Ibat    If   Dr  D%  Iref note");
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(40);

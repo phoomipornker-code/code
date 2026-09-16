@@ -1,16 +1,12 @@
-# cv58-boost-v14-forward-v91
+# cv58-boost-v14-forward-v92
 
-Duty-up ของ Forward ไม่สอดคล้องกับ ADS1115:
+Serial โชว์ค่าเดียวกับที่ ESP ใช้คุม — ทุก 200 ms ทั้ง STANDBY และตอนชาร์จ
 
-- ADS 860 SPS × 6 ch ≈ 8–12 ms แล้วหน่วง 20 ms ⇒ ลูปจริง ~30–40 ms
-- กรอง Ibat 8 จุด ≈ 0.25–0.3 s
-- PI เดิม slew +8 / รอบ ⇒ 0→45% ใน ~2 s และทับ SoftStart
+คอลัมน์:
+`Tim Ph Sel PVv PVi ACv ACi Vbat Vf Ibat If Dr D% Iref note`
 
-ปรับแล้ว (Kp/Ki ตาม Simulink คงเดิม):
+- PVv/PVi, ACv/ACi, Vbat/Vf, Ibat/If = ค่าจริงในลูป (ดิบกับกรอง)
+- Dr = PWM raw, D% = percent, Iref = เป้ากระแสของ PI
+- note: `Ipv` กระแส PV ทั้งที่แรงดัน PV≈0, `Iac` แบบเดียวกัน, `Vspk` Vbat กระโดดจากฟิลเตอร์, `ADC` อ่านไม่ทัน, `Ilag` If ค้าง
 
-- slew-up 1.2 raw / รอบ (รอรอบ ADS + ฟิลเตอร์)
-- SoftStart แค่เปิด seed — ไม่ให้ current PI ทับ
-- `dt` จากเวลาลูปจริง ไม่ใช้ 20 ms ปลอม
-- ไม่เพิ่มดิวตี้ถ้า ADS อ่านไม่สำเร็จ
-
-เซ็นเซอร์ `CAL_SCALE_V_BAT = 41.5` คงเดิม
+ไม่ได้ยุบเป็น Iin/Vin ตามโหมดแล้ว (ตารางเก่าทำให้ Vin=0 ทั้งที่มี AC)
