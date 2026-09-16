@@ -2,5 +2,7 @@
   cv58-boost-v14-forward-v84/cv58-boost-v14-forward-v84.ino
 
 Arduino IDE → Upload
-ต้องเห็น: [BOOT] cv58-boost-v14-forward-v96
+ต้องเห็น: [BOOT] cv58-boost-v14-forward-v97
+F-CV: Iref taper 3.0A@55.2V → 0.35A@58.2V (ไม่หนีบ 0.35A ที่ 56V)
 Forward FULL: V≥58.20 V และ I≤0.10 A ค้าง 15 s (หรือ V≥58.40 V และ I≤0.10 A ค้าง 5 s)
+ไม่ FULL HOLD จาก ADS ~83 V ขณะ pack ยัง ~56 V และมีกระแส

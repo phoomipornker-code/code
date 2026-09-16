@@ -3,10 +3,10 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v96";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v97";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: Simulink cascade PI — V PI (58.4) → Iref → I PI → Duty → PWM.
-// Near-full: taper Iref before 57 V so one high cell can balance (BMS was cutting at 3 A).
+// Near-full: taper Iref 3 A@55.2 → 0.35 A@58.2 so F-CV can still climb (v95 held 56 V).
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
 // =========================================================================
 // Hardware
@@ -60,6 +60,10 @@ const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 80;
 const float CV_PEAK_NO_UP_MARGIN_V = 0.10f;      // freeze duty-up at target-0.10
 const float CV_OVERSHOOT_BLEED_MARGIN_V = 0.15f; // dump duty above target+0.15
 const float CV_ABS_CEILING_MARGIN_V = 0.45f;     // PWM off (Fwd 58.85 — never 60 V)
+// ADS >62 V is fly-up/glitch. Field v95: I=0.31 A still charging, ads=83.17
+// tripped [STOP] CV ceiling FULL HOLD while filt=55.97. Only trust it if I collapsed.
+const float CV_ADS_FLYUP_IABS_MAX_A = 0.15f;
+const float CV_ADS_FLYUP_IFILT_MAX_A = 0.20f;
 const float RESTART_CHARGE_VOLTAGE = 54.0;
 // =========================================================================
 // Forward (AC) cascade PI  (Simulink: 58.4 − V_OUT → V-PI → Iref → I-PI → Duty)
@@ -72,8 +76,9 @@ const float FWD_CV_ENTRY_VOLTAGE = 56.00;  // enter CV from 56.0 V
 const float FWD_CV_FORCE_VOLTAGE = 56.20;  // skip 200 ms confirm if already past 56.0
 const float FWD_CV_EXIT_VOLTAGE  = 54.80;
 // Iref cap vs pack V — Kp_v=15 stays at 3 A until ~58.2 V; that trips a high cell at 57 V.
+// Hold at 58.20 (not 56.0): v95 F-CV sat Iref=0.35 A at 56 V and never climbed to 58.4.
 const float FWD_CC_TAPER_START_V = 55.20f;   // ~3.45 V/cell avg — start leaving CC
-const float FWD_BALANCE_HOLD_V = 56.00f;     // was 56.80 — Iref=0.35 A by 56 V (BMS window)
+const float FWD_BALANCE_HOLD_V = 58.20f;     // Iref=0.35 A at FULL-detect V (was 56.00)
 const float FWD_BALANCE_CURRENT_A = 0.35f;   // passive BMS (~tens of mA) can catch up
 const float FWD_UNLOADED_I_A = 0.25f;        // Iabs below this near-full ⇒ pack/BMS not accepting
 const unsigned long FWD_UNLOADED_PWM_OFF_MS = 80;
@@ -316,15 +321,30 @@ static inline float boostRunPI(float err, float kp, float ki, float dt,
 }
 // Voltage CV actually regulates: pack estimate plus this ADS sample.
 // 90 V fly-up is kept out of v_bat_filt, but still drives duty-down when I has collapsed.
+static inline bool cvCurrentCollapsed() {
+    return (i_bat_charge_abs < CV_ADS_FLYUP_IABS_MAX_A) &&
+           (i_bat_charge_filt < CV_ADS_FLYUP_IFILT_MAX_A);
+}
 static inline float cvSenseVoltage() {
     float v = max((float)v_bat, (float)v_bat_filt);
     const float ads = v_bat_ads;
     if (ads >= 35.0f && ads <= 62.0f) {
         v = max(v, ads);
-    } else if (raw_duty > 0 && ads > 62.0f && i_bat_charge_abs < 0.35f) {
+    } else if (raw_duty > 0 && ads > 62.0f && cvCurrentCollapsed()) {
         v = max(v, ads);
     }
     return v;
+}
+// PWM-off FULL HOLD only if the pack is actually near CV, or current truly collapsed.
+// Lone ADS 83 V with filt~56 V and I~0.3 A is a mux glitch — do not HOLD.
+static inline bool cvPeakIsRealPackCeiling(float vPeak, float cvTgt) {
+    const float filt = v_bat_filt;
+    const bool filtInPack = (filt >= 35.0f) && (filt <= 62.0f);
+    const bool packNearCv = filtInPack && (filt >= (cvTgt - 1.50f));
+    const bool peakInPack = (vPeak >= 35.0f) && (vPeak <= 62.0f);
+    if (peakInPack && packNearCv) return true;
+    if (cvCurrentCollapsed()) return true;
+    return false;
 }
 static inline int boostEstimateDutyRaw(float vin, float vout, int maxDuty) {
     float vinUse = (vin > 38.0f) ? vin : 38.0f;
@@ -1735,18 +1755,25 @@ void TaskSampleData(void * pvParameters) {
                                         : TARGET_CV_VOLTAGE;
                 const float bleedAt = cvTgt + CV_OVERSHOOT_BLEED_MARGIN_V;
                 const float ceilAt = cvTgt + CV_ABS_CEILING_MARGIN_V;
-                if (vPeakNow >= bleedAt) {
+                const bool realCeil = cvPeakIsRealPackCeiling(vPeakNow, cvTgt);
+                if (vPeakNow >= bleedAt && realCeil) {
                     float over = vPeakNow - cvTgt;
                     duty_accumulator -= (6.0f + over * 25.0f);
                     if (duty_accumulator < 0.0f) duty_accumulator = 0.0f;
                 }
                 if (vPeakNow >= ceilAt) {
-                    charge_full_hold = true;
-                    disablePowerStage();
-                    last_lcd_soft_resync_ms = 0;
-                    lcd_force_refresh = true;
-                    Serial.printf("[STOP] CV ceiling FULL HOLD V=%.2f filt=%.2f lim=%.2f\n",
-                                  vPeakNow, v_bat_filt, ceilAt);
+                    if (realCeil) {
+                        charge_full_hold = true;
+                        disablePowerStage();
+                        last_lcd_soft_resync_ms = 0;
+                        lcd_force_refresh = true;
+                        Serial.printf("[STOP] CV ceiling FULL HOLD V=%.2f filt=%.2f lim=%.2f\n",
+                                      vPeakNow, v_bat_filt, ceilAt);
+                    } else {
+                        Serial.printf("[WARN] CV ceiling ignore ghost V=%.2f filt=%.2f I=%.2f/%.2fA\n",
+                                      vPeakNow, v_bat_filt,
+                                      i_bat_charge_abs, i_bat_charge_filt);
+                    }
                 }
             }
             if (currentState == STATE_FORWARD) {
@@ -1764,10 +1791,11 @@ void TaskSampleData(void * pvParameters) {
             total_Wh += ((v_bat * i_bat_charge_filt) * (now - last_millis)) / 3600000.0;
             // High-V stop: use peak so lagged Vf cannot block cut near full.
             const float vStop = cvSenseVoltage();
-            const float vStopLim = ((currentState == STATE_BOOST)
-                                        ? BOOST_CV_TARGET_VOLTAGE
-                                        : TARGET_CV_VOLTAGE) + HIGH_VOLTAGE_STOP_MARGIN_V;
-            if (vStop >= vStopLim) {
+            const float vStopTgt = (currentState == STATE_BOOST)
+                                       ? BOOST_CV_TARGET_VOLTAGE
+                                       : TARGET_CV_VOLTAGE;
+            const float vStopLim = vStopTgt + HIGH_VOLTAGE_STOP_MARGIN_V;
+            if (vStop >= vStopLim && cvPeakIsRealPackCeiling(vStop, vStopTgt)) {
                 if (high_voltage_stop_start_ms == 0) high_voltage_stop_start_ms = now;
                 if (now - high_voltage_stop_start_ms >= HIGH_VOLTAGE_STOP_CONFIRM_MS) {
                     charge_full_hold = true;
