@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v95";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v96";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: Simulink cascade PI — V PI (58.4) → Iref → I PI → Duty → PWM.
 // Near-full: taper Iref before 57 V so one high cell can balance (BMS was cutting at 3 A).
@@ -49,7 +49,8 @@ const unsigned long SENSOR_ERROR_LOG_MS = 2000;
 const float CV_DEADBAND_V = 0.12;
 const float FULL_DETECT_VOLTAGE = 57.90;   // Boost FULL near CV 58.0
 const float FWD_FULL_DETECT_VOLTAGE = 58.20; // Forward FULL near CV 58.4
-const float FULL_END_CURRENT = 0.50;
+const float FULL_END_CURRENT = 0.50;           // Boost FULL
+const float FWD_FULL_END_CURRENT = 0.10f;      // Forward FULL at 0.1 A
 const unsigned long FULL_CONFIRM_MS = 60000;          // Boost
 const unsigned long FWD_FULL_CONFIRM_MS = 15000;      // Forward: was 60s — too long near full
 const unsigned long FWD_FULL_FAST_CONFIRM_MS = 5000;  // V peak≥CV and Iabs collapsed
@@ -1432,10 +1433,10 @@ void TaskSampleData(void * pvParameters) {
                             const float vFull = vPeak;
                             const float iFull = min(i_bat_charge_filt, i_bat_charge_abs);
                             bool doneSlow = (vFull >= FWD_FULL_DETECT_VOLTAGE) &&
-                                            (iFull <= FULL_END_CURRENT);
+                                            (iFull <= FWD_FULL_END_CURRENT);
                             bool doneFast = (vFull >= TARGET_CV_VOLTAGE) &&
-                                            (i_bat_charge_abs <= 0.35f) &&
-                                            (iFull <= 1.00f);
+                                            (i_bat_charge_abs <= FWD_FULL_END_CURRENT) &&
+                                            (iFull <= FWD_FULL_END_CURRENT);
                             bool doneCond = doneSlow || doneFast;
                             unsigned long needMs = doneFast ? FWD_FULL_FAST_CONFIRM_MS
                                                              : FWD_FULL_CONFIRM_MS;

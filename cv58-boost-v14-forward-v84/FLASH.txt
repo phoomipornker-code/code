@@ -2,5 +2,5 @@
   cv58-boost-v14-forward-v84/cv58-boost-v14-forward-v84.ino
 
 Arduino IDE → Upload
-ต้องเห็น: [BOOT] cv58-boost-v14-forward-v95
-ถ้า ADS เห็นแรงดันเกิน CV 58.40 V → note CVhi และดิวตี้ต้องลง (ไม่ไล่ 45%)
+ต้องเห็น: [BOOT] cv58-boost-v14-forward-v96
+Forward FULL: V≥58.20 V และ I≤0.10 A ค้าง 15 s (หรือ V≥58.40 V และ I≤0.10 A ค้าง 5 s)
