@@ -2,5 +2,5 @@
   cv58-boost-v14-forward-v84/cv58-boost-v14-forward-v84.ino
 
 Arduino IDE → Upload
-ต้องเห็น: [BOOT] cv58-boost-v14-forward-v88 | … CV=58.40V …
-ตอนชาร์จ ตาราง Tim/Iin/Vin/Iout/Vout/Duty พิมพ์ทุก 1 วินาที
+ต้องเห็น: [BOOT] cv58-boost-v14-forward-v89 | … CV=58.40V …
+CAL_SCALE_V_BAT = 42.3 (ค่าเดิมจาก v81)

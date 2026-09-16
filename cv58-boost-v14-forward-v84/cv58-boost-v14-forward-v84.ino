@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v88";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v89";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: Simulink cascade PI — V PI (58.4) → Iref → I PI → Duty → PWM.
 // Near-full: taper Iref before 57 V so one high cell can balance (BMS was cutting at 3 A).
@@ -109,7 +109,7 @@ const float OFFSET_I_SOLAR = 1659.7;
 const float OFFSET_I_AC    = 1646.9;
 const float OFFSET_I_BAT   = 1646.9;
 const float CAL_SCALE_V_AC    = 71.43;
-const float CAL_SCALE_V_BAT   = 41.5;
+const float CAL_SCALE_V_BAT   = 42.3;
 const float CAL_SCALE_I_SOLAR = 42.46;
 const float CAL_SCALE_I_AC    = 42.46;
 const float CAL_SCALE_I_BAT   = 42.46;
@@ -121,7 +121,7 @@ const unsigned long ADC_GLITCH_LOG_MS = 5000;  // rate-limit glitch WARN spam
 // Sudden BAT sense jump up — field CV entry: +2.89 V (≈70 mV raw) passed old 80 mV
 // gate then SPIKE-PRECUT latched OVP at 57.92 while filt=55.33. ~50 mV ≈ 2.1 V.
 const float ADC_BAT_HIGH_SPIKE_MV = 50.0f;
-// 16S pack while charging must stay ~40–59 V ⇒ ADS mV ~955–1420. Field showed
+// 16S pack while charging must stay ~40–57 V ⇒ ADS mV ~955–1362. Field showed
 // BATraw=104 mV (V=4.37) with I≈3 A — passed old MIN=80 and poisoned the filter.
 const float ADC_BAT_MIN_PLAUSIBLE_MV = 850.0f;   // ~35.6 V
 const float ADC_BAT_MAX_PLAUSIBLE_MV = 1500.0f;  // ~62.8 V
@@ -865,16 +865,9 @@ void TaskSampleData(void * pvParameters) {
             // Always — including after STOP (field: OVP at filt=74 after spike leaked in).
             const bool bat_v_implausible_now = (v_bat < 35.0f || v_bat > 62.0f);
             // Voltage-domain spike (field: +2.89 V ≈70 mV passed old 80 mV gate → false OVP).
-            // Near CV, 58→60 is real overshoot — do not hold last_good and keep PWM on.
-            const bool near_cv_real_rise =
-                !isnan(last_good_v_bat) &&
-                (last_good_v_bat >= 56.0f) &&
-                (v_bat >= 56.0f) &&
-                (v_bat <= 59.20f);
             const bool bat_v_step_spike =
                 !isnan(last_good_v_bat) &&
-                (v_bat > (last_good_v_bat + ADC_BAT_V_STEP_SPIKE_V)) &&
-                !near_cv_real_rise;
+                (v_bat > (last_good_v_bat + ADC_BAT_V_STEP_SPIKE_V));
             if (bat_v_implausible_now || bat_v_step_spike) {
                 if (!isnan(last_good_v_bat)) {
                     v_bat = last_good_v_bat;
@@ -982,15 +975,11 @@ void TaskSampleData(void * pvParameters) {
                 const bool filt_pack_ok = (v_bat_filt >= 35.0f && v_bat_filt <= 62.0f);
                 const bool raw_pack_ok = (v_bat >= 35.0f && v_bat <= 62.0f);
                 bool filt_trip = filt_pack_ok && (v_bat_filt >= HARD_OVP_TRIP_VOLTAGE);
-                const bool near_cv =
-                    (v_bat_filt >= 56.0f) ||
-                    (!isnan(last_good_v_bat) && last_good_v_bat >= 56.0f);
                 bool raw_trip_plausible =
                     raw_pack_ok &&
                     (v_bat >= HARD_OVP_TRIP_VOLTAGE) &&
                     filt_pack_ok &&
-                    ((v_bat_filt >= (HARD_OVP_TRIP_VOLTAGE - 1.5f)) ||
-                     (near_cv && v_bat_filt >= 56.0f)) &&
+                    (v_bat_filt >= (HARD_OVP_TRIP_VOLTAGE - 1.5f)) &&
                     (vbat_step < 8.0f);
                 if (filt_trip || raw_trip_plausible) {
                     if (hard_ovp_suspect_ms == 0) hard_ovp_suspect_ms = now;
