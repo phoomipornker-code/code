@@ -2,5 +2,5 @@
   cv58-boost-v14-forward-v84/cv58-boost-v14-forward-v84.ino
 
 Arduino IDE → Upload
-ต้องเห็น: [BOOT] cv58-boost-v14-forward-v89 | … CV=58.40V …
-CAL_SCALE_V_BAT = 42.3 (ค่าเดิมจาก v81)
+ต้องเห็น: [BOOT] cv58-boost-v14-forward-v90 | … CV=58.40V …
+CAL_SCALE_V_BAT = 41.5 (อ้างอิงจากโคด v81 ที่ส่งมา)

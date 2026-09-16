@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v89";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v90";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: Simulink cascade PI — V PI (58.4) → Iref → I PI → Duty → PWM.
 // Near-full: taper Iref before 57 V so one high cell can balance (BMS was cutting at 3 A).
@@ -109,7 +109,7 @@ const float OFFSET_I_SOLAR = 1659.7;
 const float OFFSET_I_AC    = 1646.9;
 const float OFFSET_I_BAT   = 1646.9;
 const float CAL_SCALE_V_AC    = 71.43;
-const float CAL_SCALE_V_BAT   = 42.3;
+const float CAL_SCALE_V_BAT   = 41.5;
 const float CAL_SCALE_I_SOLAR = 42.46;
 const float CAL_SCALE_I_AC    = 42.46;
 const float CAL_SCALE_I_BAT   = 42.46;

@@ -1,6 +1,8 @@
-# cv58-boost-v14-forward-v89
+# cv58-boost-v14-forward-v90
 
-คืน `CAL_SCALE_V_BAT = 42.3` ตามเฟิร์มแวร์ v81 ที่คุณเซ็ตไว้  
-(เคยถูกเปลี่ยนเป็น 41.5 ทำให้ Vbat ต่ำไป ~2%)
+คืนสเกลเซ็นเซอร์ตามโคด v81 ที่ส่งมา:
 
-เกต ADC spike กลับเป็นชุดเดิม — ไม่แตะ OFFSET / สเกลกระแส / สเกล AC
+- `CAL_SCALE_V_BAT = 41.5`
+- OFFSET / สเกล PV / AC / กระแส ไม่เปลี่ยน
+
+Forward PI, CV 58.4 V, Iref taper และ Serial 1 s ตอนชาร์จ คงเดิม
