@@ -3,11 +3,10 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v100";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v101";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: Simulink cascade PI — V PI (58.4) → Iref → I PI → Duty → PWM.
-// Pack filter stays 35–62 V so 90 V ADS never becomes Vf / OVP / FULL.
-// Do not graduate SoftStart→CC on timeout with I=0 (field v99 chased 3 A, AdsX ratchet).
+// ADS 90 V / 1.7 V is a BAT-sense glitch (not real pack V). Control uses Vf only.
 // Hardware design point: ~5 A at D≈45%; software CC setpoint is FWD_TARGET_CC_CURRENT.
 // =========================================================================
 // Hardware
@@ -61,14 +60,7 @@ const unsigned long HIGH_VOLTAGE_STOP_CONFIRM_MS = 80;
 const float CV_PEAK_NO_UP_MARGIN_V = 0.10f;      // freeze duty-up at target-0.10
 const float CV_OVERSHOOT_BLEED_MARGIN_V = 0.15f; // dump duty above target+0.15
 const float CV_ABS_CEILING_MARGIN_V = 0.45f;     // PWM off (Fwd 58.85 — never 60 V)
-// ADS >62 V is fly-up/glitch. Field v95: I=0.31 A still charging, ads=83.17
-// tripped [STOP] CV ceiling FULL HOLD while filt=55.97. Only trust it if I collapsed.
-// Field v97: SoftStart I=0 at 53 V + ADS=90 → same FULL HOLD, then auto-restart
-// because filt < 54 V — LCD backlight on (FULL) / off (charge blank) every ~1 s.
-const float CV_ADS_FLYUP_IABS_MAX_A = 0.15f;
-const float CV_ADS_FLYUP_IFILT_MAX_A = 0.20f;
-const float CV_ADS_FLYUP_MIN_FILT_V = 55.20f;  // ignore 90 V ADS for PACK FULL HOLD at ~53 V
-const unsigned long ADS_STAGE_OVER_CONFIRM_MS = 80;  // PWM-off STOP if ADS>62 holds (not FULL)
+// ADS 90 V is a BAT mux/glitch bug — never use it for CV / OVP / PWM cut.
 const float RESTART_CHARGE_VOLTAGE = 54.0;
 // =========================================================================
 // Forward (AC) cascade PI  (Simulink: 58.4 − V_OUT → V-PI → Iref → I-PI → Duty)
@@ -87,8 +79,7 @@ const float FWD_BALANCE_HOLD_V = 58.20f;     // Iref=0.35 A at FULL-detect V (wa
 const float FWD_BALANCE_CURRENT_A = 0.35f;   // passive BMS (~tens of mA) can catch up
 const float FWD_UNLOADED_I_A = 0.25f;        // Iabs below this near-full ⇒ pack/BMS not accepting
 const unsigned long FWD_UNLOADED_PWM_OFF_MS = 80;
-const unsigned long FWD_NO_CURRENT_STOP_MS = 800;   // F-CC I never started — stop 3 A chase
-const unsigned long FWD_ADS_OVER_HOLD_MS = 400;     // after AdsX keep duty 0 briefly
+const unsigned long FWD_NO_CURRENT_STOP_MS = 800;   // F-CC I never started
 const unsigned long FWD_SOFTSTART_MS = 5000;
 const unsigned long FWD_CV_ENTER_CONFIRM_MS = 200;
 const unsigned long FWD_CV_EXIT_CONFIRM_MS = 5000;
@@ -328,20 +319,11 @@ static inline float boostRunPI(float err, float kp, float ki, float dt,
     else *integ = iCandidate;
     return out;
 }
-// Voltage CV actually regulates: pack estimate plus this ADS sample.
-// 90 V fly-up is kept out of v_bat_filt, but still drives duty-down when I has collapsed.
-static inline bool cvCurrentCollapsed() {
-    return (i_bat_charge_abs < CV_ADS_FLYUP_IABS_MAX_A) &&
-           (i_bat_charge_filt < CV_ADS_FLYUP_IFILT_MAX_A);
-}
+// Pack CV sense: 35–62 V only. ADS 90 V / 1.7 V is a glitch — do not cut PWM from it.
 static inline bool cvInSoftStart() {
     if (currentState == STATE_FORWARD) return forwardMode == FWD_SOFTSTART;
     if (currentState == STATE_BOOST) return boostNewMode == BOOST_NEW_SOFTSTART;
     return false;
-}
-static inline bool cvFiltInFlyupBand() {
-    const float filt = v_bat_filt;
-    return (filt >= CV_ADS_FLYUP_MIN_FILT_V) && (filt <= 62.0f);
 }
 static inline void latchChargeFullHold() {
     charge_full_hold = true;
@@ -356,28 +338,17 @@ static inline float cvSenseVoltage() {
     const float ads = v_bat_ads;
     if (ads >= 35.0f && ads <= 62.0f) {
         v = max(v, ads);
-    } else if (raw_duty > 0 && ads > 62.0f &&
-               !cvInSoftStart() &&
-               cvCurrentCollapsed() &&
-               cvFiltInFlyupBand() &&
-               (currentState != STATE_FORWARD || fwd_saw_charge_i)) {
-        v = max(v, ads);
     }
     return v;
 }
-// PWM-off FULL HOLD only if the pack is actually near CV.
-// SoftStart I=0 at 53 V is not a fly-up — I never started (field v97 LCD flicker).
+// FULL HOLD only from in-pack voltage near CV — never from ADS 90 V glitch.
 static inline bool cvPeakIsRealPackCeiling(float vPeak, float cvTgt) {
-    (void)cvTgt;
     if (cvInSoftStart()) return false;
     const float filt = v_bat_filt;
     const bool filtInPack = (filt >= 35.0f) && (filt <= 62.0f);
-    const bool packNearCv = filtInPack && cvFiltInFlyupBand();
+    const bool packNearCv = filtInPack && (filt >= (cvTgt - 1.50f));
     const bool peakInPack = (vPeak >= 35.0f) && (vPeak <= 62.0f);
-    if (peakInPack && packNearCv) return true;
-    if (cvCurrentCollapsed() && packNearCv &&
-        (currentState != STATE_FORWARD || fwd_saw_charge_i)) return true;
-    return false;
+    return peakInPack && packNearCv;
 }
 static inline int boostEstimateDutyRaw(float vin, float vout, int maxDuty) {
     float vinUse = (vin > 38.0f) ? vin : 38.0f;
@@ -835,7 +806,6 @@ void TaskSampleData(void * pvParameters) {
     unsigned long full_condition_start_ms = 0;
     unsigned long fwd_full_condition_start_ms = 0;
     unsigned long high_voltage_stop_start_ms = 0;
-    unsigned long ads_flyup_since_ms = 0;
     float last_valid_raw_mv_v0 = NAN;
     float last_valid_raw_mv_v1 = NAN;  // AC bridge
     float last_valid_raw_mv_v2 = NAN;
@@ -1354,7 +1324,6 @@ void TaskSampleData(void * pvParameters) {
             fwdCurrIntegrator = 0.0f;
             fwd_unload_since_ms = 0;
             fwd_saw_charge_i = false;
-            ads_flyup_since_ms = 0;
         }
         if (system_ON && currentState != STATE_OFF) {
             int allowed_max_duty = (currentState == STATE_FORWARD) ? MAX_DUTY_FORWARD : MAX_DUTY_BOOST;
@@ -1371,37 +1340,16 @@ void TaskSampleData(void * pvParameters) {
                 const bool iDead = (i_bat_charge_abs < FWD_UNLOADED_I_A) &&
                                    (i_bat_charge_filt < FWD_UNLOADED_I_A);
                 const bool dutyTrying = (raw_duty > 20) || (duty_accumulator > 20.0f);
-                // After current was seen: BMS cut. Before any current: F-CC 3 A chase into open output
-                // (field v99: I=0, Iref=3, duty 0→24, AdsX 91 V, repeat).
-                const bool packUnloaded = iDead && dutyTrying &&
-                    (fwd_saw_charge_i
-                         ? (vPeak >= FWD_CC_TAPER_START_V)
-                         : (forwardMode != FWD_SOFTSTART));
+                const bool packUnloaded = fwd_saw_charge_i &&
+                                          (vPeak >= FWD_CC_TAPER_START_V) &&
+                                          iDead && dutyTrying;
+                // 90 V / 1.7 V = ADS bug. Skip duty-up this tick; do not dump PWM.
                 const bool adsPackOk = (v_bat_ads >= 35.0f) && (v_bat_ads <= 62.0f);
-                const bool adsStageOver = (v_bat_ads > 62.0f);
-                static unsigned long fwd_ads_hold_until_ms = 0;
-                if (adsStageOver) fwd_ads_hold_until_ms = now + FWD_ADS_OVER_HOLD_MS;
-                const bool adsHold = (fwd_ads_hold_until_ms != 0) && (now < fwd_ads_hold_until_ms);
-                if (!adsHold) fwd_ads_hold_until_ms = 0;
                 const bool freezeDutyUp = (!ac_fake_low && ((v_ac_in < MIN_AC_VOLTAGE) || ac_is_collapsing)) ||
                                           (v_ac_in < FWD_AC_HOLD_CLIMB_V && raw_duty > 40 && !ac_fake_low) ||
                                           (vPeak >= (TARGET_CV_VOLTAGE - CV_PEAK_NO_UP_MARGIN_V)) ||
                                           packUnloaded ||
-                                          adsStageOver ||
-                                          !adsPackOk ||
-                                          adsHold;
-                if (adsStageOver || adsHold) {
-                    duty_accumulator = 0.0f;
-                    fwdCurrIntegrator = 0.0f;
-                }
-                if (adsStageOver && !fwd_saw_charge_i && forwardMode != FWD_SOFTSTART) {
-                    Serial.printf("[STOP] FORWARD AdsX no-current Vads=%.2f filt=%.2f (not FULL)\n",
-                                  v_bat_ads, v_bat_filt);
-                    system_ON = false;
-                    clearChargeFullHold();
-                    disablePowerStage();
-                    lcd_force_refresh = true;
-                }
+                                          !adsPackOk;
                 if (forwardMode == FWD_DONE) {
                     duty_accumulator = 0.0f;
                     fwdVoltIntegrator = 0.0f;
@@ -1821,28 +1769,7 @@ void TaskSampleData(void * pvParameters) {
                 duty_accumulator = boostClampf(duty_accumulator, 0.0f, (float)allowed_max_duty);
             }
             duty_accumulator = constrain(duty_accumulator, 0.0, (float)allowed_max_duty);
-            // Pack filter rejects ADS >62 V (Vf stays ~53) so OVP/FULL never see 90 V.
-            // Cut PWM from this-sample ADS anyway — including SoftStart. Do not FULL HOLD
-            // (that auto-restarted at 53 V and blinked the LCD).
-            if (v_bat_ads > 62.0f) {
-                duty_accumulator = 0.0f;
-                if (currentState == STATE_FORWARD) fwdCurrIntegrator = 0.0f;
-                else if (currentState == STATE_BOOST) boostNewCurrIntegrator = 0.0f;
-                if (ads_flyup_since_ms == 0) ads_flyup_since_ms = now;
-                if ((now - ads_flyup_since_ms) >= ADS_STAGE_OVER_CONFIRM_MS) {
-                    system_ON = false;
-                    clearChargeFullHold();
-                    disablePowerStage();
-                    lcd_force_refresh = true;
-                    ads_flyup_since_ms = 0;
-                    Serial.printf("[STOP] ADS fly-up PWM-off V=%.2f filt=%.2f (not FULL)\n",
-                                  v_bat_ads, v_bat_filt);
-                }
-            } else {
-                ads_flyup_since_ms = 0;
-            }
-            // Hard CV ceiling vs active pack target — do not let the pack fly to 60 V.
-            // Skip FULL HOLD during SoftStart; ADS>62 is handled above.
+            // Hard CV ceiling vs filtered pack — ADS 90 V glitch is ignored.
             if (!cvInSoftStart()) {
                 const float vPeakNow = cvSenseVoltage();
                 const float cvTgt = (currentState == STATE_BOOST)
@@ -1910,7 +1837,6 @@ void TaskSampleData(void * pvParameters) {
             full_condition_start_ms = 0;
             fwd_full_condition_start_ms = 0;
             high_voltage_stop_start_ms = 0;
-            ads_flyup_since_ms = 0;
         }
         last_millis = now;
         active_duty_percent = round(((float)raw_duty * 100.0) / 1023.0);
