@@ -16,8 +16,11 @@ const int BUTTON_START_PIN = 25;
 const int BUTTON_STOP_PIN  = 26;
 const int PWM_FORWARD_PIN  = 14;
 const int PWM_BOOST_PIN    = 27;
-const int PWM_FREQ         = 50000;
+const int PWM_FORWARD_FREQ = 67000;
+const int PWM_BOOST_FREQ   = 50000;
 const int PWM_RES          = 10;
+const int PWM_FORWARD_CHANNEL = 0;
+const int PWM_BOOST_CHANNEL   = 2; // Separate timer from channel 0
 const int PWM_FULL_SCALE   = (1 << PWM_RES) - 1; // 1023
 
 Adafruit_ADS1115 ads_volt;
@@ -428,8 +431,15 @@ void setup() {
     pinMode(BUTTON_START_PIN, INPUT_PULLUP);
     pinMode(BUTTON_STOP_PIN, INPUT_PULLUP);
 
-    ledcAttach(PWM_FORWARD_PIN, PWM_FREQ, PWM_RES);
-    ledcAttach(PWM_BOOST_PIN, PWM_FREQ, PWM_RES);
+    bool forwardPwmOk = ledcAttachChannel(
+        PWM_FORWARD_PIN, PWM_FORWARD_FREQ, PWM_RES, PWM_FORWARD_CHANNEL
+    );
+    bool boostPwmOk = ledcAttachChannel(
+        PWM_BOOST_PIN, PWM_BOOST_FREQ, PWM_RES, PWM_BOOST_CHANNEL
+    );
+    if (!forwardPwmOk || !boostPwmOk) {
+        Serial.println("[FATAL] LEDC PWM initialization failed");
+    }
     disablePowerStage();
 
     Wire.begin(21, 22);
@@ -438,7 +448,7 @@ void setup() {
 
     bool voltOk = ads_volt.begin(0x48);
     bool currOk = ads_curr.begin(0x49);
-    sensor_init_ok = voltOk && currOk;
+    sensor_init_ok = voltOk && currOk && forwardPwmOk && boostPwmOk;
 
     i2cMutex = xSemaphoreCreateMutex();
     if (i2cMutex == NULL) {
