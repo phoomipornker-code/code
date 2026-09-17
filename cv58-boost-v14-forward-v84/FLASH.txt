@@ -1,0 +1,7 @@
+เปิดโฟลเดอร์:
+  cv58-boost-v14-forward-v84/cv58-boost-v14-forward-v84.ino
+
+Arduino IDE → Upload
+ต้องเห็น: [BOOT] cv58-boost-v14-forward-v101
+90 V / 1.7 V = บั๊ก ADS — ไม่ตัด PWM จากค่านั้น
+Vf ~53 V ยังใช้ควบคุมต่อ
