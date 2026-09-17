@@ -22,7 +22,7 @@
  * BMS-open and charge-restart logic from the old charger are removed.
  */
 
-const char *FW_VERSION_TAG = "v81-control-psu-v1";
+const char *FW_VERSION_TAG = "v81-control-psu-quiet-v2";
 
 // -------------------------------------------------------------------------
 // Hardware
@@ -109,29 +109,29 @@ const float BOOST_CV_ENTRY_V = BOOST_OUTPUT_VOLTAGE_V - 0.50f;
 const float BOOST_CV_EXIT_V = BOOST_OUTPUT_VOLTAGE_V - 1.20f;
 const unsigned long BOOST_CV_EXIT_CONFIRM_MS = 5000;
 const unsigned long BOOST_MPPT_UPDATE_MS = 100;
-const float BOOST_MPPT_STEP_V = 0.10f;
-const float BOOST_MPPT_VREF_MIN = 40.0f;
-const float BOOST_MPPT_VREF_MAX = 45.0f;
-const float BOOST_DUTY_SLEW_UP   = 4.0f;
-const float BOOST_DUTY_SLEW_DOWN = 6.0f;
+const float BOOST_MPPT_DEADBAND_V = 0.20f;
+const float BOOST_MPPT_IREF_STEP_UP_A = 0.03f;
+const float BOOST_MPPT_IREF_STEP_DOWN_A = 0.08f;
+const float BOOST_DUTY_SLEW_UP   = 2.0f;
+const float BOOST_DUTY_SLEW_DOWN = 4.0f;
 
 // Forward: original v81 step/hysteresis controller (no PI)
 const float FWD_CV_ENTRY_V = FORWARD_OUTPUT_VOLTAGE_V - 1.00f;
 const float FWD_CV_EXIT_V = FORWARD_OUTPUT_VOLTAGE_V - 1.80f;
 const float FWD_CV_NEAR_BAND_V = 0.30f;
-const float FWD_CV_HOLD_BAND_V = 0.05f;
-const float FWD_CC_HOLD_BAND_A = 0.10f;
+const float FWD_CV_HOLD_BAND_V = 0.10f;
+const float FWD_CC_HOLD_BAND_A = 0.15f;
 const float FWD_CC_FAR_BAND_A = 0.60f;
-const float FWD_STEP_UP_SOFT = 0.8f;
-const float FWD_STEP_UP_CC = 0.6f;
-const float FWD_STEP_UP_CC_FAR = 1.2f;
-const float FWD_STEP_DOWN_CC = 1.5f;
-const float FWD_STEP_DOWN_CC_FINE = 0.6f;
-const float FWD_STEP_UP_CV = 0.40f;
-const float FWD_STEP_UP_CV_NEAR = 0.20f;
-const float FWD_STEP_DOWN_CV = 0.80f;
-const float FWD_STEP_DOWN_CV_FINE = 0.35f;
-const float FWD_STEP_DOWN_CV_OVER = 1.50f;
+const float FWD_STEP_UP_SOFT = 0.4f;
+const float FWD_STEP_UP_CC = 0.3f;
+const float FWD_STEP_UP_CC_FAR = 0.6f;
+const float FWD_STEP_DOWN_CC = 0.8f;
+const float FWD_STEP_DOWN_CC_FINE = 0.3f;
+const float FWD_STEP_UP_CV = 0.20f;
+const float FWD_STEP_UP_CV_NEAR = 0.10f;
+const float FWD_STEP_DOWN_CV = 0.40f;
+const float FWD_STEP_DOWN_CV_FINE = 0.15f;
+const float FWD_STEP_DOWN_CV_OVER = 0.80f;
 const float FWD_DC_HOLD_CLIMB_V = 115.0f;
 const float FWD_SOFTSTART_SEED_DUTY = 60.0f;
 const float FWD_NS_NP_EST = 0.70f;
@@ -139,6 +139,7 @@ const float FWD_SOFTSTART_SEED_FRAC = 0.45f;
 
 const unsigned long BOOST_SOFTSTART_MS   = 2500;
 const unsigned long FORWARD_SOFTSTART_MS = 5000;
+const unsigned long DEBUG_SERIAL_INTERVAL_MS = 5000;
 
 // -------------------------------------------------------------------------
 // Calibration retained from the old working firmware
@@ -617,37 +618,19 @@ static void runBoostV81Controller(float dt, unsigned long now,
         if (boostLastMpptUpdateMs == 0 ||
             now - boostLastMpptUpdateMs >= BOOST_MPPT_UPDATE_MS) {
             boostLastMpptUpdateMs = now;
-            float power = vPv * fabsf(iPv);
-            float deltaPower = power - boostLastPower;
-            float deltaVoltage = vPv - boostLastPvVoltage;
-
-            if (fabsf(deltaPower) > 0.2f) {
-                if (deltaPower > 0.0f) {
-                    boostMpptDirection =
-                        deltaVoltage >= 0.0f ? 1 : -1;
-                } else {
-                    boostMpptDirection =
-                        deltaVoltage >= 0.0f ? -1 : 1;
-                }
+            float pvError = vPv - PV_MPPT_VOLTAGE_V;
+            if (pvError > BOOST_MPPT_DEADBAND_V) {
+                boostMpptCurrentReference +=
+                    BOOST_MPPT_IREF_STEP_UP_A;
+            } else if (pvError < -BOOST_MPPT_DEADBAND_V) {
+                boostMpptCurrentReference -=
+                    BOOST_MPPT_IREF_STEP_DOWN_A;
             }
-
-            boostPvReference +=
-                boostMpptDirection * BOOST_MPPT_STEP_V;
-            boostPvReference = clampFloat(
-                boostPvReference,
-                BOOST_MPPT_VREF_MIN,
-                BOOST_MPPT_VREF_MAX
-            );
-
-            boostMpptCurrentReference +=
-                0.08f * (vPv - boostPvReference);
             boostMpptCurrentReference = clampFloat(
                 boostMpptCurrentReference,
                 0.0f,
                 OUTPUT_CURRENT_LIMIT_A
             );
-            boostLastPower = power;
-            boostLastPvVoltage = vPv;
         }
 
         activeCurrentReference =
@@ -687,7 +670,7 @@ static void runBoostV81Controller(float dt, unsigned long now,
             BOOST_DUTY_SLEW_DOWN
         );
 
-        if (vOutFiltered >= BOOST_CV_ENTRY_V) {
+        if (fmaxf(vOut, vOutFiltered) >= BOOST_CV_ENTRY_V) {
             boostControlMode = BOOST_CV;
             boostVoltIntegrator = 0.0f;
             boostCurrIntegrator = 0.0f;
@@ -700,8 +683,10 @@ static void runBoostV81Controller(float dt, unsigned long now,
     }
 
     // Continuous CV mode: unlike the charger, there is no FULL/DONE state.
+    float boostControlVoltage =
+        fmaxf(vOut, vOutFiltered);
     float voltageError =
-        BOOST_OUTPUT_VOLTAGE_V - vOutFiltered;
+        BOOST_OUTPUT_VOLTAGE_V - boostControlVoltage;
     float requestedCurrent = runPI(
         voltageError,
         BOOST_VOLT_KP,
@@ -737,14 +722,14 @@ static void runBoostV81Controller(float dt, unsigned long now,
     float stepLimit = nearVoltage ? 0.8f : 2.5f;
     dutyDelta = clampFloat(dutyDelta, -stepLimit, stepLimit);
 
-    if (vOutFiltered >= BOOST_OUTPUT_VOLTAGE_V - 0.10f &&
+    if (boostControlVoltage >= BOOST_OUTPUT_VOLTAGE_V - 0.10f &&
         dutyDelta > 0.0f) {
         dutyDelta = 0.0f;
     }
-    if (vOutFiltered > BOOST_OUTPUT_VOLTAGE_V) {
+    if (boostControlVoltage > BOOST_OUTPUT_VOLTAGE_V) {
         dutyDelta -=
             0.8f +
-            (vOutFiltered - BOOST_OUTPUT_VOLTAGE_V) * 4.0f;
+            (boostControlVoltage - BOOST_OUTPUT_VOLTAGE_V) * 4.0f;
         boostVoltIntegrator *= 0.85f;
     }
 
@@ -773,7 +758,9 @@ static void runBoostV81Controller(float dt, unsigned long now,
 
 static void runForwardV81Controller(unsigned long now,
                                     float softStartFraction) {
-    float controlCurrent = fmaxf(fabsf(iOut), iOutFiltered);
+    // Match the quiet v81 behavior: regulation follows the filtered current.
+    // Raw current is still used by applyOutputProtection() for fast safety.
+    float controlCurrent = iOutFiltered;
     bool freezeDutyUp =
         vDc < FWD_DC_HOLD_CLIMB_V ||
         inputBadSinceMs != 0;
@@ -997,7 +984,7 @@ static void TaskControl(void *parameter) {
             }
         }
 
-        if (now - lastDebugMs >= 1000) {
+        if (now - lastDebugMs >= DEBUG_SERIAL_INTERVAL_MS) {
             lastDebugMs = now;
             float inputVoltage =
                 selectedMode == MODE_BOOST ? vPv : vDc;
