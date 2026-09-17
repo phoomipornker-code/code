@@ -104,21 +104,29 @@ const float BOOST_MPPT_KP = 10.0f;
 const float BOOST_MPPT_KI = 40.0f;
 
 // Boost current PI. These are the proven old-hardware values selected by user.
-// Its output is in 10-bit PWM counts.
+// Its output is a duty increment in 10-bit PWM counts.
 const float BOOST_CURR_KP = 14.0f;
 const float BOOST_CURR_KI = 55.0f;
+const float BOOST_CURR_DELTA_MIN = -35.0f;
+const float BOOST_CURR_DELTA_MAX = 45.0f;
+const unsigned long BOOST_MPPT_UPDATE_MS = 100;
 
 // Forward cascade PI from the supplied Simulink diagram
 const float FORWARD_VOLT_KP = 15.0f;
 const float FORWARD_VOLT_KI = 1.0f;
 const float FORWARD_CURR_KP = 0.5f;
 const float FORWARD_CURR_KI = 23.0f;
+const float FORWARD_CURR_DELTA_MIN = -4.0f;
+const float FORWARD_CURR_DELTA_MAX = 1.2f;
+const float FORWARD_CURR_DELTA_MAX_NEAR = 0.20f;
+const float FORWARD_NEAR_VOLTAGE_BAND_V = 0.50f;
+const float FORWARD_FREEZE_UP_MARGIN_V = 0.10f;
 
 // Hardware slew limits, PWM counts per controller update
-const float BOOST_DUTY_SLEW_UP   = 3.0f;
-const float BOOST_DUTY_SLEW_DOWN = 10.0f;
-const float FORWARD_DUTY_SLEW_UP   = 2.0f;
-const float FORWARD_DUTY_SLEW_DOWN = 12.0f;
+const float BOOST_DUTY_SLEW_UP   = 4.0f;
+const float BOOST_DUTY_SLEW_DOWN = 6.0f;
+const float FORWARD_DUTY_SLEW_UP   = 1.2f;
+const float FORWARD_DUTY_SLEW_DOWN = 4.0f;
 
 // Soft-start ramps both the current request and the maximum allowed duty.
 const unsigned long BOOST_SOFTSTART_MS   = 2500;
@@ -180,6 +188,7 @@ volatile int activeDutyRaw = 0;
 volatile int activeDutyPercent = 0;
 volatile bool softStartActive = false;
 volatile int softStartPercent = 0;
+volatile bool lcdBlankedForRun = false;
 volatile unsigned long lastAdcSampleMs = 0;
 
 float currentOffsetPv  = DEFAULT_OFFSET_I_SOLAR;
@@ -192,9 +201,11 @@ float boostCurrIntegrator = 0.0f;
 float forwardVoltIntegrator = 0.0f;
 float forwardCurrIntegrator = 0.0f;
 float dutyAccumulator = 0.0f;
+float boostHeldMpptCurrent = 0.0f;
 
 unsigned long lastControlUs = 0;
 unsigned long softStartBeginMs = 0;
+unsigned long boostLastMpptUpdateMs = 0;
 unsigned long inputBadSinceMs = 0;
 unsigned long outputOcSinceMs = 0;
 
@@ -294,9 +305,11 @@ static void resetControllers() {
     forwardVoltIntegrator = 0.0f;
     forwardCurrIntegrator = 0.0f;
     activeCurrentReference = 0.0f;
+    boostHeldMpptCurrent = 0.0f;
     dutyAccumulator = 0.0f;
     lastControlUs = 0;
     softStartBeginMs = 0;
+    boostLastMpptUpdateMs = 0;
     softStartActive = false;
     softStartPercent = 0;
     inputBadSinceMs = 0;
@@ -468,7 +481,8 @@ static bool updateMeasurements() {
 // -------------------------------------------------------------------------
 // Controllers
 // -------------------------------------------------------------------------
-static float runBoostController(float dt, float currentLimit) {
+static float runBoostController(float dt, float currentLimit,
+                                unsigned long now) {
     // Output-voltage loop: produces 0..currentLimit A.
     float cvCurrent = runPI(
         BOOST_OUTPUT_VOLTAGE_V - vOutFiltered,
@@ -485,32 +499,44 @@ static float runBoostController(float dt, float currentLimit) {
      * Positive error means PV voltage is above 42 V, so more current may be
      * drawn. Negative error reduces current to let the panel recover.
      */
-    float mpptCurrent = runPI(
-        vPv - PV_MPPT_VOLTAGE_V,
-        BOOST_MPPT_KP,
-        BOOST_MPPT_KI,
-        dt,
-        &boostMpptIntegrator,
-        0.0f,
-        currentLimit
-    );
+    // Hold the MPPT command between 100 ms updates, as in the proven code.
+    if (boostLastMpptUpdateMs == 0 ||
+        now - boostLastMpptUpdateMs >= BOOST_MPPT_UPDATE_MS) {
+        float mpptDt = boostLastMpptUpdateMs == 0
+            ? BOOST_MPPT_UPDATE_MS * 0.001f
+            : (now - boostLastMpptUpdateMs) * 0.001f;
+        boostLastMpptUpdateMs = now;
+        mpptDt = clampFloat(mpptDt, 0.05f, 0.20f);
+        boostHeldMpptCurrent = runPI(
+            vPv - PV_MPPT_VOLTAGE_V,
+            BOOST_MPPT_KP,
+            BOOST_MPPT_KI,
+            mpptDt,
+            &boostMpptIntegrator,
+            0.0f,
+            currentLimit
+        );
+    }
+    boostHeldMpptCurrent =
+        clampFloat(boostHeldMpptCurrent, 0.0f, currentLimit);
 
     activeCurrentReference =
-        fminf(cvCurrent, fminf(mpptCurrent, currentLimit));
+        fminf(cvCurrent, fminf(boostHeldMpptCurrent, currentLimit));
 
-    // Inner output-current PI returns a 10-bit PWM target.
+    // Inner PI returns delta-duty in raw PWM counts, not absolute duty.
     return runPI(
         activeCurrentReference - iOutFiltered,
         BOOST_CURR_KP,
         BOOST_CURR_KI,
         dt,
         &boostCurrIntegrator,
-        0.0f,
-        (float)MAX_DUTY_BOOST
+        BOOST_CURR_DELTA_MIN,
+        BOOST_CURR_DELTA_MAX
     );
 }
 
-static float runForwardController(float dt, float currentLimit) {
+static float runForwardController(float dt, float currentLimit,
+                                  float *maximumDutyIncrease) {
     // Outer voltage PI: CV is a 0..currentLimit A current request.
     activeCurrentReference = runPI(
         FORWARD_OUTPUT_VOLTAGE_V - vOutFiltered,
@@ -522,18 +548,29 @@ static float runForwardController(float dt, float currentLimit) {
         currentLimit
     );
 
-    // Inner current PI returns normalized duty 0..0.45.
-    float dutyFraction = runPI(
+    bool nearVoltage =
+        vOutFiltered >=
+        (FORWARD_OUTPUT_VOLTAGE_V - FORWARD_NEAR_VOLTAGE_BAND_V);
+    bool freezeDutyIncrease =
+        vOutFiltered >=
+        (FORWARD_OUTPUT_VOLTAGE_V - FORWARD_FREEZE_UP_MARGIN_V);
+
+    *maximumDutyIncrease = freezeDutyIncrease
+        ? 0.0f
+        : (nearVoltage
+            ? FORWARD_CURR_DELTA_MAX_NEAR
+            : FORWARD_CURR_DELTA_MAX);
+
+    // Inner PI returns delta-duty in raw PWM counts.
+    return runPI(
         activeCurrentReference - iOutFiltered,
         FORWARD_CURR_KP,
         FORWARD_CURR_KI,
         dt,
         &forwardCurrIntegrator,
-        0.0f,
-        FORWARD_DUTY_MAX_FRAC
+        FORWARD_CURR_DELTA_MIN,
+        *maximumDutyIncrease
     );
-
-    return dutyFraction * PWM_FULL_SCALE;
 }
 
 static void applyOutputProtection(unsigned long now) {
@@ -603,8 +640,10 @@ static void TaskControl(void *parameter) {
             }
         }
 
+        // Never change duty from stale feedback. Hold the previous PWM until
+        // both ADS1115 devices produced a complete new measurement frame.
         if (powerStageActive && outputEnabled &&
-            faultCode == FAULT_NONE) {
+            faultCode == FAULT_NONE && sampleOkay) {
             unsigned long controlNowMs = millis();
             unsigned long nowUs = micros();
             float dt = 0.020f;
@@ -632,7 +671,11 @@ static void TaskControl(void *parameter) {
                 OUTPUT_CURRENT_LIMIT_A * softStartFraction;
 
             if (selectedMode == MODE_BOOST) {
-                dutyTarget = runBoostController(dt, softCurrentLimit);
+                if (softStartActive) boostCurrIntegrator = 0.0f;
+                float dutyDelta = runBoostController(
+                    dt, softCurrentLimit, controlNowMs
+                );
+                dutyTarget = dutyAccumulator + dutyDelta;
                 maximumDuty = MAX_DUTY_BOOST;
                 dutyAccumulator = applySlew(
                     dutyTarget,
@@ -641,12 +684,17 @@ static void TaskControl(void *parameter) {
                     BOOST_DUTY_SLEW_DOWN
                 );
             } else {
-                dutyTarget = runForwardController(dt, softCurrentLimit);
+                if (softStartActive) forwardCurrIntegrator = 0.0f;
+                float maximumDutyIncrease = FORWARD_CURR_DELTA_MAX;
+                float dutyDelta = runForwardController(
+                    dt, softCurrentLimit, &maximumDutyIncrease
+                );
+                dutyTarget = dutyAccumulator + dutyDelta;
                 maximumDuty = MAX_DUTY_FORWARD;
                 dutyAccumulator = applySlew(
                     dutyTarget,
                     dutyAccumulator,
-                    FORWARD_DUTY_SLEW_UP,
+                    maximumDutyIncrease,
                     FORWARD_DUTY_SLEW_DOWN
                 );
             }
@@ -821,9 +869,24 @@ static void TaskButtonsDisplay(void *parameter) {
             }
         }
 
-        if (now - lastDisplayMs >= 500) {
+        // The old field-proven firmware stopped all LCD I2C traffic while
+        // switching. This avoids periodic ADC latency and audible modulation.
+        if (outputEnabled && faultCode == FAULT_NONE) {
+            if (!lcdBlankedForRun &&
+                xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                lcd.clear();
+                lcd.noBacklight();
+                lcdBlankedForRun = true;
+                xSemaphoreGive(i2cMutex);
+            }
+        } else if (now - lastDisplayMs >= 500) {
             lastDisplayMs = now;
             if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                if (lcdBlankedForRun) {
+                    lcd.backlight();
+                    lcd.clear();
+                    lcdBlankedForRun = false;
+                }
                 drawDisplay();
                 xSemaphoreGive(i2cMutex);
             }
