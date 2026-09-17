@@ -82,12 +82,13 @@ const float DC_START_MIN_V       = 120.0f;
 const float DC_RUNNING_MIN_V     = 105.0f;
 const float DC_INPUT_MAX_V       = 180.0f;
 const float DC_INPUT_CURRENT_MAX_A = 2.5f;
+const unsigned long FORWARD_INPUT_GLITCH_HOLD_MS = 1500;
 
 // Output protection. This must remain above the 58.4 V regulation target.
 const float OUTPUT_OVP_TRIP_V    = 60.0f;
 const float OUTPUT_OVP_RELEASE_V = 58.0f;
-const float OUTPUT_OC_WARN_A     = 5.25f;
-const float OUTPUT_OC_TRIP_A     = 6.0f;
+const float OUTPUT_OC_WARN_A     = OUTPUT_CURRENT_LIMIT_A + 0.25f;
+const float OUTPUT_OC_TRIP_A     = OUTPUT_CURRENT_LIMIT_A + 1.0f;
 const unsigned long OUTPUT_OC_CONFIRM_MS = 100;
 const unsigned long INPUT_BAD_CONFIRM_MS = 1000;
 const unsigned long ADC_STALE_TIMEOUT_MS = 1000;
@@ -117,8 +118,9 @@ const float FORWARD_VOLT_KI = 1.0f;
 const float FORWARD_CURR_KP = 0.5f;
 const float FORWARD_CURR_KI = 23.0f;
 const float FORWARD_CURR_DELTA_MIN = -4.0f;
-const float FORWARD_CURR_DELTA_MAX = 1.2f;
+const float FORWARD_CURR_DELTA_MAX = 0.6f;
 const float FORWARD_CURR_DELTA_MAX_NEAR = 0.20f;
+const float FORWARD_CURRENT_HOLD_BAND_A = 0.10f;
 const float FORWARD_NEAR_VOLTAGE_BAND_V = 0.50f;
 const float FORWARD_FREEZE_UP_MARGIN_V = 0.10f;
 
@@ -202,10 +204,13 @@ float forwardVoltIntegrator = 0.0f;
 float forwardCurrIntegrator = 0.0f;
 float dutyAccumulator = 0.0f;
 float boostHeldMpptCurrent = 0.0f;
+float lastGoodDcVoltage = NAN;
 
 unsigned long lastControlUs = 0;
 unsigned long softStartBeginMs = 0;
 unsigned long boostLastMpptUpdateMs = 0;
+unsigned long forwardInputGlitchSinceMs = 0;
+unsigned long lastInputGlitchLogMs = 0;
 unsigned long inputBadSinceMs = 0;
 unsigned long outputOcSinceMs = 0;
 
@@ -313,6 +318,7 @@ static void resetControllers() {
     softStartActive = false;
     softStartPercent = 0;
     inputBadSinceMs = 0;
+    forwardInputGlitchSinceMs = 0;
     outputOcSinceMs = 0;
 }
 
@@ -456,6 +462,46 @@ static bool updateMeasurements() {
         return false;
     }
 
+    /*
+     * The working v95 firmware held brief DC-input dropouts while output
+     * current was still flowing. A reading such as Vin=3 V with Iin=2 A,
+     * followed by 148 V, is an ADS/I2C/EMI glitch rather than a real outage.
+     */
+    unsigned long sampleNow = millis();
+    bool forwardRunning =
+        powerStageActive && selectedMode == MODE_FORWARD;
+    bool outputStillFlowing =
+        fabsf(newIOut) > 0.35f || iOutFiltered > 0.35f;
+    bool severeDcDrop =
+        newVDc < 20.0f ||
+        (!isnan(lastGoodDcVoltage) &&
+         newVDc < lastGoodDcVoltage - 60.0f);
+
+    if (forwardRunning && outputStillFlowing && severeDcDrop &&
+        !isnan(lastGoodDcVoltage)) {
+        if (forwardInputGlitchSinceMs == 0) {
+            forwardInputGlitchSinceMs = sampleNow;
+        }
+        if (sampleNow - forwardInputGlitchSinceMs <
+            FORWARD_INPUT_GLITCH_HOLD_MS) {
+            if (sampleNow - lastInputGlitchLogMs >= 1000) {
+                lastInputGlitchLogMs = sampleNow;
+                Serial.printf(
+                    "[WARN] DC input ADC glitch %.1fV; holding %.1fV\n",
+                    newVDc,
+                    lastGoodDcVoltage
+                );
+            }
+            newVDc = lastGoodDcVoltage;
+        }
+    } else {
+        forwardInputGlitchSinceMs = 0;
+    }
+
+    if (newVDc >= DC_RUNNING_MIN_V && newVDc <= DC_INPUT_MAX_V) {
+        lastGoodDcVoltage = newVDc;
+    }
+
     vPv = newVPv;
     vDc = newVDc;
     vOut = newVOut;
@@ -474,7 +520,7 @@ static bool updateMeasurements() {
 
     vOutFiltered = vOutFilterSum / (float)filterCount;
     iOutFiltered = iOutFilterSum / (float)filterCount;
-    lastAdcSampleMs = millis();
+    lastAdcSampleMs = sampleNow;
     return true;
 }
 
@@ -561,9 +607,22 @@ static float runForwardController(float dt, float currentLimit,
             ? FORWARD_CURR_DELTA_MAX_NEAR
             : FORWARD_CURR_DELTA_MAX);
 
+    // Use the higher raw/filtered current while current is rising. The
+    // 8-sample filter otherwise keeps increasing duty for several stale
+    // frames after the real current has already crossed Iref.
+    float controlCurrent =
+        fmaxf(fabsf(iOut), iOutFiltered);
+    float currentError =
+        activeCurrentReference - controlCurrent;
+
+    if (fabsf(currentError) <= FORWARD_CURRENT_HOLD_BAND_A) {
+        forwardCurrIntegrator *= 0.90f;
+        return 0.0f;
+    }
+
     // Inner PI returns delta-duty in raw PWM counts.
-    return runPI(
-        activeCurrentReference - iOutFiltered,
+    float dutyDelta = runPI(
+        currentError,
         FORWARD_CURR_KP,
         FORWARD_CURR_KI,
         dt,
@@ -571,6 +630,21 @@ static float runForwardController(float dt, float currentLimit,
         FORWARD_CURR_DELTA_MIN,
         *maximumDutyIncrease
     );
+
+    // Never permit stored positive integral to raise duty while measured
+    // current is already above its reference.
+    if (currentError < -FORWARD_CURRENT_HOLD_BAND_A &&
+        dutyDelta > 0.0f) {
+        dutyDelta = 0.0f;
+        forwardCurrIntegrator *= 0.75f;
+    }
+    if (controlCurrent >
+        activeCurrentReference + 0.25f) {
+        dutyDelta = fminf(dutyDelta, -0.8f);
+        forwardCurrIntegrator *= 0.80f;
+    }
+
+    return dutyDelta;
 }
 
 static void applyOutputProtection(unsigned long now) {
@@ -583,16 +657,17 @@ static void applyOutputProtection(unsigned long now) {
     }
 
     if (peakCurrent > OUTPUT_OC_WARN_A) {
-        // Fast duty reduction before the confirmed hard trip.
-        dutyAccumulator -= 10.0f +
-            (peakCurrent - OUTPUT_OC_WARN_A) * 12.0f;
+        // Controlled backoff from the field-proven firmware. A very large
+        // one-frame cut creates another low-frequency duty oscillation.
+        dutyAccumulator -= 2.0f +
+            (peakCurrent - OUTPUT_OC_WARN_A) * 3.0f;
         if (dutyAccumulator < 0.0f) dutyAccumulator = 0.0f;
     }
 
     if (peakCurrent >= OUTPUT_OC_TRIP_A) {
         if (outputOcSinceMs == 0) outputOcSinceMs = now;
         if (now - outputOcSinceMs >= OUTPUT_OC_CONFIRM_MS) {
-            tripFault(FAULT_OUTPUT_OC, "output exceeded 6A");
+            tripFault(FAULT_OUTPUT_OC, "output exceeded current limit");
         }
     } else {
         outputOcSinceMs = 0;
