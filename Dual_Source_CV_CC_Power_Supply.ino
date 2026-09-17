@@ -22,7 +22,7 @@
  * BMS-open and charge-restart logic from the old charger are removed.
  */
 
-const char *FW_VERSION_TAG = "v81-control-psu-quiet-3a-v3";
+const char *FW_VERSION_TAG = "forward-cascade-pi-quiet-3a-v4";
 
 // -------------------------------------------------------------------------
 // Hardware
@@ -115,23 +115,20 @@ const float BOOST_MPPT_IREF_STEP_DOWN_A = 0.08f;
 const float BOOST_DUTY_SLEW_UP   = 2.0f;
 const float BOOST_DUTY_SLEW_DOWN = 4.0f;
 
-// Forward: original v81 step/hysteresis controller (no PI)
+// Forward cascade PI: voltage PI -> 0..3 A Iref -> current PI -> delta duty
 const float FWD_CV_ENTRY_V = FORWARD_OUTPUT_VOLTAGE_V - 1.00f;
 const float FWD_CV_EXIT_V = FORWARD_OUTPUT_VOLTAGE_V - 1.80f;
-const float FWD_CV_NEAR_BAND_V = 0.30f;
-const float FWD_CV_HOLD_BAND_V = 0.10f;
+const float FWD_VOLT_KP = 15.0f;
+const float FWD_VOLT_KI = 1.0f;
+const float FWD_CURR_KP = 0.5f;
+const float FWD_CURR_KI = 23.0f;
+const float FWD_CURR_DELTA_MIN = -4.0f;
+const float FWD_CURR_DELTA_MAX = 0.60f;
+const float FWD_CURR_DELTA_MAX_NEAR = 0.20f;
+const float FWD_CV_NEAR_BAND_V = 0.50f;
+const float FWD_CV_FREEZE_UP_MARGIN_V = 0.10f;
 const float FWD_CC_HOLD_BAND_A = 0.15f;
-const float FWD_CC_FAR_BAND_A = 0.60f;
 const float FWD_STEP_UP_SOFT = 0.4f;
-const float FWD_STEP_UP_CC = 0.3f;
-const float FWD_STEP_UP_CC_FAR = 0.6f;
-const float FWD_STEP_DOWN_CC = 0.8f;
-const float FWD_STEP_DOWN_CC_FINE = 0.3f;
-const float FWD_STEP_UP_CV = 0.20f;
-const float FWD_STEP_UP_CV_NEAR = 0.10f;
-const float FWD_STEP_DOWN_CV = 0.40f;
-const float FWD_STEP_DOWN_CV_FINE = 0.15f;
-const float FWD_STEP_DOWN_CV_OVER = 0.80f;
 const float FWD_DC_HOLD_CLIMB_V = 115.0f;
 const float FWD_SOFTSTART_SEED_DUTY = 60.0f;
 const float FWD_NS_NP_EST = 0.70f;
@@ -220,6 +217,8 @@ float currentOffsetOut = DEFAULT_OFFSET_I_OUT;
 
 float boostCurrIntegrator = 0.0f;
 float boostVoltIntegrator = 0.0f;
+float forwardVoltIntegrator = 0.0f;
+float forwardCurrIntegrator = 0.0f;
 float dutyAccumulator = 0.0f;
 float boostPvReference = PV_MPPT_VOLTAGE_V;
 float boostLastPower = 0.0f;
@@ -330,6 +329,8 @@ static const char *faultName(FaultCode fault) {
 static void resetControllers() {
     boostCurrIntegrator = 0.0f;
     boostVoltIntegrator = 0.0f;
+    forwardVoltIntegrator = 0.0f;
+    forwardCurrIntegrator = 0.0f;
     boostControlMode = BOOST_SOFTSTART;
     forwardControlMode = FORWARD_SOFTSTART;
     activeCurrentReference = 0.0f;
@@ -756,10 +757,9 @@ static void runBoostV81Controller(float dt, unsigned long now,
     }
 }
 
-static void runForwardV81Controller(unsigned long now,
-                                    float softStartFraction) {
-    // Match the quiet v81 behavior: regulation follows the filtered current.
-    // Raw current is still used by applyOutputProtection() for fast safety.
+static void runForwardCascadePI(float dt, unsigned long now,
+                                float softStartFraction) {
+    // Filtered current keeps the PI quiet; raw current remains the fast guard.
     float controlCurrent = iOutFiltered;
     float fastCurrent = fmaxf(fabsf(iOut), iOutFiltered);
     bool freezeDutyUp =
@@ -773,6 +773,7 @@ static void runForwardV81Controller(unsigned long now,
         dutyAccumulator -=
             2.0f +
             (fastCurrent - OUTPUT_CURRENT_LIMIT_A) * 6.0f;
+        forwardCurrIntegrator *= 0.70f;
         if (dutyAccumulator < 0.0f) dutyAccumulator = 0.0f;
         return;
     }
@@ -787,73 +788,86 @@ static void runForwardV81Controller(unsigned long now,
         }
         if (controlCurrent >
             activeCurrentReference + FWD_CC_HOLD_BAND_A) {
-            dutyAccumulator -= FWD_STEP_DOWN_CC;
+            dutyAccumulator -= 0.8f;
         }
 
         if (now - softStartBeginMs >= FORWARD_SOFTSTART_MS) {
             forwardControlMode = FORWARD_CC;
+            forwardVoltIntegrator = 0.0f;
+            forwardCurrIntegrator = 0.0f;
         }
         return;
     }
 
-    if (forwardControlMode == FORWARD_CC) {
-        activeCurrentReference = OUTPUT_CURRENT_LIMIT_A;
-        float currentError =
-            activeCurrentReference - controlCurrent;
-
-        if (currentError > FWD_CC_HOLD_BAND_A) {
-            if (!freezeDutyUp) {
-                dutyAccumulator +=
-                    currentError > FWD_CC_FAR_BAND_A
-                        ? FWD_STEP_UP_CC_FAR
-                        : FWD_STEP_UP_CC;
-            }
-        } else if (currentError < -FWD_CC_HOLD_BAND_A) {
-            dutyAccumulator -=
-                currentError < -FWD_CC_FAR_BAND_A
-                    ? FWD_STEP_DOWN_CC
-                    : FWD_STEP_DOWN_CC_FINE;
-        }
-
-        if (vOutFiltered >= FWD_CV_ENTRY_V) {
-            forwardControlMode = FORWARD_CV;
-        }
-        return;
-    }
-
-    // Continuous Forward CV mode; no FULL/DONE or battery taper.
+    // Outer voltage PI generates the current reference and naturally moves
+    // between CC (Iref saturated at 3 A) and CV (Iref below 3 A).
     float voltageError =
         FORWARD_OUTPUT_VOLTAGE_V - vOutFiltered;
-    activeCurrentReference = OUTPUT_CURRENT_LIMIT_A;
+    activeCurrentReference = runPI(
+        voltageError,
+        FWD_VOLT_KP,
+        FWD_VOLT_KI,
+        dt,
+        &forwardVoltIntegrator,
+        0.0f,
+        OUTPUT_CURRENT_LIMIT_A
+    );
 
-    if (controlCurrent >
-        OUTPUT_CURRENT_LIMIT_A + FWD_CC_HOLD_BAND_A) {
-        dutyAccumulator -=
-            controlCurrent >
-                    OUTPUT_CURRENT_LIMIT_A + FWD_CC_FAR_BAND_A
-                ? FWD_STEP_DOWN_CC
-                : FWD_STEP_DOWN_CC_FINE;
-    } else if (voltageError > FWD_CV_HOLD_BAND_V) {
-        if (!freezeDutyUp &&
-            controlCurrent < OUTPUT_CURRENT_LIMIT_A) {
-            dutyAccumulator +=
-                voltageError > FWD_CV_NEAR_BAND_V
-                    ? FWD_STEP_UP_CV
-                    : FWD_STEP_UP_CV_NEAR;
-        }
-    } else if (voltageError < -FWD_CV_HOLD_BAND_V) {
-        float overVoltage = -voltageError;
-        dutyAccumulator -=
-            overVoltage > FWD_CV_NEAR_BAND_V
-                ? FWD_STEP_DOWN_CV_OVER
-                : (overVoltage > 0.12f
-                    ? FWD_STEP_DOWN_CV
-                    : FWD_STEP_DOWN_CV_FINE);
-    }
-
-    if (vOutFiltered <= FWD_CV_EXIT_V) {
+    if (activeCurrentReference >=
+            OUTPUT_CURRENT_LIMIT_A - 0.05f &&
+        vOutFiltered < FWD_CV_ENTRY_V) {
         forwardControlMode = FORWARD_CC;
+    } else {
+        forwardControlMode = FORWARD_CV;
     }
+
+    float currentError =
+        activeCurrentReference - controlCurrent;
+    bool nearVoltage =
+        vOutFiltered >=
+        FORWARD_OUTPUT_VOLTAGE_V - FWD_CV_NEAR_BAND_V;
+    bool freezeAtVoltage =
+        vOutFiltered >=
+        FORWARD_OUTPUT_VOLTAGE_V - FWD_CV_FREEZE_UP_MARGIN_V;
+
+    float maximumDutyIncrease =
+        (freezeDutyUp || freezeAtVoltage)
+            ? 0.0f
+            : (nearVoltage
+                ? FWD_CURR_DELTA_MAX_NEAR
+                : FWD_CURR_DELTA_MAX);
+
+    float dutyDelta;
+    if (fabsf(currentError) <= FWD_CC_HOLD_BAND_A) {
+        dutyDelta = 0.0f;
+        forwardCurrIntegrator *= 0.90f;
+    } else {
+        dutyDelta = runPI(
+            currentError,
+            FWD_CURR_KP,
+            FWD_CURR_KI,
+            dt,
+            &forwardCurrIntegrator,
+            FWD_CURR_DELTA_MIN,
+            maximumDutyIncrease
+        );
+    }
+
+    // Stored integral may never increase duty after current or voltage has
+    // crossed its command.
+    if ((currentError < -FWD_CC_HOLD_BAND_A ||
+         freezeAtVoltage) &&
+        dutyDelta > 0.0f) {
+        dutyDelta = 0.0f;
+        forwardCurrIntegrator *= 0.75f;
+    }
+
+    dutyAccumulator = applySlew(
+        dutyAccumulator + dutyDelta,
+        dutyAccumulator,
+        maximumDutyIncrease,
+        4.0f
+    );
 }
 
 static void applyOutputProtection(unsigned long now) {
@@ -959,7 +973,8 @@ static void TaskControl(void *parameter) {
                 );
             } else {
                 maximumDuty = MAX_DUTY_FORWARD;
-                runForwardV81Controller(
+                runForwardCascadePI(
+                    dt,
                     controlNowMs,
                     softStartFraction
                 );
