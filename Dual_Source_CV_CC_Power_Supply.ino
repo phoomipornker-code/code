@@ -10,12 +10,12 @@
  * BOOST:
  *   Input       : 650 W PV panel
  *   PV control  : constant-voltage MPPT at 42 V
- *   Output      : 58.0 V, 0..5.0 A
+ *   Output      : 58.0 V, 0..3.0 A
  *   PWM         : GPIO 27, 50 kHz
  *
  * FORWARD:
  *   Input       : 150 VDC
- *   Output      : 58.4 V, 0..5.0 A
+ *   Output      : 58.4 V, 0..3.0 A
  *   PWM         : GPIO 14, 67 kHz, maximum duty 45%
  *
  * This is power-supply firmware. Battery-presence, SOC, FULL/DONE,
@@ -61,7 +61,7 @@ SemaphoreHandle_t i2cMutex;
 // -------------------------------------------------------------------------
 const float BOOST_OUTPUT_VOLTAGE_V   = 58.0f;
 const float FORWARD_OUTPUT_VOLTAGE_V = 58.4f;
-const float OUTPUT_CURRENT_LIMIT_A   = 5.0f;
+const float OUTPUT_CURRENT_LIMIT_A   = 3.0f;
 const float PV_MPPT_VOLTAGE_V        = 42.0f;
 
 // -------------------------------------------------------------------------
@@ -1162,8 +1162,8 @@ static void TaskButtonsDisplay(void *parameter) {
 void setup() {
     Serial.begin(115200);
     Serial.printf("[BOOT] %s\n", FW_VERSION_TAG);
-    Serial.println("[BOOT] BOOST=58.0V/5A/42V-MPPT @50kHz");
-    Serial.println("[BOOT] FORWARD=58.4V/5A/DC150V @67kHz");
+    Serial.println("[BOOT] BOOST=58.0V/3A/42V-MPPT @50kHz");
+    Serial.println("[BOOT] FORWARD=58.4V/3A/DC150V @67kHz");
 
     pinMode(RELAY_PV_PIN, OUTPUT);
     pinMode(RELAY_DC_PIN, OUTPUT);
