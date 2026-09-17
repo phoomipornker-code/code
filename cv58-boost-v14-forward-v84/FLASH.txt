@@ -2,7 +2,6 @@
   cv58-boost-v14-forward-v84/cv58-boost-v14-forward-v84.ino
 
 Arduino IDE → Upload
-ต้องเห็น: [BOOT] cv58-boost-v14-forward-v98
-SoftStart ที่ ~53 V / I=0 จะไม่ FULL HOLD จาก ADS ~90 V
-ไม่ auto-restart จาก FULL ปลอม (กันจอ LCD กระพริบ)
-Forward FULL: V≥58.20 V และ I≤0.10 A ค้าง 15 s (หรือ V≥58.40 V และ I≤0.10 A ค้าง 5 s)
+ต้องเห็น: [BOOT] cv58-boost-v14-forward-v99
+ADS >62 V → ตัด PWM ทันที ค้าง 80 ms แล้ว STOP (ไม่ FULL HOLD)
+Serial อาจขึ้น AdsX เมื่อ Vbat คอลัมน์เป็น ~90 แต่ Vf ยัง ~53
