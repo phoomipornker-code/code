@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 #include <stdarg.h>
-const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v97";
+const char* FW_VERSION_TAG = "cv58-boost-v14-forward-v98";
 // Boost path frozen to proven field code: cv58-stability-v14-cv-stable (PV charge OK).
 // Forward: Simulink cascade PI — V PI (58.4) → Iref → I PI → Duty → PWM.
 // Near-full: taper Iref 3 A@55.2 → 0.35 A@58.2 so F-CV can still climb (v95 held 56 V).
@@ -62,8 +62,11 @@ const float CV_OVERSHOOT_BLEED_MARGIN_V = 0.15f; // dump duty above target+0.15
 const float CV_ABS_CEILING_MARGIN_V = 0.45f;     // PWM off (Fwd 58.85 — never 60 V)
 // ADS >62 V is fly-up/glitch. Field v95: I=0.31 A still charging, ads=83.17
 // tripped [STOP] CV ceiling FULL HOLD while filt=55.97. Only trust it if I collapsed.
+// Field v97: SoftStart I=0 at 53 V + ADS=90 → same FULL HOLD, then auto-restart
+// because filt < 54 V — LCD backlight on (FULL) / off (charge blank) every ~1 s.
 const float CV_ADS_FLYUP_IABS_MAX_A = 0.15f;
 const float CV_ADS_FLYUP_IFILT_MAX_A = 0.20f;
+const float CV_ADS_FLYUP_MIN_FILT_V = 55.20f;  // ignore 90 V ADS during SoftStart ~53 V
 const float RESTART_CHARGE_VOLTAGE = 54.0;
 // =========================================================================
 // Forward (AC) cascade PI  (Simulink: 58.4 − V_OUT → V-PI → Iref → I-PI → Duty)
@@ -224,6 +227,8 @@ volatile float ovp_trip_voltage = 0.0;
 volatile unsigned long ovp_trip_ms = 0;
 volatile bool system_ON = false;
 volatile bool charge_full_hold = false;
+volatile float charge_full_entry_filt = 0.0f;  // filt at FULL HOLD — block 53 V restart loop
+volatile bool fwd_saw_charge_i = false;
 volatile int active_duty_percent = 0;
 int raw_duty = 0;
 float duty_accumulator = 0.0;
@@ -325,25 +330,49 @@ static inline bool cvCurrentCollapsed() {
     return (i_bat_charge_abs < CV_ADS_FLYUP_IABS_MAX_A) &&
            (i_bat_charge_filt < CV_ADS_FLYUP_IFILT_MAX_A);
 }
+static inline bool cvInSoftStart() {
+    if (currentState == STATE_FORWARD) return forwardMode == FWD_SOFTSTART;
+    if (currentState == STATE_BOOST) return boostNewMode == BOOST_NEW_SOFTSTART;
+    return false;
+}
+static inline bool cvFiltInFlyupBand() {
+    const float filt = v_bat_filt;
+    return (filt >= CV_ADS_FLYUP_MIN_FILT_V) && (filt <= 62.0f);
+}
+static inline void latchChargeFullHold() {
+    charge_full_hold = true;
+    charge_full_entry_filt = v_bat_filt;
+}
+static inline void clearChargeFullHold() {
+    charge_full_hold = false;
+    charge_full_entry_filt = 0.0f;
+}
 static inline float cvSenseVoltage() {
     float v = max((float)v_bat, (float)v_bat_filt);
     const float ads = v_bat_ads;
     if (ads >= 35.0f && ads <= 62.0f) {
         v = max(v, ads);
-    } else if (raw_duty > 0 && ads > 62.0f && cvCurrentCollapsed()) {
+    } else if (raw_duty > 0 && ads > 62.0f &&
+               !cvInSoftStart() &&
+               cvCurrentCollapsed() &&
+               cvFiltInFlyupBand() &&
+               (currentState != STATE_FORWARD || fwd_saw_charge_i)) {
         v = max(v, ads);
     }
     return v;
 }
-// PWM-off FULL HOLD only if the pack is actually near CV, or current truly collapsed.
-// Lone ADS 83 V with filt~56 V and I~0.3 A is a mux glitch — do not HOLD.
+// PWM-off FULL HOLD only if the pack is actually near CV.
+// SoftStart I=0 at 53 V is not a fly-up — I never started (field v97 LCD flicker).
 static inline bool cvPeakIsRealPackCeiling(float vPeak, float cvTgt) {
+    (void)cvTgt;
+    if (cvInSoftStart()) return false;
     const float filt = v_bat_filt;
     const bool filtInPack = (filt >= 35.0f) && (filt <= 62.0f);
-    const bool packNearCv = filtInPack && (filt >= (cvTgt - 1.50f));
+    const bool packNearCv = filtInPack && cvFiltInFlyupBand();
     const bool peakInPack = (vPeak >= 35.0f) && (vPeak <= 62.0f);
     if (peakInPack && packNearCv) return true;
-    if (cvCurrentCollapsed()) return true;
+    if (cvCurrentCollapsed() && packNearCv &&
+        (currentState != STATE_FORWARD || fwd_saw_charge_i)) return true;
     return false;
 }
 static inline int boostEstimateDutyRaw(float vin, float vout, int maxDuty) {
@@ -455,7 +484,9 @@ static inline void printLiveTable(unsigned long now) {
         (fabsf(batI) < FWD_UNLOADED_I_A) && (dutyRaw > 30)) {
         n += snprintf(note + n, sizeof(note) - (size_t)n, "Icut ");
     }
-    if (v_bat_ads > TARGET_CV_VOLTAGE) {
+    if (v_bat_ads > 62.0f) {
+        n += snprintf(note + n, sizeof(note) - (size_t)n, "AdsX ");
+    } else if (v_bat_ads > TARGET_CV_VOLTAGE) {
         n += snprintf(note + n, sizeof(note) - (size_t)n, "CVhi ");
     }
     const unsigned long sec = now / 1000UL;
@@ -485,6 +516,7 @@ static inline void forwardNewResetOnEntry() {
     fwdCurrIntegrator = 0.0f;
     fwdCvEnterMs = 0;
     fwdCvExitMs = 0;
+    fwd_saw_charge_i = false;
 }
 int quantizeDutyWithDither(float duty_cmd, float *phase, int max_duty) {
     duty_cmd = constrain(duty_cmd, 0.0f, (float)max_duty);
@@ -523,7 +555,7 @@ static inline void disablePowerStage() {
 }
 static inline void forceSafeShutdown() {
     system_ON = false;
-    charge_full_hold = false;
+    clearChargeFullHold();
     disablePowerStage();
     lcd_force_refresh = true;  // restore LCD (standby / OVP) after charge blank
 }
@@ -813,7 +845,6 @@ void TaskSampleData(void * pvParameters) {
     unsigned long last_oc_fwd_bat_log_ms = 0;
     unsigned long last_oc_boost_pv_log_ms = 0;
     unsigned long fwd_unload_since_ms = 0;
-    bool fwd_saw_charge_i = false;
     for(;;) {
         unsigned long now = millis();
         if (!sensor_init_ok) {
@@ -1209,8 +1240,9 @@ void TaskSampleData(void * pvParameters) {
                 bool selected_input_ok =
                     (selectedChargeMode == USER_MODE_BOOST) ? (v_solar >= MIN_PV_VOLTAGE)
                                                             : (v_ac_in >= MIN_AC_VOLTAGE);
-                if ((v_bat_filt <= RESTART_CHARGE_VOLTAGE) && selected_input_ok) {
-                    charge_full_hold = false;
+                if ((v_bat_filt <= RESTART_CHARGE_VOLTAGE) && selected_input_ok &&
+                    (charge_full_entry_filt >= (RESTART_CHARGE_VOLTAGE + 2.0f))) {
+                    clearChargeFullHold();
                     if (ENABLE_EVENT_LOG) {
                         Serial.println("[INFO] Battery dropped to restart threshold. Charging resumed.");
                     }
@@ -1345,7 +1377,7 @@ void TaskSampleData(void * pvParameters) {
                     fwdVoltIntegrator = 0.0f;
                     fwdCurrIntegrator = 0.0f;
                     if (v_bat_filt <= RESTART_CHARGE_VOLTAGE && v_ac_in >= MIN_AC_VOLTAGE) {
-                        charge_full_hold = false;
+                        clearChargeFullHold();
                         forwardMode = FWD_CC;
                     }
                 } else {
@@ -1419,7 +1451,7 @@ void TaskSampleData(void * pvParameters) {
                                           vPeak, i_bat_charge_abs,
                                           (duty_accumulator * 100.0f) / 1023.0f);
                             system_ON = false;
-                            charge_full_hold = false;
+                            clearChargeFullHold();
                             disablePowerStage();
                             lcd_force_refresh = true;
                             fwd_unload_since_ms = 0;
@@ -1464,7 +1496,7 @@ void TaskSampleData(void * pvParameters) {
                                 if (fwd_full_condition_start_ms == 0) fwd_full_condition_start_ms = now;
                                 if (now - fwd_full_condition_start_ms >= needMs) {
                                     forwardMode = FWD_DONE;
-                                    charge_full_hold = true;
+                                    latchChargeFullHold();
                                     disablePowerStage();
                                     last_lcd_soft_resync_ms = 0;
                                     lcd_force_refresh = true;
@@ -1688,7 +1720,7 @@ void TaskSampleData(void * pvParameters) {
                         if (full_condition_start_ms == 0) full_condition_start_ms = now;
                         if (now - full_condition_start_ms >= FULL_CONFIRM_MS) {
                             boostNewMode = BOOST_NEW_DONE;
-                            charge_full_hold = true;
+                            latchChargeFullHold();
                             disablePowerStage();
                             last_lcd_soft_resync_ms = 0;
                             lcd_force_refresh = true;
@@ -1700,7 +1732,7 @@ void TaskSampleData(void * pvParameters) {
                 } else { // BOOST_NEW_DONE
                     duty_accumulator = 0.0f;
                     if (v_bat_filt <= RESTART_CHARGE_VOLTAGE && v_solar >= MIN_PV_VOLTAGE) {
-                        charge_full_hold = false;
+                        clearChargeFullHold();
                         boostNewMode = BOOST_NEW_CC_MPPT;
                         boostNewCurrIntegrator = 0.0f;
                         boostNewVoltIntegrator = 0.0f;
@@ -1748,7 +1780,8 @@ void TaskSampleData(void * pvParameters) {
             }
             duty_accumulator = constrain(duty_accumulator, 0.0, (float)allowed_max_duty);
             // Hard CV ceiling vs active target — do not let the pack fly to 60 V.
-            {
+            // Skip entirely during SoftStart: I=0 + ADS 90 V is EMI, not CV (field v97).
+            if (!cvInSoftStart()) {
                 const float vPeakNow = cvSenseVoltage();
                 const float cvTgt = (currentState == STATE_BOOST)
                                         ? BOOST_CV_TARGET_VOLTAGE
@@ -1763,7 +1796,7 @@ void TaskSampleData(void * pvParameters) {
                 }
                 if (vPeakNow >= ceilAt) {
                     if (realCeil) {
-                        charge_full_hold = true;
+                        latchChargeFullHold();
                         disablePowerStage();
                         last_lcd_soft_resync_ms = 0;
                         lcd_force_refresh = true;
@@ -1795,10 +1828,11 @@ void TaskSampleData(void * pvParameters) {
                                        ? BOOST_CV_TARGET_VOLTAGE
                                        : TARGET_CV_VOLTAGE;
             const float vStopLim = vStopTgt + HIGH_VOLTAGE_STOP_MARGIN_V;
-            if (vStop >= vStopLim && cvPeakIsRealPackCeiling(vStop, vStopTgt)) {
+            if (!cvInSoftStart() &&
+                vStop >= vStopLim && cvPeakIsRealPackCeiling(vStop, vStopTgt)) {
                 if (high_voltage_stop_start_ms == 0) high_voltage_stop_start_ms = now;
                 if (now - high_voltage_stop_start_ms >= HIGH_VOLTAGE_STOP_CONFIRM_MS) {
-                    charge_full_hold = true;
+                    latchChargeFullHold();
                     disablePowerStage();
                     last_lcd_soft_resync_ms = 0;
                     lcd_force_refresh = true;
@@ -1917,7 +1951,7 @@ void TaskLCDLoop(void * pvParameters) {
                 if (!stop_end_armed && (now - stop_held_since_ms >= STOP_HOLD_END_MS)) {
                     stop_end_armed = true;
                     system_ON = false;
-                    charge_full_hold = false;
+                    clearChargeFullHold();
                     lcd_force_refresh = true;
                     Serial.printf("[STOP] hold %lums end (%s)\n",
                                   (unsigned long)STOP_HOLD_END_MS,
@@ -1964,7 +1998,7 @@ void TaskLCDLoop(void * pvParameters) {
                 lcd_force_refresh = true;
             } else if (sensor_init_ok && bat_ok && selected_input_ok) {
                 system_ON = true;
-                charge_full_hold = false;
+                clearChargeFullHold();
                 lcd_show_no_power = false;
                 lcd_show_ovp_alert = false;
                 lcd_charge_blanked = false;   // force one blank on next draw
