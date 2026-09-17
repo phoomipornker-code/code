@@ -22,7 +22,7 @@
  * BMS-open and charge-restart logic from the old charger are removed.
  */
 
-const char *FW_VERSION_TAG = "forward-pi-ignore-run-vin-v5";
+const char *FW_VERSION_TAG = "forward-cascade-pi-quiet-3a-v4";
 
 // -------------------------------------------------------------------------
 // Hardware
@@ -82,7 +82,6 @@ const float DC_START_MIN_V       = 120.0f;
 const float DC_RUNNING_MIN_V     = 105.0f;
 const float DC_INPUT_MAX_V       = 180.0f;
 const float DC_INPUT_CURRENT_MAX_A = 2.5f;
-const bool FORWARD_IGNORE_VIN_WHILE_RUNNING = true;
 const unsigned long FORWARD_INPUT_GLITCH_HOLD_MS = 1500;
 
 // Output protection. This must remain above the 58.4 V regulation target.
@@ -385,14 +384,9 @@ static bool selectedInputRunningOkay() {
         return vPv >= PV_RUNNING_MIN_V &&
                fabsf(iPv) <= PV_INPUT_CURRENT_MAX_A;
     }
-    if (fabsf(iDc) > DC_INPUT_CURRENT_MAX_A) {
-        return false;
-    }
-    if (FORWARD_IGNORE_VIN_WHILE_RUNNING) {
-        return true;
-    }
     return vDc >= DC_RUNNING_MIN_V &&
-           vDc <= DC_INPUT_MAX_V;
+           vDc <= DC_INPUT_MAX_V &&
+           fabsf(iDc) <= DC_INPUT_CURRENT_MAX_A;
 }
 
 static void startSelectedPowerStage() {
@@ -522,8 +516,7 @@ static bool updateMeasurements() {
         }
         if (sampleNow - forwardInputGlitchSinceMs <
             FORWARD_INPUT_GLITCH_HOLD_MS) {
-            if (!FORWARD_IGNORE_VIN_WHILE_RUNNING &&
-                sampleNow - lastInputGlitchLogMs >= 1000) {
+            if (sampleNow - lastInputGlitchLogMs >= 1000) {
                 lastInputGlitchLogMs = sampleNow;
                 Serial.printf(
                     "[WARN] DC input ADC glitch %.1fV; holding %.1fV\n",
@@ -769,12 +762,9 @@ static void runForwardCascadePI(float dt, unsigned long now,
     // Filtered current keeps the PI quiet; raw current remains the fast guard.
     float controlCurrent = iOutFiltered;
     float fastCurrent = fmaxf(fabsf(iOut), iOutFiltered);
-    // Vin is validated before START only. During operation, noisy Vin
-    // samples must never freeze the voltage/current controller.
     bool freezeDutyUp =
-        !FORWARD_IGNORE_VIN_WHILE_RUNNING &&
-        (vDc < FWD_DC_HOLD_CLIMB_V ||
-         inputBadSinceMs != 0);
+        vDc < FWD_DC_HOLD_CLIMB_V ||
+        inputBadSinceMs != 0;
 
     // The 8-frame filter is intentionally quiet but delayed. Never wait for
     // it when the raw current has already reached the configured 3 A limit.
