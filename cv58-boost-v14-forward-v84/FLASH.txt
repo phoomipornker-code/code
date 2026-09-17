@@ -2,6 +2,6 @@
   cv58-boost-v14-forward-v84/cv58-boost-v14-forward-v84.ino
 
 Arduino IDE → Upload
-ต้องเห็น: [BOOT] cv58-boost-v14-forward-v99
-ADS >62 V → ตัด PWM ทันที ค้าง 80 ms แล้ว STOP (ไม่ FULL HOLD)
-Serial อาจขึ้น AdsX เมื่อ Vbat คอลัมน์เป็น ~90 แต่ Vf ยัง ~53
+ต้องเห็น: [BOOT] cv58-boost-v14-forward-v100
+ต้องมีกระแสจริงก่อนเข้า F-CC
+F-CC ที่ I=0 แล้ว AdsX จะ STOP ไม่ไล่ duty ซ้ำ
