@@ -1368,7 +1368,7 @@ void TaskSampleData(void * pvParameters) {
                     iCcMax = min(iCcMax, forwardIrefCapForVoltage(vPeak, v_bat_filt));
                     iCcMax = boostClampf(iCcMax, 0.0f, FWD_TARGET_CC_CURRENT);
 
-                    // Voltage PI holds CV on peak sense (pack or ADS fly-up). Over-CV → Iref down.
+                    // Voltage PI holds CV on pack sense (ADS 90 V glitch ignored). Over-CV → Iref down.
                     float vErr = TARGET_CV_VOLTAGE - vPeak;
                     if (vPeak > TARGET_CV_VOLTAGE) {
                         if (forwardMode != FWD_SOFTSTART && forwardMode != FWD_DONE) {
