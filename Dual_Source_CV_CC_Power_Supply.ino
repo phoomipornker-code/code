@@ -22,7 +22,7 @@
  * BMS-open and charge-restart logic from the old charger are removed.
  */
 
-const char *FW_VERSION_TAG = "v81-control-psu-quiet-v2";
+const char *FW_VERSION_TAG = "v81-control-psu-quiet-3a-v3";
 
 // -------------------------------------------------------------------------
 // Hardware
@@ -87,8 +87,8 @@ const unsigned long FORWARD_INPUT_GLITCH_HOLD_MS = 1500;
 // Output protection. This must remain above the 58.4 V regulation target.
 const float OUTPUT_OVP_TRIP_V    = 60.0f;
 const float OUTPUT_OVP_RELEASE_V = 58.0f;
-const float OUTPUT_OC_WARN_A     = OUTPUT_CURRENT_LIMIT_A + 0.25f;
-const float OUTPUT_OC_TRIP_A     = OUTPUT_CURRENT_LIMIT_A + 1.0f;
+const float OUTPUT_OC_WARN_A     = OUTPUT_CURRENT_LIMIT_A;
+const float OUTPUT_OC_TRIP_A     = OUTPUT_CURRENT_LIMIT_A + 0.60f;
 const unsigned long OUTPUT_OC_CONFIRM_MS = 100;
 const unsigned long INPUT_BAD_CONFIRM_MS = 1000;
 const unsigned long ADC_STALE_TIMEOUT_MS = 1000;
@@ -761,9 +761,21 @@ static void runForwardV81Controller(unsigned long now,
     // Match the quiet v81 behavior: regulation follows the filtered current.
     // Raw current is still used by applyOutputProtection() for fast safety.
     float controlCurrent = iOutFiltered;
+    float fastCurrent = fmaxf(fabsf(iOut), iOutFiltered);
     bool freezeDutyUp =
         vDc < FWD_DC_HOLD_CLIMB_V ||
         inputBadSinceMs != 0;
+
+    // The 8-frame filter is intentionally quiet but delayed. Never wait for
+    // it when the raw current has already reached the configured 3 A limit.
+    if (fastCurrent >= OUTPUT_CURRENT_LIMIT_A) {
+        activeCurrentReference = OUTPUT_CURRENT_LIMIT_A;
+        dutyAccumulator -=
+            2.0f +
+            (fastCurrent - OUTPUT_CURRENT_LIMIT_A) * 6.0f;
+        if (dutyAccumulator < 0.0f) dutyAccumulator = 0.0f;
+        return;
+    }
 
     if (forwardControlMode == FORWARD_SOFTSTART) {
         activeCurrentReference =
@@ -854,10 +866,10 @@ static void applyOutputProtection(unsigned long now) {
     }
 
     if (peakCurrent > OUTPUT_OC_WARN_A) {
-        // Controlled backoff from the field-proven firmware. A very large
-        // one-frame cut creates another low-frequency duty oscillation.
-        dutyAccumulator -= 2.0f +
-            (peakCurrent - OUTPUT_OC_WARN_A) * 3.0f;
+        // Fast raw-current guard. At 4 A this removes about 12 raw PWM
+        // counts per fresh ADS frame instead of waiting for the boxcar filter.
+        dutyAccumulator -= 4.0f +
+            (peakCurrent - OUTPUT_OC_WARN_A) * 8.0f;
         if (dutyAccumulator < 0.0f) dutyAccumulator = 0.0f;
     }
 
