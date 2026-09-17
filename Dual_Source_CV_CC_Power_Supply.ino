@@ -120,6 +120,10 @@ const float BOOST_DUTY_SLEW_DOWN = 10.0f;
 const float FORWARD_DUTY_SLEW_UP   = 2.0f;
 const float FORWARD_DUTY_SLEW_DOWN = 12.0f;
 
+// Soft-start ramps both the current request and the maximum allowed duty.
+const unsigned long BOOST_SOFTSTART_MS   = 2500;
+const unsigned long FORWARD_SOFTSTART_MS = 5000;
+
 // -------------------------------------------------------------------------
 // Calibration retained from the old working firmware
 // -------------------------------------------------------------------------
@@ -174,6 +178,8 @@ volatile float iOutFiltered = 0.0f;
 volatile float activeCurrentReference = 0.0f;
 volatile int activeDutyRaw = 0;
 volatile int activeDutyPercent = 0;
+volatile bool softStartActive = false;
+volatile int softStartPercent = 0;
 volatile unsigned long lastAdcSampleMs = 0;
 
 float currentOffsetPv  = DEFAULT_OFFSET_I_SOLAR;
@@ -188,6 +194,7 @@ float forwardCurrIntegrator = 0.0f;
 float dutyAccumulator = 0.0f;
 
 unsigned long lastControlUs = 0;
+unsigned long softStartBeginMs = 0;
 unsigned long inputBadSinceMs = 0;
 unsigned long outputOcSinceMs = 0;
 
@@ -289,6 +296,9 @@ static void resetControllers() {
     activeCurrentReference = 0.0f;
     dutyAccumulator = 0.0f;
     lastControlUs = 0;
+    softStartBeginMs = 0;
+    softStartActive = false;
+    softStartPercent = 0;
     inputBadSinceMs = 0;
     outputOcSinceMs = 0;
 }
@@ -350,6 +360,9 @@ static void startSelectedPowerStage() {
 
     vTaskDelay(pdMS_TO_TICKS(200));
     resetControllers();
+    softStartBeginMs = millis();
+    softStartActive = true;
+    softStartPercent = 0;
     powerStageActive = true;
 }
 
@@ -455,8 +468,8 @@ static bool updateMeasurements() {
 // -------------------------------------------------------------------------
 // Controllers
 // -------------------------------------------------------------------------
-static float runBoostController(float dt) {
-    // Output-voltage loop: produces 0..5 A.
+static float runBoostController(float dt, float currentLimit) {
+    // Output-voltage loop: produces 0..currentLimit A.
     float cvCurrent = runPI(
         BOOST_OUTPUT_VOLTAGE_V - vOutFiltered,
         BOOST_VOLT_KP,
@@ -464,7 +477,7 @@ static float runBoostController(float dt) {
         dt,
         &boostVoltIntegrator,
         0.0f,
-        OUTPUT_CURRENT_LIMIT_A
+        currentLimit
     );
 
     /*
@@ -479,11 +492,11 @@ static float runBoostController(float dt) {
         dt,
         &boostMpptIntegrator,
         0.0f,
-        OUTPUT_CURRENT_LIMIT_A
+        currentLimit
     );
 
     activeCurrentReference =
-        fminf(cvCurrent, fminf(mpptCurrent, OUTPUT_CURRENT_LIMIT_A));
+        fminf(cvCurrent, fminf(mpptCurrent, currentLimit));
 
     // Inner output-current PI returns a 10-bit PWM target.
     return runPI(
@@ -497,8 +510,8 @@ static float runBoostController(float dt) {
     );
 }
 
-static float runForwardController(float dt) {
-    // Outer voltage PI: CV is a 0..5 A current request.
+static float runForwardController(float dt, float currentLimit) {
+    // Outer voltage PI: CV is a 0..currentLimit A current request.
     activeCurrentReference = runPI(
         FORWARD_OUTPUT_VOLTAGE_V - vOutFiltered,
         FORWARD_VOLT_KP,
@@ -506,7 +519,7 @@ static float runForwardController(float dt) {
         dt,
         &forwardVoltIntegrator,
         0.0f,
-        OUTPUT_CURRENT_LIMIT_A
+        currentLimit
     );
 
     // Inner current PI returns normalized duty 0..0.45.
@@ -592,6 +605,7 @@ static void TaskControl(void *parameter) {
 
         if (powerStageActive && outputEnabled &&
             faultCode == FAULT_NONE) {
+            unsigned long controlNowMs = millis();
             unsigned long nowUs = micros();
             float dt = 0.020f;
             if (lastControlUs != 0) {
@@ -602,9 +616,23 @@ static void TaskControl(void *parameter) {
 
             float dutyTarget;
             int maximumDuty;
+            unsigned long softStartDuration =
+                selectedMode == MODE_BOOST
+                    ? BOOST_SOFTSTART_MS
+                    : FORWARD_SOFTSTART_MS;
+            float softStartFraction = clampFloat(
+                (float)(controlNowMs - softStartBeginMs) /
+                    (float)softStartDuration,
+                0.0f,
+                1.0f
+            );
+            softStartPercent =
+                (int)lroundf(softStartFraction * 100.0f);
+            float softCurrentLimit =
+                OUTPUT_CURRENT_LIMIT_A * softStartFraction;
 
             if (selectedMode == MODE_BOOST) {
-                dutyTarget = runBoostController(dt);
+                dutyTarget = runBoostController(dt, softCurrentLimit);
                 maximumDuty = MAX_DUTY_BOOST;
                 dutyAccumulator = applySlew(
                     dutyTarget,
@@ -613,7 +641,7 @@ static void TaskControl(void *parameter) {
                     BOOST_DUTY_SLEW_DOWN
                 );
             } else {
-                dutyTarget = runForwardController(dt);
+                dutyTarget = runForwardController(dt, softCurrentLimit);
                 maximumDuty = MAX_DUTY_FORWARD;
                 dutyAccumulator = applySlew(
                     dutyTarget,
@@ -623,7 +651,23 @@ static void TaskControl(void *parameter) {
                 );
             }
 
-            applyOutputProtection(now);
+            // Independent linear duty envelope during startup.
+            int softMaximumDuty =
+                (int)floorf(maximumDuty * softStartFraction);
+            if (dutyAccumulator > softMaximumDuty) {
+                dutyAccumulator = (float)softMaximumDuty;
+            }
+
+            if (softStartActive && softStartFraction >= 1.0f) {
+                softStartActive = false;
+                softStartPercent = 100;
+                Serial.printf(
+                    "[SOFTSTART] %s complete\n",
+                    selectedMode == MODE_BOOST ? "BOOST" : "FORWARD"
+                );
+            }
+
+            applyOutputProtection(controlNowMs);
 
             if (faultCode == FAULT_NONE) {
                 dutyAccumulator =
@@ -654,7 +698,8 @@ static void TaskControl(void *parameter) {
 
             Serial.printf(
                 "[%s/%s] Vin=%.1fV Iin=%.2fA "
-                "Vout=%.2fV Iout=%.2fA Iref=%.2fA Duty=%d%% Fault=%s\n",
+                "Vout=%.2fV Iout=%.2fA Iref=%.2fA "
+                "Duty=%d%% Soft=%d%% Fault=%s\n",
                 selectedMode == MODE_BOOST ? "BOOST" : "FORWARD",
                 outputEnabled ? "ON" : "OFF",
                 inputVoltage,
@@ -663,6 +708,7 @@ static void TaskControl(void *parameter) {
                 iOutFiltered,
                 activeCurrentReference,
                 activeDutyPercent,
+                softStartPercent,
                 faultName(faultCode)
             );
         }
@@ -695,7 +741,9 @@ static void drawDisplay() {
         0,
         "%s %s D:%2d%%",
         selectedMode == MODE_BOOST ? "BOOST" : "FORWARD",
-        outputEnabled ? "ON" : "OFF",
+        outputEnabled
+            ? (softStartActive ? "SOFT" : "ON")
+            : "OFF",
         activeDutyPercent
     );
     lcdPrintLineFmt(1, "IN :%5.1fV %4.2fA", inputVoltage, inputCurrent);
