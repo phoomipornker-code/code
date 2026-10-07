@@ -22,7 +22,7 @@
  * BMS-open and charge-restart logic from the old charger are removed.
  */
 
-const char *FW_VERSION_TAG = "boost-dual-pi-vin40-v7";
+const char *FW_VERSION_TAG = "boost-pv-pi-tuned-v8";
 
 // -------------------------------------------------------------------------
 // Hardware
@@ -103,8 +103,8 @@ const float BOOST_CURR_DELTA_MIN = -35.0f;
 const float BOOST_CURR_DELTA_MAX = 45.0f;
 const float BOOST_VOLT_KP = 17.0f;
 const float BOOST_VOLT_KI = 1.0f;
-const float BOOST_PV_KP = 10.0f;
-const float BOOST_PV_KI = 40.0f;
+const float BOOST_PV_KP = 1.2f;
+const float BOOST_PV_KI = 2.0f;
 const float BOOST_CV_NEAR_BAND_V = 0.35f;
 const float BOOST_CV_ENTRY_V = BOOST_OUTPUT_VOLTAGE_V - 0.50f;
 const float BOOST_CV_EXIT_V = BOOST_OUTPUT_VOLTAGE_V - 1.20f;
