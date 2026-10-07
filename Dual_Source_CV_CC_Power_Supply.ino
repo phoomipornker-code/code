@@ -22,7 +22,7 @@
  * BMS-open and charge-restart logic from the old charger are removed.
  */
 
-const char *FW_VERSION_TAG = "forward-cascade-pi-quiet-3a-v4";
+const char *FW_VERSION_TAG = "boost-cv-pv-limit-v5";
 
 // -------------------------------------------------------------------------
 // Hardware
@@ -588,6 +588,47 @@ static int estimateForwardDutyRaw() {
     );
 }
 
+static float updateBoostPvCurrentLimit(unsigned long now) {
+    if (boostLastMpptUpdateMs == 0 ||
+        now - boostLastMpptUpdateMs >= BOOST_MPPT_UPDATE_MS) {
+        boostLastMpptUpdateMs = now;
+        float pvError = vPv - PV_MPPT_VOLTAGE_V;
+        if (pvError > BOOST_MPPT_DEADBAND_V) {
+            boostMpptCurrentReference +=
+                BOOST_MPPT_IREF_STEP_UP_A;
+        } else if (pvError < -BOOST_MPPT_DEADBAND_V) {
+            boostMpptCurrentReference -=
+                BOOST_MPPT_IREF_STEP_DOWN_A;
+        }
+        boostMpptCurrentReference = clampFloat(
+            boostMpptCurrentReference,
+            0.0f,
+            OUTPUT_CURRENT_LIMIT_A
+        );
+    }
+
+    float pvCurrentLimit = boostMpptCurrentReference;
+
+    // Keep the PV-voltage limiter active in both CC and CV. This immediate
+    // backoff complements the slower 100 ms MPPT current adjustment.
+    if (vPv < PV_MPPT_VOLTAGE_V - BOOST_MPPT_DEADBAND_V) {
+        float pvDeficit =
+            PV_MPPT_VOLTAGE_V - BOOST_MPPT_DEADBAND_V - vPv;
+        float scale = clampFloat(
+            1.0f - pvDeficit * 0.35f,
+            0.15f,
+            1.0f
+        );
+        pvCurrentLimit *= scale;
+    }
+
+    return clampFloat(
+        pvCurrentLimit,
+        0.0f,
+        OUTPUT_CURRENT_LIMIT_A
+    );
+}
+
 static void runBoostV81Controller(float dt, unsigned long now,
                                   float softStartFraction) {
     float controlCurrent = fmaxf(fabsf(iOut), iOutFiltered);
@@ -616,37 +657,7 @@ static void runBoostV81Controller(float dt, unsigned long now,
     }
 
     if (boostControlMode == BOOST_CC_MPPT) {
-        if (boostLastMpptUpdateMs == 0 ||
-            now - boostLastMpptUpdateMs >= BOOST_MPPT_UPDATE_MS) {
-            boostLastMpptUpdateMs = now;
-            float pvError = vPv - PV_MPPT_VOLTAGE_V;
-            if (pvError > BOOST_MPPT_DEADBAND_V) {
-                boostMpptCurrentReference +=
-                    BOOST_MPPT_IREF_STEP_UP_A;
-            } else if (pvError < -BOOST_MPPT_DEADBAND_V) {
-                boostMpptCurrentReference -=
-                    BOOST_MPPT_IREF_STEP_DOWN_A;
-            }
-            boostMpptCurrentReference = clampFloat(
-                boostMpptCurrentReference,
-                0.0f,
-                OUTPUT_CURRENT_LIMIT_A
-            );
-        }
-
-        activeCurrentReference =
-            fminf(OUTPUT_CURRENT_LIMIT_A,
-                  boostMpptCurrentReference);
-
-        if (vPv < PV_MPPT_VOLTAGE_V - 1.0f) {
-            float scale = clampFloat(
-                1.0f -
-                    (PV_MPPT_VOLTAGE_V - 1.0f - vPv) * 0.35f,
-                0.15f,
-                1.0f
-            );
-            activeCurrentReference *= scale;
-        }
+        activeCurrentReference = updateBoostPvCurrentLimit(now);
 
         float currentError =
             activeCurrentReference - controlCurrent;
@@ -688,6 +699,7 @@ static void runBoostV81Controller(float dt, unsigned long now,
         fmaxf(vOut, vOutFiltered);
     float voltageError =
         BOOST_OUTPUT_VOLTAGE_V - boostControlVoltage;
+    float pvCurrentLimit = updateBoostPvCurrentLimit(now);
     float requestedCurrent = runPI(
         voltageError,
         BOOST_VOLT_KP,
@@ -695,7 +707,7 @@ static void runBoostV81Controller(float dt, unsigned long now,
         dt,
         &boostVoltIntegrator,
         0.0f,
-        OUTPUT_CURRENT_LIMIT_A
+        pvCurrentLimit
     );
     boostCvCurrentReference = applySlew(
         requestedCurrent,
@@ -703,6 +715,9 @@ static void runBoostV81Controller(float dt, unsigned long now,
         BOOST_CV_IREF_SLEW_A,
         BOOST_CV_IREF_SLEW_A
     );
+    if (boostCvCurrentReference > pvCurrentLimit) {
+        boostCvCurrentReference = pvCurrentLimit;
+    }
     activeCurrentReference =
         clampFloat(boostCvCurrentReference,
                    0.0f, OUTPUT_CURRENT_LIMIT_A);
