@@ -22,7 +22,7 @@
  * BMS-open and charge-restart logic from the old charger are removed.
  */
 
-const char *FW_VERSION_TAG = "boost-dual-pi-diagram-v6";
+const char *FW_VERSION_TAG = "boost-dual-pi-vin40-v7";
 
 // -------------------------------------------------------------------------
 // Hardware
@@ -108,6 +108,8 @@ const float BOOST_PV_KI = 40.0f;
 const float BOOST_CV_NEAR_BAND_V = 0.35f;
 const float BOOST_CV_ENTRY_V = BOOST_OUTPUT_VOLTAGE_V - 0.50f;
 const float BOOST_CV_EXIT_V = BOOST_OUTPUT_VOLTAGE_V - 1.20f;
+const float BOOST_PV_FORCE_CONTROL_V = 40.0f;
+const float BOOST_PV_CV_RELEASE_V = 42.0f;
 const float BOOST_DUTY_SLEW_UP   = 2.0f;
 const float BOOST_DUTY_SLEW_DOWN = 4.0f;
 
@@ -623,13 +625,15 @@ static void runBoostV81Controller(float dt, unsigned long now,
         OUTPUT_CURRENT_LIMIT_A
     );
 
-    // Simulink Relay/Switch behavior: enter CV near 58 V and return to the
-    // 42 V input-voltage controller immediately below the lower threshold.
+    // Enter CV only after both Vout and PV input have recovered. While in CV,
+    // force the switch back to the Vin PI if the panel collapses below 40 V.
     if (boostControlMode == BOOST_CC_MPPT &&
-        boostControlVoltage >= BOOST_CV_ENTRY_V) {
+        boostControlVoltage >= BOOST_CV_ENTRY_V &&
+        vPv >= BOOST_PV_CV_RELEASE_V) {
         boostControlMode = BOOST_CV;
     } else if (boostControlMode == BOOST_CV &&
-               vOutFiltered <= BOOST_CV_EXIT_V) {
+               (vPv < BOOST_PV_FORCE_CONTROL_V ||
+                vOutFiltered <= BOOST_CV_EXIT_V)) {
         boostControlMode = BOOST_CC_MPPT;
     }
 
