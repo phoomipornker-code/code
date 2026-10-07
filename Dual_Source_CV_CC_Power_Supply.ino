@@ -22,7 +22,7 @@
  * BMS-open and charge-restart logic from the old charger are removed.
  */
 
-const char *FW_VERSION_TAG = "boost-cv-pv-limit-v5";
+const char *FW_VERSION_TAG = "boost-dual-pi-diagram-v6";
 
 // -------------------------------------------------------------------------
 // Hardware
@@ -98,20 +98,16 @@ const unsigned long ADC_STALE_TIMEOUT_MS = 1000;
 // -------------------------------------------------------------------------
 // Boost: SoftStart -> CC/MPPT -> CV (FULL/DONE and battery taper removed)
 const float BOOST_CURR_KP = 14.0f;
-const float BOOST_CURR_KI = 55.0f;
+const float BOOST_CURR_KI = 16.0f;
 const float BOOST_CURR_DELTA_MIN = -35.0f;
 const float BOOST_CURR_DELTA_MAX = 45.0f;
-const float BOOST_VOLT_KP = 0.85f;
-const float BOOST_VOLT_KI = 0.45f;
-const float BOOST_CV_IREF_SLEW_A = 0.08f;
+const float BOOST_VOLT_KP = 17.0f;
+const float BOOST_VOLT_KI = 1.0f;
+const float BOOST_PV_KP = 10.0f;
+const float BOOST_PV_KI = 40.0f;
 const float BOOST_CV_NEAR_BAND_V = 0.35f;
 const float BOOST_CV_ENTRY_V = BOOST_OUTPUT_VOLTAGE_V - 0.50f;
 const float BOOST_CV_EXIT_V = BOOST_OUTPUT_VOLTAGE_V - 1.20f;
-const unsigned long BOOST_CV_EXIT_CONFIRM_MS = 5000;
-const unsigned long BOOST_MPPT_UPDATE_MS = 100;
-const float BOOST_MPPT_DEADBAND_V = 0.20f;
-const float BOOST_MPPT_IREF_STEP_UP_A = 0.03f;
-const float BOOST_MPPT_IREF_STEP_DOWN_A = 0.08f;
 const float BOOST_DUTY_SLEW_UP   = 2.0f;
 const float BOOST_DUTY_SLEW_DOWN = 4.0f;
 
@@ -217,21 +213,14 @@ float currentOffsetOut = DEFAULT_OFFSET_I_OUT;
 
 float boostCurrIntegrator = 0.0f;
 float boostVoltIntegrator = 0.0f;
+float boostPvIntegrator = 0.0f;
 float forwardVoltIntegrator = 0.0f;
 float forwardCurrIntegrator = 0.0f;
 float dutyAccumulator = 0.0f;
-float boostPvReference = PV_MPPT_VOLTAGE_V;
-float boostLastPower = 0.0f;
-float boostLastPvVoltage = 0.0f;
-float boostMpptCurrentReference = 1.0f;
-float boostCvCurrentReference = 0.0f;
-int boostMpptDirection = 1;
 float lastGoodDcVoltage = NAN;
 
 unsigned long lastControlUs = 0;
 unsigned long softStartBeginMs = 0;
-unsigned long boostLastMpptUpdateMs = 0;
-unsigned long boostCvExitSinceMs = 0;
 unsigned long forwardInputGlitchSinceMs = 0;
 unsigned long lastInputGlitchLogMs = 0;
 unsigned long inputBadSinceMs = 0;
@@ -329,22 +318,15 @@ static const char *faultName(FaultCode fault) {
 static void resetControllers() {
     boostCurrIntegrator = 0.0f;
     boostVoltIntegrator = 0.0f;
+    boostPvIntegrator = 0.0f;
     forwardVoltIntegrator = 0.0f;
     forwardCurrIntegrator = 0.0f;
     boostControlMode = BOOST_SOFTSTART;
     forwardControlMode = FORWARD_SOFTSTART;
     activeCurrentReference = 0.0f;
-    boostPvReference = PV_MPPT_VOLTAGE_V;
-    boostLastPower = 0.0f;
-    boostLastPvVoltage = vPv;
-    boostMpptCurrentReference = 1.0f;
-    boostCvCurrentReference = 0.0f;
-    boostMpptDirection = 1;
     dutyAccumulator = 0.0f;
     lastControlUs = 0;
     softStartBeginMs = 0;
-    boostLastMpptUpdateMs = 0;
-    boostCvExitSinceMs = 0;
     softStartActive = false;
     softStartPercent = 0;
     inputBadSinceMs = 0;
@@ -588,47 +570,6 @@ static int estimateForwardDutyRaw() {
     );
 }
 
-static float updateBoostPvCurrentLimit(unsigned long now) {
-    if (boostLastMpptUpdateMs == 0 ||
-        now - boostLastMpptUpdateMs >= BOOST_MPPT_UPDATE_MS) {
-        boostLastMpptUpdateMs = now;
-        float pvError = vPv - PV_MPPT_VOLTAGE_V;
-        if (pvError > BOOST_MPPT_DEADBAND_V) {
-            boostMpptCurrentReference +=
-                BOOST_MPPT_IREF_STEP_UP_A;
-        } else if (pvError < -BOOST_MPPT_DEADBAND_V) {
-            boostMpptCurrentReference -=
-                BOOST_MPPT_IREF_STEP_DOWN_A;
-        }
-        boostMpptCurrentReference = clampFloat(
-            boostMpptCurrentReference,
-            0.0f,
-            OUTPUT_CURRENT_LIMIT_A
-        );
-    }
-
-    float pvCurrentLimit = boostMpptCurrentReference;
-
-    // Keep the PV-voltage limiter active in both CC and CV. This immediate
-    // backoff complements the slower 100 ms MPPT current adjustment.
-    if (vPv < PV_MPPT_VOLTAGE_V - BOOST_MPPT_DEADBAND_V) {
-        float pvDeficit =
-            PV_MPPT_VOLTAGE_V - BOOST_MPPT_DEADBAND_V - vPv;
-        float scale = clampFloat(
-            1.0f - pvDeficit * 0.35f,
-            0.15f,
-            1.0f
-        );
-        pvCurrentLimit *= scale;
-    }
-
-    return clampFloat(
-        pvCurrentLimit,
-        0.0f,
-        OUTPUT_CURRENT_LIMIT_A
-    );
-}
-
 static void runBoostV81Controller(float dt, unsigned long now,
                                   float softStartFraction) {
     float controlCurrent = fmaxf(fabsf(iOut), iOutFiltered);
@@ -656,80 +597,56 @@ static void runBoostV81Controller(float dt, unsigned long now,
         return;
     }
 
-    if (boostControlMode == BOOST_CC_MPPT) {
-        activeCurrentReference = updateBoostPvCurrentLimit(now);
-
-        float currentError =
-            activeCurrentReference - controlCurrent;
-        float dutyDelta = runPI(
-            currentError,
-            BOOST_CURR_KP,
-            BOOST_CURR_KI,
-            dt,
-            &boostCurrIntegrator,
-            BOOST_CURR_DELTA_MIN,
-            BOOST_CURR_DELTA_MAX
-        );
-        if (currentError > 0.8f &&
-            dutyAccumulator < 280.0f) {
-            dutyDelta = fmaxf(dutyDelta, 3.0f);
-        }
-
-        dutyAccumulator = applySlew(
-            dutyAccumulator + dutyDelta,
-            dutyAccumulator,
-            BOOST_DUTY_SLEW_UP,
-            BOOST_DUTY_SLEW_DOWN
-        );
-
-        if (fmaxf(vOut, vOutFiltered) >= BOOST_CV_ENTRY_V) {
-            boostControlMode = BOOST_CV;
-            boostVoltIntegrator = 0.0f;
-            boostCurrIntegrator = 0.0f;
-            boostCvCurrentReference =
-                clampFloat(controlCurrent, 0.0f,
-                           OUTPUT_CURRENT_LIMIT_A);
-            boostCvExitSinceMs = 0;
-        }
-        return;
-    }
-
-    // Continuous CV mode: unlike the charger, there is no FULL/DONE state.
     float boostControlVoltage =
         fmaxf(vOut, vOutFiltered);
     float voltageError =
         BOOST_OUTPUT_VOLTAGE_V - boostControlVoltage;
-    float pvCurrentLimit = updateBoostPvCurrentLimit(now);
-    float requestedCurrent = runPI(
+    float cvCurrentReference = runPI(
         voltageError,
         BOOST_VOLT_KP,
         BOOST_VOLT_KI,
         dt,
         &boostVoltIntegrator,
         0.0f,
-        pvCurrentLimit
+        OUTPUT_CURRENT_LIMIT_A
     );
-    boostCvCurrentReference = applySlew(
-        requestedCurrent,
-        boostCvCurrentReference,
-        BOOST_CV_IREF_SLEW_A,
-        BOOST_CV_IREF_SLEW_A
+
+    // The lower summing block in the diagram is Vin - 42 V.
+    float pvVoltageError = vPv - PV_MPPT_VOLTAGE_V;
+    float pvCurrentReference = runPI(
+        pvVoltageError,
+        BOOST_PV_KP,
+        BOOST_PV_KI,
+        dt,
+        &boostPvIntegrator,
+        0.0f,
+        OUTPUT_CURRENT_LIMIT_A
     );
-    if (boostCvCurrentReference > pvCurrentLimit) {
-        boostCvCurrentReference = pvCurrentLimit;
+
+    // Simulink Relay/Switch behavior: enter CV near 58 V and return to the
+    // 42 V input-voltage controller immediately below the lower threshold.
+    if (boostControlMode == BOOST_CC_MPPT &&
+        boostControlVoltage >= BOOST_CV_ENTRY_V) {
+        boostControlMode = BOOST_CV;
+    } else if (boostControlMode == BOOST_CV &&
+               vOutFiltered <= BOOST_CV_EXIT_V) {
+        boostControlMode = BOOST_CC_MPPT;
     }
+
     activeCurrentReference =
-        clampFloat(boostCvCurrentReference,
-                   0.0f, OUTPUT_CURRENT_LIMIT_A);
+        boostControlMode == BOOST_CV
+            ? cvCurrentReference
+            : pvCurrentReference;
 
     bool nearVoltage =
+        boostControlMode == BOOST_CV &&
         fabsf(voltageError) <= BOOST_CV_NEAR_BAND_V;
     float currentError =
         activeCurrentReference - controlCurrent;
     float dutyDelta = runPI(
         currentError,
-        BOOST_CURR_KP * (nearVoltage ? 0.55f : 0.85f),
-        BOOST_CURR_KI * (nearVoltage ? 0.45f : 0.70f),
+        BOOST_CURR_KP,
+        BOOST_CURR_KI,
         dt,
         &boostCurrIntegrator,
         nearVoltage ? -8.0f : BOOST_CURR_DELTA_MIN,
@@ -738,11 +655,13 @@ static void runBoostV81Controller(float dt, unsigned long now,
     float stepLimit = nearVoltage ? 0.8f : 2.5f;
     dutyDelta = clampFloat(dutyDelta, -stepLimit, stepLimit);
 
-    if (boostControlVoltage >= BOOST_OUTPUT_VOLTAGE_V - 0.10f &&
+    if (boostControlMode == BOOST_CV &&
+        boostControlVoltage >= BOOST_OUTPUT_VOLTAGE_V - 0.10f &&
         dutyDelta > 0.0f) {
         dutyDelta = 0.0f;
     }
-    if (boostControlVoltage > BOOST_OUTPUT_VOLTAGE_V) {
+    if (boostControlMode == BOOST_CV &&
+        boostControlVoltage > BOOST_OUTPUT_VOLTAGE_V) {
         dutyDelta -=
             0.8f +
             (boostControlVoltage - BOOST_OUTPUT_VOLTAGE_V) * 4.0f;
@@ -755,21 +674,6 @@ static void runBoostV81Controller(float dt, unsigned long now,
         nearVoltage ? 0.8f : 2.5f,
         nearVoltage ? 2.0f : 4.0f
     );
-
-    if (vOutFiltered <= BOOST_CV_EXIT_V) {
-        if (boostCvExitSinceMs == 0) {
-            boostCvExitSinceMs = now;
-        }
-        if (now - boostCvExitSinceMs >=
-            BOOST_CV_EXIT_CONFIRM_MS) {
-            boostControlMode = BOOST_CC_MPPT;
-            boostVoltIntegrator = 0.0f;
-            boostCurrIntegrator = 0.0f;
-            boostCvExitSinceMs = 0;
-        }
-    } else {
-        boostCvExitSinceMs = 0;
-    }
 }
 
 static void runForwardCascadePI(float dt, unsigned long now,
